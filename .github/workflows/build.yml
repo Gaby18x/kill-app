@@ -14,16 +14,16 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconfirm --windowed --name KillClip --collect-all imageio_ffmpeg killclip.py
+      - run: pyinstaller --noconfirm --windowed --name KillApp --collect-all imageio_ffmpeg killclip.py
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: KillClip-Setup
-          path: installer/KillClip-Setup.exe
+          name: KillApp-Setup
+          path: installer/KillApp-Setup.exe
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: KillClip Installer
-          files: installer/KillClip-Setup.exe
+          name: Kill App Installer
+          files: installer/KillApp-Setup.exe

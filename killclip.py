@@ -1,4 +1,4 @@
-"""KillClip - schneidet automatisch Kill-Clips aus GTA/FiveM-Aufnahmen.
+"""Kill App - schneidet automatisch Kill-Clips aus GTA/FiveM-Aufnahmen.
 
 Erkennt den roten Kill-Hitmarker in der Bildmitte, legt pro Kill einen Clip
 (Standard: 4 s davor, 2 s danach) an und exportiert mit FFmpeg.
@@ -114,7 +114,7 @@ def fmt(t):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("KillClip")
+        self.title("Kill App")
         self.geometry("1200x760")
         self.ffmpeg = find_ffmpeg()
         self.path = None

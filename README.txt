@@ -1,4 +1,4 @@
-KillClip - Installation (Windows)
+Kill App - Installation (Windows)
 1. Python 3.10+ installieren (python.org, Haken bei "Add to PATH").
 2. In diesem Ordner: pip install -r requirements.txt
 3. Starten: start.bat (oder: python killclip.py)

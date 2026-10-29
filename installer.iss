@@ -1,25 +1,25 @@
 [Setup]
-AppName=KillClip
+AppName=Kill App
 AppVersion=1.0
-DefaultDirName={autopf}\KillClip
-DefaultGroupName=KillClip
+DefaultDirName={autopf}\Kill App
+DefaultGroupName=Kill App
 OutputDir=installer
-OutputBaseFilename=KillClip-Setup
+OutputBaseFilename=KillApp-Setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
-UninstallDisplayIcon={app}\KillClip.exe
+UninstallDisplayIcon={app}\KillApp.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "Desktop-Verknüpfung erstellen"; GroupDescription: "Zusätzliche Symbole:"
 
 [Files]
-Source: "dist\KillClip\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+Source: "dist\KillApp\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 [Icons]
-Name: "{group}\KillClip"; Filename: "{app}\KillClip.exe"
-Name: "{autodesktop}\KillClip"; Filename: "{app}\KillClip.exe"; Tasks: desktopicon
+Name: "{group}\Kill App"; Filename: "{app}\KillApp.exe"
+Name: "{autodesktop}\Kill App"; Filename: "{app}\KillApp.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\KillClip.exe"; Description: "KillClip starten"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\KillApp.exe"; Description: "Kill App starten"; Flags: nowait postinstall skipifsilent
