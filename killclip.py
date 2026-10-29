@@ -14,6 +14,11 @@ from PIL import Image, ImageTk
 # ----------------------------------------------------------------- Kern ----
 
 
+def resource(*parts):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
 def find_ffmpeg():
     exe = shutil.which("ffmpeg")
     if exe:
@@ -25,56 +30,148 @@ def find_ffmpeg():
         return None
 
 
-def red_pixels(roi, diff):
-    """Anzahl stark roter Pixel (R deutlich ueber G und B)."""
+NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Server-Profile. kind "notify": Kill-Benachrichtigung des Servers (lila "Information"-Box),
+# kind "xhit": nur roter Hitmarker (X) in der Bildmitte.
+PROFILES = {
+    "Bruder (Kill-Notify)": {"kind": "notify", "template": ("profiles", "bruder_notify.png"),
+                             "header": (10, 32, 55, 145)},
+    "Standard (roter X)": {"kind": "xhit"},
+}
+
+_HALF = 60
+_YY, _XX = np.mgrid[-_HALF:_HALF, -_HALF:_HALF]
+_D = np.hypot(_XX, _YY)
+_INNER = (_D >= 4) & (_D <= 28)
+_OUTER = _D > 28
+_QUADS = [(_XX > 0) & (_YY > 0), (_XX < 0) & (_YY > 0), (_XX > 0) & (_YY < 0), (_XX < 0) & (_YY < 0)]
+
+
+def is_hitmarker(roi, diff=40, qmin=4):
+    """roi: 120x120 BGR. Rotes X: alle vier Quadranten um die Mitte rot, aussen herum kaum Rot."""
     a = roi.astype(np.int16)
     b, g, r = a[..., 0], a[..., 1], a[..., 2]
-    return int(((r > 140) & (r - np.maximum(g, b) > diff)).sum())
+    m = (r > 140) & (r - np.maximum(g, b) > diff)
+    ins = m & _INNER
+    if min(int((ins & q).sum()) for q in _QUADS) < qmin:
+        return False
+    return int((m & _OUTER).sum()) <= 0.5 * int(ins.sum()) + 6
 
 
-def roi_of(frame, h):
-    half = max(20, int(60 * h / 1080))
-    hh, ww = frame.shape[:2]
-    cy, cx = hh // 2, ww // 2
-    return frame[cy - half:cy + half, cx - half:cx + half], half
+def purple_mask(im):
+    h = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)
+    return ((h[..., 0] >= 118) & (h[..., 0] <= 150) & (h[..., 1] >= 130) & (h[..., 2] >= 90)).astype(np.float32)
 
 
-def scan_video(path, pre, post, diff=60, min_px=15, max_px=700, step=2,
-               merge_gap=2.0, progress=None, cancel=None, on_kill=None):
+def load_notify_template(profile):
+    path = resource(*profile["template"])
+    im = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    y0, y1, x0, x1 = profile["header"]
+    m = purple_mask(im)[y0:y1, x0:x1]
+    ys, xs = np.nonzero(m)
+    return m[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
+
+def frames_from_ffmpeg(ffmpeg, path, vf, w, h, cancel):
+    """Liest vorverarbeitete Frames als Rohdaten (BGR) per Pipe. Nutzt GPU-Decoding, wenn moeglich."""
+    n = w * h * 3
+    for hw in (True, False):
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"] + (["-hwaccel", "auto"] if hw else []) + \
+              ["-i", path, "-an", "-sn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             creationflags=NOWIN, bufsize=n * 8)
+        got = 0
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    return
+                buf = p.stdout.read(n)
+                if len(buf) < n:
+                    break
+                yield got, np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+                got += 1
+        finally:
+            p.kill()
+            p.wait()
+        if got:
+            return
+
+
+def group_hits(hits, gap):
+    kills, last = [], None
+    for t in hits:
+        if last is None or t - last > gap:
+            kills.append(t)
+        last = t
+    return kills
+
+
+def scan_video(path, pre, post, profile_name="Bruder (Kill-Notify)", sens=6, progress=None, cancel=None,
+               on_kill=None):
     """Gibt Liste von (start, ende, kill_zeit, thumbnail_bgr) zurueck."""
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("FFmpeg nicht gefunden.")
+    prof = PROFILES[profile_name]
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError("Video konnte nicht geoeffnet werden.")
     fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    scale = (h / 1080.0) ** 2
-    lo, hi = max(3, int(min_px * scale)), int(max_px * scale)
+    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     duration = total / fps
-    kills, last, i = [], None, 0
-    while True:
-        if cancel is not None and cancel.is_set():
-            break
-        if not cap.grab():
-            break
-        if i % step == 0:
-            ok, frame = cap.retrieve()
-            if ok:
-                roi, _ = roi_of(frame, h)
-                if lo <= red_pixels(roi, diff) <= hi:
-                    t = i / fps
-                    if last is None or t - last > merge_gap:
-                        th = cv2.resize(frame, (256, int(256 * frame.shape[0] / frame.shape[1])),
-                                        interpolation=cv2.INTER_AREA)
-                        kills.append((t, th))
-                        if on_kill:
-                            on_kill(len(kills))
-                    last = t
-        i += 1
-        if progress and i % 120 == 0:
-            progress(min(1.0, i / total))
+
+    hits, count = [], 0
+    if prof["kind"] == "notify":
+        ofps = 5
+        ow = 960
+        oh = int(round(ow * h / w / 2)) * 2
+        vf = f"fps={ofps},scale={ow}:{oh}:flags=area"
+        k = 0.5 * (16 / 9) * h / w            # Skalierung der Vorlage (1080p-Referenz -> aktuelles Bild)
+        tpl = load_notify_template(prof)
+        tpl = cv2.resize(tpl, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        need = max(20, int(tpl.sum() * 0.35))
+        pad = max(1, int(8 * k))               # nicht-lila Rand: lila Flaechen sind keine Ueberschrift
+        tpl = cv2.copyMakeBorder(tpl, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+        thr = min(0.85, max(0.5, 0.95 - 0.05 * sens))
+        fw, fh = ow, oh
+        min_run, gap = 2, 1.5
+    else:
+        ofps = 15
+        half = max(20, int(60 * h / 1080))
+        vf = (f"fps={ofps},crop={2 * half}:{2 * half}:{(w - 2 * half) // 2}:{(h - 2 * half) // 2},"
+              f"scale=120:120:flags=area")
+        diff = int(70 - 5 * sens)
+        fw, fh = 120, 120
+        min_run, gap = 2, 1.2
+
+    run = 0
+    for i, fr in frames_from_ffmpeg(ffmpeg, path, vf, fw, fh, cancel):
+        if prof["kind"] == "notify":
+            m = purple_mask(fr)
+            hit = False
+            if m.sum() >= need:
+                hit = cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED).max() >= thr
+        else:
+            hit = is_hitmarker(fr, diff)
+        run = run + 1 if hit else 0
+        if run >= min_run:
+            hits.append((i - run + 1) / ofps)          # Beginn des Treffers
+        if run == min_run and on_kill:
+            on_kill(len(group_hits(sorted(set(hits)), gap)))
+        if progress and i % 25 == 0:
+            progress(min(1.0, i / max(1, duration * ofps)))
+
+    kills = group_hits(sorted(set(hits)), gap)
+    out = []
+    for t in kills:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(min(t + 0.3, duration - 0.2) * fps))
+        ok, fr = cap.read()
+        th = cv2.resize(fr, (256, int(256 * h / w)), interpolation=cv2.INTER_AREA) if ok else None
+        out.append((max(0.0, t - pre), min(duration, t + post), t, th))
     cap.release()
-    return [(max(0.0, t - pre), min(duration, t + post), t, th) for t, th in kills]
+    return out
 
 
 def export_clip(ffmpeg, src, start, end, dst, mode):
@@ -341,7 +438,8 @@ class App(ctk.CTk):
 
     # ------------------------------------------------------------ Aufbau
     def load_settings(self):
-        d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Verlustfrei", "open": True, "loop": True}
+        d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Verlustfrei", "open": True, "loop": True,
+             "server": "Bruder (Kill-Notify)"}
         try:
             with open(SETTINGS) as f:
                 d.update(json.load(f))
@@ -351,7 +449,7 @@ class App(ctk.CTk):
 
     def on_close(self):
         self.st.update(pre=self.s_pre.get(), post=self.s_post.get(), sens=int(self.s_sens.get()),
-                       mode=self.seg.get(), open=bool(self.sw_open.get()), loop=bool(self.sw_loop.get()))
+                       mode=self.seg.get(), server=self.server_menu.get(), open=bool(self.sw_open.get()), loop=bool(self.sw_loop.get()))
         try:
             with open(SETTINGS, "w") as f:
                 json.dump(self.st, f)
@@ -421,7 +519,14 @@ class App(ctk.CTk):
         self.meta_lbl = self.label(info, "—", 11, MUTED, anchor="w")
         self.meta_lbl.pack(fill="x", padx=14, pady=(0, 12))
 
-        self.label(sb, "ERKENNUNG", 11, ACC_HI, True).pack(anchor="w", pady=(26, 0), **pad)
+        self.label(sb, "SERVER", 11, ACC_HI, True).pack(anchor="w", pady=(24, 4), **pad)
+        self.server_menu = ctk.CTkOptionMenu(sb, values=list(PROFILES), height=36, corner_radius=10,
+                                             fg_color=CARD_HI, button_color=ACC, button_hover_color=ACC_HI,
+                                             dropdown_fg_color=CARD, dropdown_hover_color=CARD_HI,
+                                             font=ctk.CTkFont(FONT, 12, "bold"), dropdown_font=ctk.CTkFont(FONT, 12))
+        self.server_menu.set(self.st["server"] if self.st["server"] in PROFILES else list(PROFILES)[0])
+        self.server_menu.pack(fill="x", **pad)
+        self.label(sb, "ERKENNUNG", 11, ACC_HI, True).pack(anchor="w", pady=(18, 0), **pad)
         box = ctk.CTkFrame(sb, fg_color="transparent")
         box.pack(fill="x", **pad)
         self.s_pre = self.slider(box, "Vor dem Kill", 0, 10, 20, self.st["pre"], lambda v: f"{v:.1f} s")
@@ -431,7 +536,7 @@ class App(ctk.CTk):
                                              "mittel+", "hoch", "hoch", "sehr hoch", "max"][int(v)])
 
         self.scan_btn = self.button(sb, "🎯  KILLS SUCHEN", self.start_scan, "accent", height=48)
-        self.scan_btn.pack(fill="x", pady=(24, 8), **pad)
+        self.scan_btn.pack(fill="x", pady=(18, 8), **pad)
         self.scan_bar = ctk.CTkProgressBar(sb, height=8, progress_color=CYAN, fg_color=CARD_HI)
         self.scan_bar.set(0)
         self.scan_bar.pack(fill="x", **pad)
@@ -695,7 +800,7 @@ class App(ctk.CTk):
         self.scan_btn.configure(text="✕  ABBRECHEN", fg_color=RED, hover_color="#ff6483")
         self.scan_bar.set(0)
         self.status.configure(text="Suche läuft…  0 Kills")
-        args = (self.path, self.s_pre.get(), self.s_post.get(), int(110 - 8 * self.s_sens.get()))
+        args = (self.path, self.s_pre.get(), self.s_post.get(), self.server_menu.get(), int(self.s_sens.get()))
 
         def work():
             try:
