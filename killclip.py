@@ -673,6 +673,7 @@ class Window(QMainWindow):
         self.timer.timeout.connect(self.poll_player)
         self.timer.start(8)
         QTimer.singleShot(250, self.check_ffmpeg)
+        QTimer.singleShot(500, self.stack.warm)
         if self.st["autoupd"]:
             QTimer.singleShot(1500, lambda: self.start_update_check(False))
 

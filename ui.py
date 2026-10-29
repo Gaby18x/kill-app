@@ -540,23 +540,22 @@ class SliderRow(QWidget):
 
 # ------------------------------------------------------------------ Uebergaenge
 class FadeStack(QWidget):
-    """Seitenwechsel mit weichem Ein-/Ausblenden und leichter Verschiebung."""
+    """Seitenwechsel mit weichem Einblenden. Die neue Seite wird live eingeblendet (kein Zwischenbild),
+    dadurch gibt es kein Ruckeln und keine schwarzen Flaechen."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pages = []
         self.cur = -1
-        self.t = 1.0
-        self.anim_on = False
-        self.old_px = self.new_px = None
-        self.dir = 1
+        self.eff = None
+        self.incoming = None
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(300)
+        self.anim.setDuration(170)
         self.anim.setEasingCurve(QEasingCurve.OutCubic)
         self.anim.setStartValue(0.0)
         self.anim.setEndValue(1.0)
         self.anim.valueChanged.connect(self._tick)
-        self.anim.finished.connect(self._done)
+        self.anim.finished.connect(self._finish)
 
     def add(self, w):
         w.setParent(self)
@@ -568,49 +567,51 @@ class FadeStack(QWidget):
         for w in self.pages:
             w.setGeometry(self.rect())
 
+    def warm(self):
+        """Zeigt jede Seite einmal unsichtbar, damit der erste echte Wechsel nicht ruckelt."""
+        for i, w in enumerate(self.pages):
+            if i == self.cur:
+                continue
+            eff = QGraphicsOpacityEffect(w)
+            eff.setOpacity(0.0)
+            w.setGraphicsEffect(eff)
+            w.setGeometry(self.rect())
+            w.show()
+            QApplication.processEvents()
+            w.hide()
+            w.setGraphicsEffect(None)
+
     def go(self, i, direction=1):
         if i == self.cur:
             return
+        self._finish()
         new = self.pages[i]
-        if self.cur < 0 or not self.isVisible() or self.anim_on:
+        new.setGeometry(self.rect())
+        if self.cur < 0 or not self.isVisible():
             for k, w in enumerate(self.pages):
                 w.setVisible(k == i)
-            new.setGeometry(self.rect())
             self.cur = i
-            self.anim_on = False
             return
-        old = self.pages[self.cur]
-        self.old_px = old.grab()
-        new.setGeometry(self.rect())
+        self.pages[self.cur].hide()
+        self.eff = QGraphicsOpacityEffect(new)
+        self.eff.setOpacity(0.0)
+        new.setGraphicsEffect(self.eff)
+        self.incoming = new
         new.show()
-        self.new_px = new.grab()
-        new.hide()
-        old.hide()
-        self.cur, self.dir, self.t, self.anim_on = i, direction, 0.0, True
+        self.cur = i
+        self.anim.stop()
         self.anim.start()
 
     def _tick(self, v):
-        self.t = float(v)
-        self.update()
+        if self.eff is not None:
+            self.eff.setOpacity(float(v))
 
-    def _done(self):
-        self.anim_on = False
-        self.old_px = self.new_px = None
-        self.pages[self.cur].show()
-        self.update()
-
-    def paintEvent(self, e):
-        if not self.anim_on:
-            return
-        p = QPainter(self)
-        t = self.t
-        shift = 28 * self.dir
-        if self.old_px:
-            p.setOpacity(max(0.0, 1 - t * 1.6))
-            p.drawPixmap(int(-shift * t), 0, self.old_px)
-        if self.new_px:
-            p.setOpacity(min(1.0, t * 1.3))
-            p.drawPixmap(int(shift * (1 - t)), 0, self.new_px)
+    def _finish(self):
+        self.anim.stop()
+        if self.incoming is not None:
+            self.incoming.setGraphicsEffect(None)       # Effekt entfernen: danach wird normal (schnell) gezeichnet
+        self.incoming = None
+        self.eff = None
 
 
 class Overlay(QWidget):
