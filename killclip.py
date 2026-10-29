@@ -79,7 +79,9 @@ NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # kind "xhit": nur roter Hitmarker (X) in der Bildmitte.
 PROFILES = {
     "Bruder (Kill-Notify)": {"kind": "notify", "template": ("profiles", "bruder_notify.png"),
-                             "header": (10, 32, 55, 145)},
+                             "header": (10, 32, 55, 145),
+                             # Woerter im Beispielbild (y0, y1, x0, x1): Kill-Text = "Du hast ... getoetet"
+                             "words": {"duhast": (31, 46, 58, 106), "getotet": (58, 74, 78, 124)}},
     "Standard (roter X)": {"kind": "xhit"},
 }
 
@@ -107,13 +109,40 @@ def purple_mask(im):
     return ((h[..., 0] >= 118) & (h[..., 0] <= 150) & (h[..., 1] >= 130) & (h[..., 2] >= 90)).astype(np.float32)
 
 
-def load_notify_template(profile):
+def load_notify_assets(profile):
+    """Header-Maske (lila 'Information'), Wort-Vorlagen und deren Lage relativ zum Header."""
     path = resource(*profile["template"])
     im = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
     y0, y1, x0, x1 = profile["header"]
     m = purple_mask(im)[y0:y1, x0:x1]
     ys, xs = np.nonzero(m)
-    return m[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    anchor = (y0 + int(ys.min()), x0 + int(xs.min()))
+    hdr = m[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    words = {n: gray[a:b, c:d] for n, (a, b, c, d) in profile["words"].items()}
+    return hdr, words
+
+
+# Suchbereich fuer den Text relativ zur Header-Ecke (1080p): y von +6 bis +80, x von -8 bis +200
+TEXT_REGION = (6, 80, -8, 200)
+
+
+def verify_text(frame, anchor_xy, ks, words, thr):
+    """Prueft im Originalbild, ob in der Box 'Du hast' und 'getoetet' stehen. Gibt (ok, scores) zurueck."""
+    ax, ay = anchor_xy
+    H, W = frame.shape[:2]
+    y0, y1 = int(max(0, ay + TEXT_REGION[0] * ks)), int(min(H, ay + TEXT_REGION[1] * ks))
+    x0, x1 = int(max(0, ax + TEXT_REGION[2] * ks)), int(min(W, ax + TEXT_REGION[3] * ks))
+    reg = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    scores = {}
+    for name, t in words.items():
+        if abs(ks - 1) > 0.02:
+            t = cv2.resize(t, None, fx=ks, fy=ks, interpolation=cv2.INTER_AREA)
+        if reg.shape[0] < t.shape[0] or reg.shape[1] < t.shape[1]:
+            scores[name] = -1.0
+        else:
+            scores[name] = float(cv2.matchTemplate(reg, t, cv2.TM_CCOEFF_NORMED).max())
+    return all(v >= thr for v in scores.values()), scores
 
 
 def frames_from_ffmpeg(ffmpeg, path, vf, w, h, cancel):
@@ -152,7 +181,7 @@ def group_hits(hits, gap):
 
 def scan_video(path, pre, post, profile_name="Bruder (Kill-Notify)", sens=6, progress=None, cancel=None,
                on_kill=None):
-    """Gibt Liste von (start, ende, kill_zeit, thumbnail_bgr) zurueck."""
+    """Gibt (clips, info) zurueck. clips: Liste von (start, ende, kill_zeit, thumbnail_bgr)."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("FFmpeg nicht gefunden.")
@@ -165,19 +194,20 @@ def scan_video(path, pre, post, profile_name="Bruder (Kill-Notify)", sens=6, pro
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     duration = total / fps
 
-    hits, count = [], 0
+    hits = []                                   # Zeitpunkte (und beim Notify: Lage der Box)
     if prof["kind"] == "notify":
         ofps = 5
         ow = 960
         oh = int(round(ow * h / w / 2)) * 2
         vf = f"fps={ofps},scale={ow}:{oh}:flags=area"
         k = 0.5 * (16 / 9) * h / w            # Skalierung der Vorlage (1080p-Referenz -> aktuelles Bild)
-        tpl = load_notify_template(prof)
-        tpl = cv2.resize(tpl, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        hdr, words = load_notify_assets(prof)
+        tpl = cv2.resize(hdr, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
         need = max(20, int(tpl.sum() * 0.35))
         pad = max(1, int(8 * k))               # nicht-lila Rand: lila Flaechen sind keine Ueberschrift
         tpl = cv2.copyMakeBorder(tpl, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
         thr = min(0.85, max(0.5, 0.95 - 0.05 * sens))
+        text_thr = min(0.85, max(0.55, 0.85 - 0.025 * sens))
         fw, fh = ow, oh
         min_run, gap = 2, 1.5
     else:
@@ -191,30 +221,65 @@ def scan_video(path, pre, post, profile_name="Bruder (Kill-Notify)", sens=6, pro
 
     run = 0
     for i, fr in frames_from_ffmpeg(ffmpeg, path, vf, fw, fh, cancel):
+        loc = None
         if prof["kind"] == "notify":
             m = purple_mask(fr)
             hit = False
             if m.sum() >= need:
-                hit = cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED).max() >= thr
+                res = cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED)
+                _, mx, _, ml = cv2.minMaxLoc(res)
+                if mx >= thr:
+                    hit, loc = True, ((ml[0] + pad) * w / ow, (ml[1] + pad) * w / ow)
         else:
             hit = is_hitmarker(fr, diff)
         run = run + 1 if hit else 0
         if run >= min_run:
-            hits.append((i - run + 1) / ofps)          # Beginn des Treffers
-        if run == min_run and on_kill:
-            on_kill(len(group_hits(sorted(set(hits)), gap)))
+            hits.append(((i - run + 1) / ofps, i / ofps, loc))     # (Beginn des Treffers, jetzt, Lage)
         if progress and i % 25 == 0:
             progress(min(1.0, i / max(1, duration * ofps)))
 
-    kills = group_hits(sorted(set(hits)), gap)
+    # Treffer zu Ereignissen zusammenfassen
+    groups = []
+    for t0, t, loc in hits:
+        if groups and t - groups[-1]["last"] <= gap:
+            g = groups[-1]
+            g["last"] = t
+            g["locs"].append((t, loc))
+        else:
+            groups.append({"start": t0, "last": t, "locs": [(t, loc)]})
+    info = {"notices": len(groups)}
+
+    if prof["kind"] == "notify":
+        # Nur Meldungen, die wirklich "Du hast ... getoetet" lauten, sind Kills
+        ks = h / 1080.0
+        good = []
+        for g in groups:
+            ok_any = False
+            cand = [g["start"] + d for d in (0.4, 0.9, 1.5, 2.2) if g["start"] + d <= g["last"] + 0.2]
+            for t in cand or [(g["start"] + g["last"]) / 2]:
+                near = min(g["locs"], key=lambda x: abs(x[0] - t))[1]
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(min(t, duration - 0.1) * fps))
+                ok, fr = cap.read()
+                if ok and verify_text(fr, near, ks, words, text_thr)[0]:
+                    ok_any = True
+                    break
+            if ok_any:
+                good.append(g)
+                if on_kill:
+                    on_kill(len(good))
+        groups = good
+    elif on_kill:
+        on_kill(len(groups))
+
     out = []
-    for t in kills:
+    for g in groups:
+        t = g["start"]
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(min(t + 0.3, duration - 0.2) * fps))
         ok, fr = cap.read()
         th = cv2.resize(fr, (256, int(256 * h / w)), interpolation=cv2.INTER_AREA) if ok else None
         out.append((max(0.0, t - pre), min(duration, t + post), t, th))
     cap.release()
-    return out
+    return out, info
 
 
 def export_clip(ffmpeg, src, start, end, dst, mode):
@@ -910,7 +975,7 @@ class App(ctk.CTk):
                                  on_kill=lambda n: self.ui(self.status.configure,
                                                            {"text": f"Suche läuft…  {n} Kills"}),
                                  cancel=self.cancel)
-                self.ui(self.scan_done, res)
+                self.ui(self.scan_done, *res)
             except Exception as e:
                 self.ui(self.scan_failed, repr(e))
         threading.Thread(target=work, daemon=True).start()
@@ -923,7 +988,7 @@ class App(ctk.CTk):
         self.scanning = False
         self.scan_btn.configure(text="🎯  KILLS SUCHEN", fg_color=ACC, hover_color=ACC_HI)
 
-    def scan_done(self, res):
+    def scan_done(self, res, info):
         cancelled = self.cancel.is_set()
         self.scan_reset()
         self.scan_bar.set(1)
@@ -931,7 +996,10 @@ class App(ctk.CTk):
         self.sel = None
         self.rebuild_cards()
         n = len(self.clips)
-        self.status.configure(text=("Abgebrochen – " if cancelled else "Fertig – ") + f"{n} Kills gefunden")
+        extra = ""
+        if self.server_menu.get().startswith("Bruder"):
+            extra = f"\n{info['notices']} Info-Meldungen geprüft, {n} davon Kills"
+        self.status.configure(text=("Abgebrochen – " if cancelled else "Fertig – ") + f"{n} Kills gefunden" + extra)
         self.toast(f"🎯  {n} Kills gefunden" if n else "Keine Kills gefunden – Empfindlichkeit erhöhen?",
                    GREEN if n else RED)
         if n:
