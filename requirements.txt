@@ -1,5 +1,4 @@
-opencv-python
+PySide6-Essentials
+opencv-python-headless
 numpy
-pillow
-customtkinter
 imageio-ffmpeg

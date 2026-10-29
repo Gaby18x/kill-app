@@ -18,10 +18,10 @@ jobs:
       - name: Version setzen
         shell: pwsh
         run: |
-          (Get-Content killclip.py -Raw) -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$env:APP_VER`"" | Set-Content killclip.py -Encoding utf8 -NoNewline
-          Select-String -Path killclip.py -Pattern 'APP_VERSION = '
+          (Get-Content core.py -Raw) -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$env:APP_VER`"" | Set-Content core.py -Encoding utf8 -NoNewline
+          Select-String -Path core.py -Pattern 'APP_VERSION = '
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconfirm --windowed --name KillApp --icon assets/icon.ico --collect-all imageio_ffmpeg --collect-all customtkinter --add-data "profiles;profiles" --add-data "assets;assets" killclip.py
+      - run: pyinstaller --noconfirm --windowed --name KillApp --icon assets/icon.ico --collect-all imageio_ffmpeg --exclude-module tkinter --add-data "profiles;profiles" --add-data "assets;assets" killclip.py
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyVer=$env:APP_VER installer.iss'
       - uses: actions/upload-artifact@v4
