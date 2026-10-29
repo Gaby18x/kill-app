@@ -1,0 +1,29 @@
+name: Build Windows Installer
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: pyinstaller --noconfirm --windowed --name KillClip --collect-all imageio_ffmpeg killclip.py
+      - run: choco install innosetup -y --no-progress
+      - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KillClip-Setup
+          path: installer/KillClip-Setup.exe
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: KillClip Installer
+          files: installer/KillClip-Setup.exe
