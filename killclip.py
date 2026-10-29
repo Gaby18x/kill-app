@@ -12,14 +12,17 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+from PySide6.QtWidgets import (QApplication, QColorDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 import core
 from core import Player, check_update, download_file, export_clip, find_ffmpeg, resource, scan_video
-from ui import (ACC, ACC2, ACC_TEXT, AMBER, DIM, MUT, RED, TXT, Background, Bar, ElidedLabel, FadeStack, Glass,
-                Overlay, PopButton, SeekBar, Segmented, SliderRow, Timeline, Toast, Toggle, app_font, ink,
-                paint_icon, tween, white, with_alpha)
+from theme import AMBER, DEFAULT, PRESETS, RED, T, ink, white, with_alpha
+from ui import (Background, Bar, ElidedLabel, FadeStack, Glass, Overlay, PopButton, SeekBar, Segmented, SliderRow,
+                Timeline, Toast, Toggle, app_font, paint_icon, tween)
+
+# Textrollen (Farben kommen aus dem Farbsystem, damit der Modus umschaltbar ist)
+TXT, MUT, DIM, ACC_TEXT = "text", "muted", "dim", "acc"
 
 SETTINGS = os.path.join(os.path.expanduser("~"), ".killapp.json")
 
@@ -36,28 +39,6 @@ KIND_TEXT = {"bruder": "Kill-Meldung mit Text-Prüfung", "notify": "Kill-Meldung
              "xhit": "Roter Kill-X in der Bildmitte"}
 AVATARS = [("#8c79ee", "#c9a6f8"), ("#f08fb8", "#f7b6a0"), ("#6fb7f2", "#8c9cf2"), ("#5fcfae", "#7fd0e8"),
            ("#f2b36f", "#f08f8f")]
-ICON = QColor(110, 98, 176, 225)            # Symbolfarbe auf hellem Glas
-
-LABEL_QSS = f"""
-QLabel {{ color: {TXT}; background: transparent; }}
-QLineEdit {{ background: rgba(255,255,255,170); border: 1px solid rgba(140,121,238,70); border-radius: 13px;
-            padding: 9px 14px; color: {TXT}; selection-background-color: #8c79ee; selection-color: white; }}
-QLineEdit:focus {{ border: 1px solid #8c79ee; background: rgba(255,255,255,225); }}
-QScrollArea {{ background: transparent; border: none; }}
-QScrollArea > QWidget > QWidget {{ background: transparent; }}
-QScrollArea > QWidget {{ background: transparent; }}
-QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: rgba(42,40,72,50); border-radius: 4px; min-height: 30px; }}
-QScrollBar::handle:vertical:hover {{ background: rgba(42,40,72,95); }}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-QSlider::groove:horizontal {{ height: 6px; background: rgba(42,40,72,36); border-radius: 3px; }}
-QSlider::sub-page:horizontal {{ background: #8c79ee; border-radius: 3px; }}
-QSlider::handle:horizontal {{ background: white; border: 2px solid #8c79ee; width: 14px; height: 14px; margin: -7px 0;
-                              border-radius: 9px; }}
-QSlider::handle:horizontal:hover {{ width: 18px; height: 18px; margin: -9px 0; border-radius: 11px; }}
-QToolTip {{ background: white; color: {TXT}; border: 1px solid rgba(140,121,238,90); padding: 4px 8px; }}
-"""
 
 
 def fmt(t):
@@ -95,10 +76,11 @@ class Bridge(QObject):
 
 
 def label(text="", size=10.5, bold=False, color=None, wrap=False):
+    """color ist eine Textrolle (z. B. "muted", "dim", "acc", "err"), keine feste Farbe."""
     lb = QLabel(text)
     lb.setFont(app_font(size, bold))
     if color:
-        lb.setStyleSheet(f"color: {color};")
+        lb.setProperty("role", color)
     lb.setWordWrap(wrap)
     return lb
 
@@ -167,7 +149,7 @@ class ServerCard(QWidget):
         if hv > 0:
             for grow, a in ((14, 16), (8, 26)):
                 p.setPen(Qt.NoPen)
-                p.setBrush(with_alpha(ACC, a * hv))
+                p.setBrush(with_alpha(T.acc, a * hv))
                 p.drawRoundedRect(r.adjusted(-grow * hv, -grow * hv, grow * hv, grow * hv), 24 + grow * hv,
                                   24 + grow * hv)
         g = QLinearGradient(r.topLeft(), r.bottomRight())
@@ -178,7 +160,7 @@ class ServerCard(QWidget):
         p.drawRoundedRect(r, 24, 24)
         bp = QPen(white(240), 1.2)
         if self.add:
-            bp = QPen(with_alpha(ACC, 150 + 90 * hv), 1.4)
+            bp = QPen(with_alpha(T.acc, 150 + 90 * hv), 1.4)
             bp.setStyle(Qt.DashLine)
         p.setBrush(Qt.NoBrush)
         p.setPen(bp)
@@ -187,9 +169,9 @@ class ServerCard(QWidget):
             d = 48
             cr = QRectF(c.x() - d / 2, c.y() - 36, d, d)
             p.setPen(Qt.NoPen)
-            p.setBrush(with_alpha(ACC, 40))
+            p.setBrush(with_alpha(T.acc, 40))
             p.drawEllipse(cr)
-            paint_icon(p, "plus", cr.adjusted(12, 12, -12, -12), ACC, 2.2)
+            paint_icon(p, "plus", cr.adjusted(12, 12, -12, -12), T.acc, 2.2)
             p.setPen(ink(235))
             p.setFont(app_font(11.5, True))
             p.drawText(QRectF(r.left(), c.y() + 18, r.width(), 28), Qt.AlignCenter, "Neuer Server")
@@ -211,19 +193,19 @@ class ServerCard(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(white(140 + 90 * self.ehov))
         p.drawEllipse(er)
-        paint_icon(p, "edit", er.adjusted(8, 8, -8, -8), ICON)
-        p.setPen(QColor(ACC_TEXT))
+        paint_icon(p, "edit", er.adjusted(8, 8, -8, -8), T.icon)
+        p.setPen(T.acc_text)
         p.setFont(app_font(10.5, True))
         p.drawText(QRectF(r.left() + 22, r.bottom() - 46, 120, 26), Qt.AlignVCenter, "Auswählen")
-        paint_icon(p, "chevron", QRectF(r.left() + 100, r.bottom() - 43, 18, 18), QColor(ACC_TEXT))
+        paint_icon(p, "chevron", QRectF(r.left() + 100, r.bottom() - 43, 18, 18), T.acc_text)
         if self.tag:
             fm = QFontMetrics(app_font(9, True))
             tw = fm.horizontalAdvance(self.tag) + 20
             tr = QRectF(r.right() - 18 - tw, r.bottom() - 46, tw, 24)
             p.setPen(Qt.NoPen)
-            p.setBrush(with_alpha(ACC, 40))
+            p.setBrush(with_alpha(T.acc, 40))
             p.drawRoundedRect(tr, 12, 12)
-            p.setPen(QColor(ACC_TEXT))
+            p.setPen(T.acc_text)
             p.setFont(app_font(9, True))
             p.drawText(tr, Qt.AlignCenter, self.tag)
 
@@ -269,13 +251,15 @@ class NavItem(QWidget):
         p.translate(-c)
         a = self.sel
         p.setPen(Qt.NoPen)
-        p.setBrush(white(120 * self.pop * (1 - a) + 235 * a))
+        p.setBrush(white(120 * self.pop * (1 - a)))
+        p.drawRoundedRect(r, 16, 16)
+        p.setBrush(T.sel_fill(a))
         p.drawRoundedRect(r, 16, 16)
         if a > 0.02:
-            p.setPen(QPen(with_alpha(ACC, 55 * a), 1))
+            p.setPen(QPen(with_alpha(T.acc, 55 * a), 1))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(r, 16, 16)
-        paint_icon(p, self.icon, QRectF(r.left() + 16, r.center().y() - 10, 20, 20), ACC if a > 0.5 else ICON, 1.8)
+        paint_icon(p, self.icon, QRectF(r.left() + 16, r.center().y() - 10, 20, 20), T.acc if a > 0.5 else T.icon, 1.8)
         p.setPen(ink(235 if a > 0.5 else 175))
         p.setFont(app_font(10.5, a > 0.5))
         p.drawText(QRectF(r.left() + 50, r.top(), r.width() - 56, r.height()), Qt.AlignVCenter, self.text)
@@ -312,7 +296,7 @@ class SideServer(QWidget):
         p.scale(1 + 0.025 * self.pop, 1 + 0.025 * self.pop)
         p.translate(-c)
         p.setPen(Qt.NoPen)
-        p.setBrush(white(235 if self.active else 120 * self.pop))
+        p.setBrush(T.sel_fill() if self.active else white(120 * self.pop))
         p.drawRoundedRect(r, 14, 14)
         paint_avatar(p, QRectF(r.left() + 10, r.center().y() - 11, 22, 22), self.name, 8, 9)
         p.setPen(ink(235 if self.active else 175))
@@ -361,8 +345,8 @@ class ClipRow(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
         r = QRectF(self.rect()).adjusted(2, 3, -2, -3)
-        p.setPen(QPen(with_alpha(ACC, 90), 1.2) if self.selected else Qt.NoPen)
-        p.setBrush(white(240) if self.selected else white(130 * self.hov))
+        p.setPen(QPen(with_alpha(T.acc, 90), 1.2) if self.selected else Qt.NoPen)
+        p.setBrush(T.sel_fill() if self.selected else white(130 * self.hov))
         p.drawRoundedRect(r, 18, 18)
         p.setPen(ink(110))
         p.setFont(app_font(10))
@@ -394,7 +378,7 @@ class ClipRow(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(with_alpha(RED, 55 * self.xhov))
         p.drawEllipse(xr)
-        paint_icon(p, "close", xr.adjusted(9, 9, -9, -9), QColor(110, 98, 176, int(120 + 110 * self.xhov)), 1.7)
+        paint_icon(p, "close", xr.adjusted(9, 9, -9, -9), with_alpha(T.icon, int(120 + 110 * self.xhov)), 1.7)
 
 
 class VideoWidget(QWidget):
@@ -484,7 +468,7 @@ class DialogCard(Glass):
     """Karte fuer Overlays: Titel, Untertitel, Inhalt, Knopfleiste."""
 
     def __init__(self, title, subtitle="", width=500):
-        super().__init__(None, radius=30, alpha=215)
+        super().__init__(None, radius=30, alpha=215, dialog=True)
         self.setFixedWidth(width)
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(32, 28, 32, 24)
@@ -495,7 +479,7 @@ class DialogCard(Glass):
         self.body = QVBoxLayout()
         self.body.setSpacing(10)
         self.lay.addLayout(self.body)
-        self.err = label("", 10, color="#d6334f", wrap=True)
+        self.err = label("", 10, color="err", wrap=True)
         self.lay.addWidget(self.err)
         self.btns = QHBoxLayout()
         self.btns.setSpacing(8)
@@ -524,7 +508,7 @@ class PickCanvas(QWidget):
         self.step = 0
         self.start = None
         self.live = None
-        self.colors = [ACC, QColor("#2f8fe8"), AMBER]
+        self.colors = [T.acc, QColor("#2f8fe8"), AMBER]
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -617,15 +601,159 @@ class ServerChip(QWidget):
             p.drawText(r, Qt.AlignCenter, "Kein Server")
 
 
+class ColorDot(QWidget):
+    """Farbfeld zum Anklicken (zeigt die aktuelle Farbe)."""
+    clicked = Signal()
+
+    def __init__(self, getter, parent=None):
+        super().__init__(parent)
+        self.getter = getter
+        self.pop = 0.0
+        self.setFixedSize(44, 44)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def enterEvent(self, e):
+        tween(self, "pop", 1.0, 150, QEasingCurve.OutBack)
+
+    def leaveEvent(self, e):
+        tween(self, "pop", 0.0, 150)
+
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QRectF(self.rect()).center()
+        r = 15 + 3 * self.pop
+        p.setPen(QPen(white(240), 2))
+        p.setBrush(self.getter())
+        p.drawEllipse(c, r, r)
+        p.setPen(QPen(ink(60), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(c, r + 2.5, r + 2.5)
+
+
+class PresetCard(QWidget):
+    """Farbthema zum Anklicken: zwei Akzentfarben und der Hintergrundton."""
+    clicked = Signal()
+
+    def __init__(self, name, preset, parent=None):
+        super().__init__(parent)
+        self.name, self.preset = name, preset
+        self.pop = 0.0
+        self.setFixedSize(92, 84)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def active(self):
+        return T.acc.name().lower() == self.preset["acc"].lower() and T.acc2.name().lower() == self.preset["acc2"].lower()
+
+    def enterEvent(self, e):
+        tween(self, "pop", 1.0, 150, QEasingCurve.OutBack)
+
+    def leaveEvent(self, e):
+        tween(self, "pop", 0.0, 150)
+
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        r = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+        c = r.center()
+        p.translate(c)
+        p.scale(1 + 0.05 * self.pop, 1 + 0.05 * self.pop)
+        p.translate(-c)
+        on = self.active()
+        p.setPen(QPen(QColor(T.acc) if on else white(220), 2 if on else 1.1))
+        p.setBrush(white(150 + 60 * self.pop))
+        p.drawRoundedRect(r, 18, 18)
+        cx, cy = r.center().x(), r.top() + 28
+        for dx, col in ((-9, self.preset["acc"]), (9, self.preset["acc2"])):
+            p.setPen(QPen(white(240), 1.6))
+            p.setBrush(QColor(col))
+            p.drawEllipse(QPointF(cx + dx, cy), 13, 13)
+        p.setPen(ink(210))
+        p.setFont(app_font(9, True))
+        p.drawText(QRectF(r.left(), r.top() + 46, r.width(), 22), Qt.AlignCenter, self.name)
+
+
+class WinControls(QWidget):
+    """Eigene Fenster-Knoepfe (Minimieren, Maximieren, Schliessen), da das Fenster keine Titelleiste hat."""
+    minimize = Signal()
+    toggle = Signal()
+    closed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(3 * 42, 30)
+        self.setMouseTracking(True)
+        self.hov = [0.0, 0.0, 0.0]
+        self.maximized = False
+        self._h = -1
+
+    def _idx(self, x):
+        return int(x // 42) if 0 <= x < 126 else -1
+
+    def mouseMoveEvent(self, e):
+        i = self._idx(e.position().x())
+        if i != self._h:
+            for k in range(3):
+                tween_list(self, k, 1.0 if k == i else 0.0)
+            self._h = i
+
+    def leaveEvent(self, e):
+        for k in range(3):
+            tween_list(self, k, 0.0)
+        self._h = -1
+
+    def mousePressEvent(self, e):
+        i = self._idx(e.position().x())
+        (self.minimize, self.toggle, self.closed)[i].emit() if i >= 0 else None
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        for i, name in enumerate(("min", "restore" if self.maximized else "square", "close")):
+            r = QRectF(i * 42 + 5, 2, 32, 26)
+            h = self.hov[i]
+            p.setPen(Qt.NoPen)
+            p.setBrush(with_alpha(RED, 230 * h) if i == 2 else white(150 * h))
+            p.drawRoundedRect(r, 13, 13)
+            col = QColor("white") if (i == 2 and h > 0.5) else ink(190)
+            paint_icon(p, name, QRectF(r.center().x() - 8, r.center().y() - 8, 16, 16), col, 1.7)
+
+
+def tween_list(w, k, end):
+    """Animiert Eintrag k der Liste w.hov (fuer Widgets mit mehreren Hover-Zustaenden)."""
+    from PySide6.QtCore import QVariantAnimation
+    d = w.__dict__.setdefault("_tl", {})
+    a = d.get(k)
+    if a is None:
+        a = QVariantAnimation(w)
+        a.valueChanged.connect(lambda v, kk=k: (w.hov.__setitem__(kk, float(v)), w.update()))
+        d[k] = a
+    a.stop()
+    a.setDuration(140)
+    a.setStartValue(float(w.hov[k]))
+    a.setEndValue(float(end))
+    a.start()
+
+
 # ------------------------------------------------------------------ Hauptfenster
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Kill App")
-        self.setMinimumSize(1280, 800)
-        self.resize(1440, 880)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)        # keine Windows-Titelleiste
+        self.setMinimumSize(1280, 820)
+        self.resize(1440, 900)
         self.bridge = Bridge()
         self.st = self.load_settings()
+        T.configure(self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"])
+        QApplication.instance().setStyleSheet(T.qss())
         self.ffmpeg = find_ffmpeg()
         self.server = None
         self.path = None
@@ -647,9 +775,8 @@ class Window(QMainWindow):
 
         self.bg = Background()
         self.setCentralWidget(self.bg)
-        self.bg.setStyleSheet(LABEL_QSS)
         root = QHBoxLayout(self.bg)
-        root.setContentsMargins(22, 22, 22, 22)
+        root.setContentsMargins(22, 40, 22, 22)
         self.frame = Glass(radius=38, alpha=36)
         root.addWidget(self.frame)
         fl = QHBoxLayout(self.frame)
@@ -666,6 +793,12 @@ class Window(QMainWindow):
             self.stack.add(pg)
         self.overlay = Overlay(self.bg)
         self.toast = Toast(self.bg)
+        self.controls = WinControls(self.bg)
+        self.controls.minimize.connect(self.showMinimized)
+        self.controls.toggle.connect(self.toggle_max)
+        self.controls.closed.connect(self.close)
+        self.controls.raise_()
+        self.bg.hooks = {"press": self._bg_press, "move": self._bg_move, "double": self._bg_double}
         self.go_page(0, animate=False)
         self.render_servers()
 
@@ -683,7 +816,8 @@ class Window(QMainWindow):
 
     def load_settings(self):
         d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Verlustfrei", "open": True, "loop": True,
-             "autoupd": True, "gpu": True, "servers": [], "names": {}, "last_server": "bruder"}
+             "autoupd": True, "gpu": True, "servers": [], "names": {}, "last_server": "bruder",
+             "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
         try:
             with open(SETTINGS) as f:
                 d.update(json.load(f))
@@ -716,11 +850,68 @@ class Window(QMainWindow):
         if not self.ffmpeg:
             self.toast.show_text("FFmpeg nicht gefunden – Export nicht möglich", RED)
 
-    def say(self, text, color=ACC):
+    def say(self, text, color=None):
         self.toast.show_text(text, color)
+
+    # ---- rahmenloses Fenster: Verschieben, Groesse aendern, Maximieren
+    def toggle_max(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self.controls.maximized = self.isMaximized()
+        self.controls.update()
+
+    def _edges(self, pos):
+        if self.isMaximized():
+            return Qt.Edges()
+        m, w, h = 8, self.bg.width(), self.bg.height()
+        ed = Qt.Edges()
+        if pos.x() < m:
+            ed |= Qt.LeftEdge
+        if pos.x() > w - m:
+            ed |= Qt.RightEdge
+        if pos.y() < m:
+            ed |= Qt.TopEdge
+        if pos.y() > h - m:
+            ed |= Qt.BottomEdge
+        return ed
+
+    def _bg_press(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        h = self.windowHandle()
+        if h is None:
+            return
+        ed = self._edges(e.position())
+        if ed:
+            h.startSystemResize(ed)
+        elif e.position().y() < 46:
+            h.startSystemMove()
+
+    def _bg_move(self, e):
+        ed = self._edges(e.position())
+        if ed in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
+            self.bg.setCursor(Qt.SizeFDiagCursor)
+        elif ed in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
+            self.bg.setCursor(Qt.SizeBDiagCursor)
+        elif ed in (Qt.LeftEdge, Qt.RightEdge):
+            self.bg.setCursor(Qt.SizeHorCursor)
+        elif ed in (Qt.TopEdge, Qt.BottomEdge):
+            self.bg.setCursor(Qt.SizeVerCursor)
+        else:
+            self.bg.setCursor(Qt.ArrowCursor)
+
+    def _bg_double(self, e):
+        if e.position().y() < 46:
+            self.toggle_max()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        if hasattr(self, "controls"):
+            self.controls.move(self.bg.width() - self.controls.width() - 18, 5)
+            self.controls.maximized = self.isMaximized()
+            self.controls.raise_()
         if hasattr(self, "overlay"):
             self.overlay.setGeometry(self.bg.rect())
             QTimer.singleShot(150, self._maybe_reflow)
@@ -1151,7 +1342,8 @@ class Window(QMainWindow):
         pl.setContentsMargins(16, 0, 8, 0)
         pl.setSpacing(10)
         ic = QLabel()
-        ic.setPixmap(icon_pixmap("film", ICON, 20))
+        ic.setPixmap(icon_pixmap("film", T.icon, 20))
+        self.pill_icon = ic
         pl.addWidget(ic)
         self.file_lbl = ElidedLabel("Noch kein Video geladen", 10.5, True)
         self.meta_lbl = ElidedLabel("", 9.5, False, MUT)
@@ -1168,9 +1360,7 @@ class Window(QMainWindow):
 
         tr = QHBoxLayout()
         tr.addWidget(label("Deine Clips", 22, True))
-        self.count_lbl = label("0", 9.5, True, ACC_TEXT)
-        self.count_lbl.setStyleSheet(f"background: rgba(140,121,238,50); color: {ACC_TEXT}; border-radius: 10px; "
-                                     "padding: 2px 10px;")
+        self.count_lbl = label("0", 9.5, True, "badge")
         tr.addWidget(self.count_lbl)
         tr.addStretch(1)
         self.total_lbl = label("", 10, color=MUT)
@@ -1191,13 +1381,11 @@ class Window(QMainWindow):
         ib.setPixmap(icon_pixmap("film", QColor(255, 255, 255, 235), 42, 1.6))
         ib.setFixedSize(84, 84)
         ib.setAlignment(Qt.AlignCenter)
-        ib.setStyleSheet("background: rgba(255,255,255,40); border-radius: 42px;")
+        ib.setProperty("role", "ctaicon")
         cl.addWidget(ib, 0, Qt.AlignHCenter)
         cl.addSpacing(10)
-        t1 = label("Los geht’s", 18, True)
-        t1.setStyleSheet("color: white;")
-        t2 = label("Wähle deine Aufnahme aus.", 10.5)
-        t2.setStyleSheet("color: rgba(255,255,255,190);")
+        t1 = label("Los geht’s", 18, True, "onvideo")
+        t2 = label("Wähle deine Aufnahme aus.", 10.5, False, "onvideo2")
         cl.addWidget(t1, 0, Qt.AlignHCenter)
         cl.addWidget(t2, 0, Qt.AlignHCenter)
         cl.addSpacing(10)
@@ -1296,7 +1484,7 @@ class Window(QMainWindow):
         left.setSpacing(12)
         self.bar_thumb = QLabel()
         self.bar_thumb.setFixedSize(58, 46)
-        self.bar_thumb.setStyleSheet("background: rgba(42,40,72,40); border-radius: 12px;")
+        self.bar_thumb.setProperty("role", "thumbbg")
         left.addWidget(self.bar_thumb)
         tcol = QVBoxLayout()
         tcol.setSpacing(0)
@@ -1362,6 +1550,7 @@ class Window(QMainWindow):
         v = QVBoxLayout(host)
         v.setSpacing(14)
         v.setContentsMargins(0, 0, 10, 0)
+        v.addWidget(self.build_appearance_panel())
 
         def toggle_row(parent_lay, title, sub, checked):
             r = QHBoxLayout()
@@ -1417,6 +1606,63 @@ class Window(QMainWindow):
 
     def _sync_loop(self, on):
         self.loop_btn.set_kind("accent" if on else "glass")
+
+    # ------------------------------------------------------------ Darstellung
+    def apply_theme(self, **kw):
+        """Aendert Modus/Farben sofort in der ganzen App und merkt sie sich."""
+        self.st.update(kw)
+        T.configure(self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"])
+        QApplication.instance().setStyleSheet(T.qss())
+        self.bg.refresh()
+        self.pill_icon.setPixmap(icon_pixmap("film", T.icon, 20))
+        for w in self.findChildren(QWidget):
+            w.update()
+        self.save_settings()
+
+    def pick_color(self, key, title):
+        c = QColorDialog.getColor(QColor(self.st[key]), self, title)
+        if c.isValid():
+            self.apply_theme(**{key: c.name()})
+
+    def build_appearance_panel(self):
+        g, lay = panel("Darstellung", "Modus und Farben der ganzen App", alpha=150)
+        r = QHBoxLayout()
+        r.addWidget(label("Design", 11, True), 1)
+        self.seg_dark = Segmented(["Hell", "Dunkel"], height=36)
+        self.seg_dark.setFixedWidth(200)
+        self.seg_dark.set_current("Dunkel" if self.st["dark"] else "Hell")
+        self.seg_dark.changed.connect(lambda v: self.apply_theme(dark=(v == "Dunkel")))
+        r.addWidget(self.seg_dark)
+        lay.addLayout(r)
+        lay.addSpacing(4)
+        lay.addWidget(label("FARBTHEMA", 8.5, True, DIM))
+        pr = QHBoxLayout()
+        pr.setSpacing(8)
+        for name, pre in PRESETS.items():
+            pc = PresetCard(name, pre)
+            pc.clicked.connect(lambda pre=pre: self.apply_theme(**pre))
+            pr.addWidget(pc)
+        pr.addStretch(1)
+        lay.addLayout(pr)
+        lay.addSpacing(4)
+        lay.addWidget(label("EIGENE FARBEN", 8.5, True, DIM))
+        for key, title, sub in (("acc", "Akzentfarbe", "Knöpfe, Regler, Hervorhebungen"),
+                                ("acc2", "Zweite Akzentfarbe", "Farbverlauf in Knöpfen und Balken"),
+                                ("bg", "Hintergrund", "Farbton des Hintergrund-Verlaufs")):
+            row = QHBoxLayout()
+            col = QVBoxLayout()
+            col.setSpacing(0)
+            col.addWidget(label(title, 11, True))
+            col.addWidget(label(sub, 9.5, color=DIM))
+            row.addLayout(col, 1)
+            dot = ColorDot(lambda key=key: QColor(self.st[key]))
+            dot.clicked.connect(lambda key=key, title=title: self.pick_color(key, title))
+            row.addWidget(dot)
+            lay.addLayout(row)
+        rb = PopButton("Zurücksetzen", "refresh", "glass", 38)
+        rb.clicked.connect(lambda: self.apply_theme(**DEFAULT))
+        lay.addWidget(rb, 0, Qt.AlignLeft)
+        return g
 
     # ------------------------------------------------------------ Updates
     def start_update_check(self, manual):
@@ -1588,8 +1834,7 @@ class Window(QMainWindow):
 
     # ------------------------------------------------------------ Kill-Suche
     def set_status(self, text, state="idle"):
-        col = {"ok": "#1f9d73", "bad": "#d6334f", "warn": "#c4801f", "busy": "#4a7be0", "idle": MUT}[state]
-        self.status.set_color(col)
+        self.status.set_color({"ok": "ok", "bad": "bad", "warn": "warn", "busy": "busy", "idle": MUT}[state])
         self.status.setText(text)
 
     def start_scan(self):
@@ -1648,7 +1893,7 @@ class Window(QMainWindow):
         extra = f" · {info['notices']} Meldungen geprüft" if self.server["kind"] != "xhit" else ""
         self.set_status(("Abgebrochen · " if cancelled else "Fertig · ") + f"{n} {word}{extra}", "ok" if n else "warn")
         self.say(f"{n} {word} gefunden" if n else "Keine Kills gefunden – Empfindlichkeit erhöhen?",
-                 ACC if n else AMBER)
+                 T.acc if n else AMBER)
         if n:
             self.select(0)
 
