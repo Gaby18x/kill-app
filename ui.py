@@ -8,11 +8,21 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QGraphicsO
                                QSizePolicy, QSlider, QWidget)
 
 FONT_FAMILIES = ["Segoe UI Variable Display", "Segoe UI", "Inter", "Helvetica Neue", "Arial", "DejaVu Sans"]
-ACC = QColor("#3ee0b4")
-ACC2 = QColor("#42b8f0")
-RED = QColor("#ff5d73")
-AMBER = QColor("#ffc15a")
-DARK_ON_ACC = QColor("#04231b")
+# Helle Glas-Farbwelt (Pastell, Flieder-Akzent)
+ACC = QColor("#8c79ee")
+ACC2 = QColor("#b49cf8")
+ACC_TEXT = "#6a56d8"            # Akzentfarbe fuer Text (gut lesbar auf hellem Glas)
+RED = QColor("#f0506e")
+AMBER = QColor("#e8a23a")
+OK = QColor("#2fb98a")
+DARK_ON_ACC = QColor("#ffffff")
+TXT = "#2a2848"
+MUT = "rgba(42,40,72,150)"
+DIM = "rgba(42,40,72,105)"
+
+
+def ink(a=255):
+    return QColor(42, 40, 72, int(max(0, min(255, a))))
 
 
 def white(a):
@@ -29,7 +39,7 @@ def app_font(size=10.0, bold=False):
     f = QFont()
     f.setFamilies(FONT_FAMILIES)
     f.setPointSizeF(size)
-    f.setBold(bold)
+    f.setWeight(QFont.DemiBold if bold else QFont.Normal)
     return f
 
 
@@ -151,7 +161,7 @@ def paint_icon(p, name, rect, color, lw=1.9):
 class ElidedLabel(QLabel):
     """Einzeiliges Label, das zu langen Text mit … abkuerzt (statt das Layout aufzublaehen)."""
 
-    def __init__(self, text="", size=10.5, bold=False, color="rgba(255,255,255,235)", parent=None):
+    def __init__(self, text="", size=10.5, bold=False, color=TXT, parent=None):
         super().__init__(parent)
         self._text = text
         self._color = color
@@ -210,13 +220,13 @@ class Background(QWidget):
         pm = QPixmap(max(1, w), max(1, h))
         p = QPainter(pm)
         lg = QLinearGradient(0, 0, w, h)
-        lg.setColorAt(0.0, QColor("#090e2b"))
-        lg.setColorAt(0.55, QColor("#170f45"))
-        lg.setColorAt(1.0, QColor("#08233b"))
+        lg.setColorAt(0.0, QColor("#c7d2f3"))
+        lg.setColorAt(0.5, QColor("#e2d8f5"))
+        lg.setColorAt(1.0, QColor("#cfe0f6"))
         p.fillRect(0, 0, w, h, lg)
         m = max(w, h)
-        for cx, cy, r, c, a in ((0.08, 0.95, 0.55, "#17e0c0", 95), (0.92, 0.05, 0.60, "#8a5cff", 115),
-                                (0.78, 0.98, 0.42, "#ff5fa2", 55), (0.30, 0.22, 0.38, "#3a7bff", 60)):
+        for cx, cy, r, c, a in ((0.05, 0.98, 0.55, "#f5b9e2", 150), (0.95, 0.04, 0.60, "#a88cf6", 150),
+                                (0.80, 0.98, 0.45, "#9fd3f5", 140), (0.28, 0.12, 0.40, "#8fb0f5", 110)):
             rg = QRadialGradient(cx * w, cy * h, r * m)
             rg.setColorAt(0.0, with_alpha(QColor(c), a))
             rg.setColorAt(1.0, with_alpha(QColor(c), 0))
@@ -249,9 +259,9 @@ class Background(QWidget):
 
 # ------------------------------------------------------------------ Glas
 class Glass(QFrame):
-    """Milchglas-Flaeche: halbtransparentes Weiss, feiner heller Rand."""
+    """Milchglas-Flaeche: helles, halbtransparentes Weiss mit feinem Rand."""
 
-    def __init__(self, parent=None, radius=20, alpha=20, border=True):
+    def __init__(self, parent=None, radius=22, alpha=110, border=True):
         super().__init__(parent)
         self.radius, self.alpha, self.border = radius, alpha, border
         self.setAttribute(Qt.WA_StyledBackground, False)
@@ -261,18 +271,18 @@ class Glass(QFrame):
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0, white(self.alpha + 12))
-        g.setColorAt(1, white(self.alpha - 8))
+        g.setColorAt(0, white(self.alpha + 50))
+        g.setColorAt(1, white(self.alpha - 20))
         p.setPen(Qt.NoPen)
         p.setBrush(g)
         p.drawRoundedRect(r, self.radius, self.radius)
         if self.border:
             bg = QLinearGradient(r.topLeft(), r.bottomRight())
-            bg.setColorAt(0, white(80))
-            bg.setColorAt(0.5, white(22))
-            bg.setColorAt(1, white(40))
+            bg.setColorAt(0, white(235))
+            bg.setColorAt(0.5, white(120))
+            bg.setColorAt(1, white(190))
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(bg, 1))
+            p.setPen(QPen(bg, 1.2))
             p.drawRoundedRect(r, self.radius, self.radius)
 
 
@@ -336,33 +346,36 @@ class PopButton(QAbstractButton):
         hv = max(0.0, min(1.0, self.pop))
         k = self.kind
         if k == "accent":
-            for grow, a in ((9, 26), (5, 40)):
+            for grow, a in ((9, 30), (5, 46)):
                 p.setPen(Qt.NoPen)
                 p.setBrush(with_alpha(ACC, a * hv))
                 p.drawRoundedRect(r.adjusted(-grow * hv, -grow * hv, grow * hv, grow * hv), rad + grow * hv,
                                   rad + grow * hv)
             g = QLinearGradient(r.topLeft(), r.topRight())
-            g.setColorAt(0, ACC.lighter(100 + int(10 * hv)))
-            g.setColorAt(1, ACC2.lighter(100 + int(10 * hv)))
+            g.setColorAt(0, ACC.lighter(100 + int(8 * hv)))
+            g.setColorAt(1, ACC2.lighter(100 + int(6 * hv)))
             p.setBrush(g)
             p.setPen(Qt.NoPen)
             p.drawRoundedRect(r, rad, rad)
-            fg = DARK_ON_ACC
+            fg = QColor("#ffffff")
         elif k == "danger":
-            p.setBrush(with_alpha(RED, 55 + 55 * hv))
-            p.setPen(QPen(with_alpha(RED, 150), 1))
+            p.setBrush(with_alpha(RED, 38 + 40 * hv))
+            p.setPen(QPen(with_alpha(RED, 140), 1))
             p.drawRoundedRect(r, rad, rad)
-            fg = QColor("#ffc2cb")
+            fg = QColor("#c92a49")
         elif k == "flat":
-            p.setBrush(white(20 * hv))
+            p.setBrush(white(150 * hv))
             p.setPen(Qt.NoPen)
             p.drawRoundedRect(r, rad, rad)
-            fg = white(170 + 70 * hv)
+            fg = ink(150 + 90 * hv)
         else:                                            # glass
-            p.setBrush(white(24 + 26 * hv))
-            p.setPen(QPen(white(50 + 40 * hv), 1))
+            p.setBrush(white(120 + 100 * hv))
+            p.setPen(QPen(white(240), 1.1))
             p.drawRoundedRect(r, rad, rad)
-            fg = white(240)
+            p.setPen(QPen(with_alpha(ACC, 30 + 50 * hv), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), rad - 1, rad - 1)
+            fg = ink(230)
         p.setPen(fg)
         fm = QFontMetrics(self.font())
         tw = 0 if self.icon_only else fm.horizontalAdvance(self.text())
@@ -410,22 +423,20 @@ class Segmented(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(white(46), 1))
-        p.setBrush(white(18))
+        p.setPen(QPen(white(200), 1))
+        p.setBrush(ink(16))
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         n = len(self.items)
         w = (self.width() - 8) / n
         hr = QRectF(4 + self.pos * w, 4, w, self.height() - 8)
-        g = QLinearGradient(hr.topLeft(), hr.topRight())
-        g.setColorAt(0, ACC)
-        g.setColorAt(1, ACC2)
-        p.setPen(Qt.NoPen)
-        p.setBrush(g)
+        p.setPen(QPen(with_alpha(ACC, 70), 1))
+        p.setBrush(white(245))
         p.drawRoundedRect(hr, hr.height() / 2, hr.height() / 2)
         p.setFont(self.font())
         for i, t in enumerate(self.items):
             sel = max(0.0, 1 - abs(self.pos - i))
-            c = QColor(int(255 + (4 - 255) * sel), int(255 + (35 - 255) * sel), int(255 + (27 - 255) * sel), 230)
+            c = QColor(int(42 + (106 - 42) * sel), int(40 + (86 - 40) * sel), int(72 + (216 - 72) * sel),
+                       int(150 + 105 * sel))
             p.setPen(c)
             p.drawText(QRectF(4 + i * w, 0, w, self.height()), Qt.AlignCenter, t)
 
@@ -447,16 +458,14 @@ class Toggle(QAbstractButton):
         r = QRectF(self.rect()).adjusted(2, 4, -2, -4)
         k = max(0.0, min(1.0, self.k))
         g = QLinearGradient(r.topLeft(), r.topRight())
-        g.setColorAt(0, QColor(int(255 + (62 - 255) * k), int(255 + (224 - 255) * k), int(255 + (180 - 255) * k),
-                               int(50 + 180 * k)))
-        g.setColorAt(1, QColor(int(255 + (66 - 255) * k), int(255 + (184 - 255) * k), int(255 + (240 - 255) * k),
-                               int(50 + 180 * k)))
+        g.setColorAt(0, QColor(int(190 + (140 - 190) * k), int(188 + (121 - 188) * k), int(212 + (238 - 212) * k)))
+        g.setColorAt(1, QColor(int(190 + (180 - 190) * k), int(188 + (156 - 188) * k), int(212 + (248 - 212) * k)))
         p.setPen(Qt.NoPen)
         p.setBrush(g)
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         d = r.height() - 6
         x = r.left() + 3 + (r.width() - d - 6) * self.k
-        p.setBrush(QColor(0, 0, 0, 40))
+        p.setBrush(QColor(60, 50, 120, 50))
         p.drawEllipse(QRectF(x, r.top() + 4, d, d))
         p.setBrush(QColor("#ffffff"))
         p.drawEllipse(QRectF(x, r.top() + 3, d, d))
@@ -483,7 +492,7 @@ class Bar(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect())
         p.setPen(Qt.NoPen)
-        p.setBrush(white(30))
+        p.setBrush(ink(26))
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         if self.v > 0.003:
             fr = QRectF(r.left(), r.top(), max(r.height(), r.width() * self.v), r.height())
@@ -495,27 +504,33 @@ class Bar(QWidget):
 
 
 class SliderRow(QWidget):
+    """Titel links, Wert rechts, darunter der Regler ueber die volle Breite."""
+
     def __init__(self, title, lo, hi, steps, value, fmt, parent=None):
         super().__init__(parent)
         self.fmt = fmt
-        lay = QHBoxLayout(self)
+        from PySide6.QtWidgets import QVBoxLayout
+        lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(2)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
         self.title = QLabel(title)
-        self.title.setFixedWidth(112)
-        self.title.setStyleSheet("color: rgba(255,255,255,150);")
+        self.title.setStyleSheet(f"color: {MUT};")
+        self.val = QLabel()
+        self.val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.val.setFont(app_font(10, True))
+        top.addWidget(self.title)
+        top.addStretch(1)
+        top.addWidget(self.val)
         self.s = QSlider(Qt.Horizontal)
         self.s.setRange(0, steps)
         self.lo, self.hi, self.steps = lo, hi, steps
         self.s.setValue(round((value - lo) / (hi - lo) * steps))
         self.s.setCursor(Qt.PointingHandCursor)
-        self.val = QLabel()
-        self.val.setFixedWidth(92)
-        self.val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.val.setFont(app_font(10, True))
-        lay.addWidget(self.title)
-        lay.addWidget(self.s, 1)
-        lay.addWidget(self.val)
+        self.s.setFixedHeight(22)
+        lay.addLayout(top)
+        lay.addWidget(self.s)
         self.s.valueChanged.connect(lambda _: self.val.setText(self.fmt(self.value())))
         self.val.setText(self.fmt(self.value()))
 
@@ -678,16 +693,17 @@ class Overlay(QWidget):
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(4, 6, 18, int(165 * self.k)))
+        p.fillRect(self.rect(), QColor(70, 58, 130, int(95 * self.k)))
 
 
 class Toast(Glass):
     def __init__(self, parent):
-        super().__init__(parent, radius=18, alpha=34)
+        super().__init__(parent, radius=20, alpha=190)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 11, 20, 11)
+        lay.setContentsMargins(24, 11, 22, 11)
         self.lbl = QLabel()
         self.lbl.setFont(app_font(10.5, True))
+        self.lbl.setStyleSheet(f"color: {TXT};")
         lay.addWidget(self.lbl)
         self.dot = QColor(ACC)
         self.eff = QGraphicsOpacityEffect(self)
@@ -742,6 +758,57 @@ class Toast(Glass):
 
 
 # ------------------------------------------------------------------ Zeitleiste
+class SeekBar(QWidget):
+    """Duenne, anklickbare Fortschrittslinie ueber die ganze Videolaenge."""
+    seek = Signal(float)
+
+    def __init__(self, model, parent=None):
+        super().__init__(parent)
+        self.m = model
+        self.hov = 0.0
+        self.setFixedHeight(16)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+
+    def enterEvent(self, e):
+        tween(self, "hov", 1.0, 140)
+
+    def leaveEvent(self, e):
+        tween(self, "hov", 0.0, 140)
+
+    def _t(self, x):
+        return max(0.0, min(1.0, x / max(1, self.width()))) * self.m.duration
+
+    def mousePressEvent(self, e):
+        if self.m.has_video:
+            self.seek.emit(self._t(e.position().x()))
+
+    def mouseMoveEvent(self, e):
+        if self.m.has_video and e.buttons() & Qt.LeftButton:
+            self.seek.emit(self._t(e.position().x()))
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        h = 4 + 2 * self.hov
+        r = QRectF(0, (self.height() - h) / 2, self.width(), h)
+        p.setPen(Qt.NoPen)
+        p.setBrush(ink(24))
+        p.drawRoundedRect(r, h / 2, h / 2)
+        d = max(1.0, self.m.duration)
+        x = self.width() * max(0.0, min(1.0, self.m.pos / d)) if self.m.has_video else 0.0
+        if x > 0:
+            g = QLinearGradient(r.topLeft(), r.topRight())
+            g.setColorAt(0, ACC)
+            g.setColorAt(1, ACC2)
+            p.setBrush(g)
+            p.drawRoundedRect(QRectF(r.left(), r.top(), max(h, x), h), h / 2, h / 2)
+            if self.hov > 0.05:
+                p.setBrush(QColor("#ffffff"))
+                p.setPen(QPen(ACC, 1.5))
+                p.drawEllipse(QPointF(x, self.height() / 2), 5.5 * self.hov, 5.5 * self.hov)
+
+
 class Timeline(QWidget):
     """Ueberblick ueber das ganze Video + zoombare Detailansicht mit ziehbaren Clip-Raendern."""
     seek = Signal(float)
@@ -796,25 +863,25 @@ class Timeline(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         m, w, P = self.m, self.width(), self.PAD
         if not m.has_video:
-            p.setPen(white(110))
+            p.setPen(ink(120))
             p.setFont(app_font(10))
             p.drawText(self.rect(), Qt.AlignCenter, "Öffne ein Video, um die Zeitleiste zu sehen")
             return
         # Ueberblick
         p.setPen(Qt.NoPen)
-        p.setBrush(white(22))
+        p.setBrush(ink(22))
         p.drawRoundedRect(QRectF(P, 8, w - 2 * P, 18), 9, 9)
         for i, c in enumerate(m.clips):
             sel = i == m.sel
             x0 = self.ox(c.start)
-            p.setBrush(with_alpha(ACC, 230) if sel else white(75))
+            p.setBrush(with_alpha(ACC, 235) if sel else with_alpha(ACC, 90))
             p.drawRoundedRect(QRectF(x0, 8, max(self.ox(c.end) - x0, 4), 18), 4, 4)
             p.setBrush(RED)
             p.drawRect(QRectF(self.ox(c.kill) - 1, 8, 2, 18))
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(white(200), 1.6))
+        p.setPen(QPen(ink(150), 1.6))
         p.drawRoundedRect(QRectF(self.ox(self.v0), 6, max(6, self.ox(self.v1) - self.ox(self.v0)), 22), 6, 6)
-        p.setPen(QPen(QColor("white"), 2))
+        p.setPen(QPen(ink(235), 2))
         p.drawLine(QPointF(self.ox(m.pos), 4), QPointF(self.ox(m.pos), 30))
         # Lineal
         top = self.H_OV + 8
@@ -826,16 +893,16 @@ class Timeline(QWidget):
         while t <= self.v1:
             if t >= self.v0:
                 x = self.x_of(t)
-                p.setPen(white(50))
+                p.setPen(ink(45))
                 p.drawLine(QPointF(x, top + 13), QPointF(x, top + 21))
-                p.setPen(white(120))
+                p.setPen(ink(135))
                 txt = f"{int(t // 60)}:{int(t % 60):02d}" if step >= 1 else f"{t:.1f}s"
                 p.drawText(QRectF(x - 30, top - 6, 60, 14), Qt.AlignCenter, txt)
             t += step
         # Spur
         y0, y1 = top + 28, top + 28 + 62
-        p.setPen(QPen(white(30), 1))
-        p.setBrush(QColor(0, 0, 0, 70))
+        p.setPen(QPen(ink(34), 1))
+        p.setBrush(ink(14))
         p.drawRoundedRect(QRectF(P, y0, w - 2 * P, y1 - y0), 12, 12)
         p.setClipRect(QRectF(P, y0, w - 2 * P, y1 - y0))
         for i, c in enumerate(m.clips):
@@ -844,10 +911,10 @@ class Timeline(QWidget):
             sel = i == m.sel
             xa, xb = self.x_of(c.start), self.x_of(c.end)
             rr = QRectF(xa, y0 + 6, xb - xa, y1 - y0 - 12)
-            p.setBrush(with_alpha(ACC, 70) if sel else white(26))
-            p.setPen(QPen(ACC if sel else white(60), 1.6 if sel else 1))
+            p.setBrush(with_alpha(ACC, 60) if sel else ink(12))
+            p.setPen(QPen(ACC if sel else ink(55), 1.6 if sel else 1))
             p.drawRoundedRect(rr, 10, 10)
-            p.setPen(QColor("white") if sel else white(160))
+            p.setPen(ink(235) if sel else ink(150))
             p.setFont(app_font(9, True))
             p.drawText(rr, Qt.AlignCenter, f"KILL {i + 1:02d}  ·  {c.end - c.start:.1f}s")
             if sel:
@@ -862,10 +929,10 @@ class Timeline(QWidget):
         p.setClipping(False)
         px = self.x_of(m.pos)
         if P <= px <= w - P:
-            p.setPen(QPen(QColor("white"), 2))
+            p.setPen(QPen(ink(235), 2))
             p.drawLine(QPointF(px, top + 20), QPointF(px, y1))
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("white"))
+            p.setBrush(ink(235))
             p.drawPolygon(QPolygonF([QPointF(px - 6, top + 20), QPointF(px + 6, top + 20), QPointF(px, top + 30)]))
 
     # --- Maus
