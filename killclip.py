@@ -85,7 +85,56 @@ def label(text="", size=10.5, bold=False, color=None, wrap=False):
     return lb
 
 
-def paint_avatar(p, rect, name, radius=None, letter_size=14):
+_AVATAR_CACHE = {}
+
+
+def avatar_path(sid):
+    return os.path.join(core.DATA_DIR, "avatars", f"{sid}.png")
+
+
+def avatar_pix(sid):
+    """Profilbild eines Servers (QPixmap, quadratisch) oder None."""
+    if not sid:
+        return None
+    if sid not in _AVATAR_CACHE:
+        pm = QPixmap(avatar_path(sid))
+        _AVATAR_CACHE[sid] = None if pm.isNull() else pm
+    return _AVATAR_CACHE[sid]
+
+
+def save_avatar(sid, src_path):
+    """Schneidet das Bild mittig quadratisch zu und speichert es (256x256)."""
+    im = QImage(src_path)
+    if im.isNull():
+        return False
+    side = min(im.width(), im.height())
+    im = im.copy((im.width() - side) // 2, (im.height() - side) // 2, side, side).scaled(
+        256, 256, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    os.makedirs(os.path.dirname(avatar_path(sid)), exist_ok=True)
+    ok = im.save(avatar_path(sid), "PNG")
+    _AVATAR_CACHE.pop(sid, None)
+    return ok
+
+
+def remove_avatar(sid):
+    try:
+        os.remove(avatar_path(sid))
+    except OSError:
+        pass
+    _AVATAR_CACHE.pop(sid, None)
+
+
+def paint_avatar(p, rect, name, radius=None, letter_size=14, sid=None):
+    pm = avatar_pix(sid)
+    if pm is not None:
+        rad = radius if radius is not None else rect.width() / 2
+        path = QPainterPath()
+        path.addRoundedRect(rect, rad, rad)
+        p.save()
+        p.setClipPath(path)
+        p.drawPixmap(rect, pm, QRectF(0, 0, pm.width(), pm.height()))
+        p.restore()
+        return
     c0, c1 = avatar_colors(name)
     g = QLinearGradient(rect.topLeft(), rect.bottomRight())
     g.setColorAt(0, QColor(c0))
@@ -103,13 +152,15 @@ def paint_avatar(p, rect, name, radius=None, letter_size=14):
 class ServerCard(QWidget):
     clicked = Signal()
     edit = Signal()
+    delete = Signal()
     M, W, H = 10, 300, 168
 
-    def __init__(self, name="", sub="", tag="", add=False, parent=None):
+    def __init__(self, name="", sub="", tag="", add=False, sid=None, parent=None):
         super().__init__(parent)
-        self.name, self.sub, self.tag, self.add = name, sub, tag, add
+        self.name, self.sub, self.tag, self.add, self.sid = name, sub, tag, add, sid
         self.pop = 0.0
         self.ehov = 0.0
+        self.dhov = 0.0
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(self.W + 2 * self.M, self.H + 2 * self.M)
@@ -117,22 +168,29 @@ class ServerCard(QWidget):
     def _edit_rect(self):
         return QRectF(self.M + self.W - 46, self.M + 14, 32, 32)
 
+    def _del_rect(self):
+        return QRectF(self.M + self.W - 84, self.M + 14, 32, 32)
+
     def enterEvent(self, e):
         tween(self, "pop", 1.0, 200, QEasingCurve.OutBack)
 
     def leaveEvent(self, e):
         tween(self, "pop", 0.0, 180)
         tween(self, "ehov", 0.0, 120)
+        tween(self, "dhov", 0.0, 120)
 
     def mouseMoveEvent(self, e):
         if not self.add:
             tween(self, "ehov", 1.0 if self._edit_rect().contains(e.position()) else 0.0, 110)
+            tween(self, "dhov", 1.0 if self._del_rect().contains(e.position()) else 0.0, 110)
 
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
         if not self.add and self._edit_rect().contains(e.position()):
             self.edit.emit()
+        elif not self.add and self._del_rect().contains(e.position()):
+            self.delete.emit()
         else:
             self.clicked.emit()
 
@@ -173,16 +231,22 @@ class ServerCard(QWidget):
             p.setFont(app_font(9.5))
             p.drawText(QRectF(r.left(), c.y() + 42, r.width(), 22), Qt.AlignCenter, "Eigene Kill-Erkennung anlegen")
             return
-        paint_avatar(p, QRectF(r.left() + 22, r.top() + 22, 54, 54), self.name, 18, 20)
+        paint_avatar(p, QRectF(r.left() + 22, r.top() + 22, 54, 54), self.name, 18, 20, self.sid)
         p.setPen(ink(240))
         p.setFont(app_font(15, True))
         fm = QFontMetrics(p.font())
-        p.drawText(QRectF(r.left() + 90, r.top() + 24, r.width() - 150, 26), Qt.AlignVCenter,
-                   fm.elidedText(self.name, Qt.ElideRight, int(r.width() - 150)))
+        p.drawText(QRectF(r.left() + 90, r.top() + 24, r.width() - 180, 26), Qt.AlignVCenter,
+                   fm.elidedText(self.name, Qt.ElideRight, int(r.width() - 180)))
         p.setPen(ink(130))
         p.setFont(app_font(9.5))
         p.drawText(QRectF(r.left() + 90, r.top() + 50, r.width() - 110, 40),
                    int(Qt.AlignTop.value) | int(Qt.TextWordWrap.value), self.sub)
+        dr = self._del_rect()
+        p.setPen(Qt.NoPen)
+        p.setBrush(with_alpha(RED, 40 + 50 * self.dhov) if self.dhov > 0.05 else white(150))
+        p.drawEllipse(dr)
+        paint_icon(p, "trash", dr.adjusted(8 - 2 * self.dhov, 8 - 2 * self.dhov, -8 + 2 * self.dhov, -8 + 2 * self.dhov),
+                   QColor(T.err) if self.dhov > 0.3 else T.icon)
         er = self._edit_rect()
         p.setPen(Qt.NoPen)
         p.setBrush(white(150))
@@ -261,9 +325,10 @@ class SideServer(QWidget):
     """Server-Eintrag in der Seitenleiste (wie eine Playlist)."""
     clicked = Signal()
 
-    def __init__(self, name, active=False, parent=None):
+    def __init__(self, name, active=False, sid=None, parent=None):
         super().__init__(parent)
         self.name = name
+        self.sid = sid
         self.active = active
         self.pop = 0.0
         self.setFixedHeight(44)
@@ -290,7 +355,7 @@ class SideServer(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(T.sel_fill() if self.active else Qt.NoBrush)
         p.drawRoundedRect(r, 14, 14)
-        paint_avatar(p, QRectF(r.left() + 10, r.center().y() - 11, 22, 22), self.name, 8, 9)
+        paint_avatar(p, QRectF(r.left() + 10, r.center().y() - 11, 22, 22), self.name, 8, 9, self.sid)
         p.setPen(ink(235 if self.active else 175))
         p.setFont(app_font(10, self.active))
         fm = QFontMetrics(p.font())
@@ -561,8 +626,9 @@ class ServerChip(QWidget):
         self.setFixedWidth(200)
         self.setCursor(Qt.PointingHandCursor)
 
-    def set_server(self, name):
+    def set_server(self, name, sid=None):
         self.name = name
+        self.sid = sid
         self.update()
 
     def enterEvent(self, e):
@@ -587,7 +653,7 @@ class ServerChip(QWidget):
         p.setBrush(white(190))
         p.drawRoundedRect(r, 22, 22)
         if self.name:
-            paint_avatar(p, QRectF(r.left() + 8, r.center().y() - 15, 30, 30), self.name, 15, 12)
+            paint_avatar(p, QRectF(r.left() + 8, r.center().y() - 15, 30, 30), self.name, 15, 12, getattr(self, 'sid', None))
             p.setPen(ink(235))
             p.setFont(app_font(10.5, True))
             p.drawText(QRectF(r.left() + 48, r.top(), r.width() - 56, r.height()), Qt.AlignVCenter,
@@ -737,6 +803,56 @@ def tween_list(w, k, end):
     a.start()
 
 
+VIDEO_EXT = (".mp4", ".mkv", ".mov", ".flv", ".ts", ".avi", ".webm", ".m4v", ".wmv")
+
+
+class DropHint(QWidget):
+    """Zeigt beim Reinziehen einer Datei einen Hinweis ("Video hier loslassen")."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.k = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def show_hint(self):
+        self.setGeometry(self.parent().rect())
+        self.show()
+        self.raise_()
+        tween(self, "k", 1.0, 160)
+
+    def hide_hint(self):
+        tween(self, "k", 0.0, 140)
+        QTimer.singleShot(170, lambda: self.k < 0.05 and self.hide())
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        c = QColor(T.scrim)
+        c.setAlpha(int(c.alpha() * 0.85 * self.k))
+        p.fillRect(self.rect(), c)
+        w, h = 520, 250
+        r = QRectF((self.width() - w) / 2, (self.height() - h) / 2 + (1 - self.k) * 14, w, h)
+        p.setOpacity(self.k)
+        p.setPen(Qt.NoPen)
+        p.setBrush(T.dialog_fill)
+        p.drawRoundedRect(r, 32, 32)
+        pen = QPen(T.acc, 2.2)
+        pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r.adjusted(14, 14, -14, -14), 24, 24)
+        ic = QRectF(r.center().x() - 24, r.top() + 56, 48, 48)
+        paint_icon(p, "upload", ic, T.acc, 2.0)
+        p.setPen(ink(240))
+        p.setFont(app_font(17, True))
+        p.drawText(QRectF(r.left(), r.top() + 118, r.width(), 36), Qt.AlignCenter, "Video hier loslassen")
+        p.setPen(ink(140))
+        p.setFont(app_font(10))
+        p.drawText(QRectF(r.left(), r.top() + 154, r.width(), 28), Qt.AlignCenter, "mp4, mkv, mov, avi …")
+
+
 # ------------------------------------------------------------------ Hauptfenster
 class Window(QMainWindow):
     def __init__(self):
@@ -788,6 +904,9 @@ class Window(QMainWindow):
             self.stack.add(pg)
         self.overlay = Overlay(self.bg)
         self.toast = Toast(self.bg)
+        self.drop_hint = DropHint(self.bg)
+        self.pending_video = None
+        self.setAcceptDrops(True)
         self.controls = WinControls(self.bg)
         self.controls.minimize.connect(self.showMinimized)
         self.controls.toggle.connect(self.toggle_max)
@@ -812,7 +931,7 @@ class Window(QMainWindow):
     def load_settings(self):
         d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Verlustfrei", "open": True, "loop": True,
              "autoupd": True, "gpu": True, "servers": [], "names": {}, "last_server": "bruder",
-             "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
+             "hidden": [], "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
         try:
             with open(SETTINGS) as f:
                 d.update(json.load(f))
@@ -909,12 +1028,55 @@ class Window(QMainWindow):
             self.controls.raise_()
         if hasattr(self, "overlay"):
             self.overlay.setGeometry(self.bg.rect())
+            self.drop_hint.setGeometry(self.bg.rect())
             QTimer.singleShot(150, self._maybe_reflow)
 
     def _maybe_reflow(self):
         if self.srv_cols() != getattr(self, "_cols", None):
             self._cols = self.srv_cols()
             self.render_servers()
+
+    # ------------------------------------------------------------ Drag & Drop
+    @staticmethod
+    def _dropped_video(e):
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if p and p.lower().endswith(VIDEO_EXT):
+                return p
+        return None
+
+    def dragEnterEvent(self, e):
+        if self.overlay.isVisible():
+            return
+        if self._dropped_video(e):
+            e.acceptProposedAction()
+            self.drop_hint.show_hint()
+
+    def dragMoveEvent(self, e):
+        if self._dropped_video(e):
+            e.acceptProposedAction()
+
+    def dragLeaveEvent(self, e):
+        self.drop_hint.hide_hint()
+
+    def dropEvent(self, e):
+        self.drop_hint.hide_hint()
+        p = self._dropped_video(e)
+        if not p:
+            self.say("Das ist keine Videodatei", RED)
+            return
+        e.acceptProposedAction()
+        self.open_dropped(p)
+
+    def open_dropped(self, p):
+        if self.server is None:
+            self.pending_video = p
+            self.say("Wähle jetzt einen Server – dein Video wird danach geladen", AMBER)
+            self.go_page(0)
+            return
+        if self.stack.cur != 1:
+            self.go_page(1)
+        QTimer.singleShot(60, lambda: self.load_video(p))
 
     # ------------------------------------------------------------ Seitenleiste
     def build_sidebar(self):
@@ -973,7 +1135,7 @@ class Window(QMainWindow):
         v.setContentsMargins(0, 0, 4, 0)
         v.setSpacing(0)
         for s in self.all_servers():
-            it = SideServer(s["name"], bool(self.server and self.server["id"] == s["id"]))
+            it = SideServer(s["name"], bool(self.server and self.server["id"] == s["id"]), s["id"])
             it.clicked.connect(lambda s=s: self.enter_server(s))
             v.addWidget(it)
         v.addStretch(1)
@@ -1026,6 +1188,8 @@ class Window(QMainWindow):
     def all_servers(self):
         out = []
         for s in BUILTIN_SERVERS:
+            if s["id"] in self.st.get("hidden", []):
+                continue
             d = dict(s)
             d["name"] = self.st["names"].get(s["id"], s["name"])
             out.append(d)
@@ -1048,16 +1212,22 @@ class Window(QMainWindow):
         for i, s in enumerate(items):
             tag = "Aktiv" if self.server and self.server["id"] == s["id"] else (
                 "Zuletzt genutzt" if s["id"] == self.st.get("last_server") else "")
-            card = ServerCard(s["name"], KIND_TEXT.get(s["kind"], ""), tag)
+            card = ServerCard(s["name"], KIND_TEXT.get(s["kind"], ""), tag, sid=s["id"])
             card.clicked.connect(lambda s=s: self.enter_server(s))
             card.edit.connect(lambda s=s: self.open_edit_server(s))
+            card.delete.connect(lambda s=s: self.open_confirm_delete(s))
             grid.addWidget(card, i // cols, i % cols)
             self.tags[s["id"]] = card
         add = ServerCard(add=True)
         add.clicked.connect(lambda: self.open_add_server())
         grid.addWidget(add, len(items) // cols, len(items) % cols)
         grid.setColumnStretch(cols, 1)
-        grid.setRowStretch(len(items) // cols + 1, 1)
+        hidden = self.st.get("hidden", [])
+        if hidden:
+            rb = PopButton(f"Gelöschte Standard-Server wiederherstellen ({len(hidden)})", "refresh", "glass", 38)
+            rb.clicked.connect(self.restore_builtin)
+            grid.addWidget(rb, len(items) // cols + 1, 0, 1, cols, Qt.AlignLeft)
+        grid.setRowStretch(len(items) // cols + 2, 1)
         self.srv_scroll.setWidget(host)
         self.srv_host = host
         self.render_side_servers()
@@ -1065,11 +1235,78 @@ class Window(QMainWindow):
     def enter_server(self, s):
         self.server = s
         self.st["last_server"] = s["id"]
-        self.ed_chip.set_server(s["name"])
+        self.ed_chip.set_server(s["name"], s["id"])
         self.nav[1].set_nav_enabled(True)
         self.save_settings()
         self.render_servers()
         self.go_page(1)
+        if self.pending_video:
+            pv, self.pending_video = self.pending_video, None
+            QTimer.singleShot(260, lambda: self.load_video(pv))
+
+    # ------------------------------------------------------------ Profilbild-Auswahl
+    def avatar_picker(self, st, name_fn, sid=None):
+        """Zeile mit Vorschau + Knoepfen zum Waehlen/Entfernen eines Profilbilds. Zustand in st."""
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(14)
+        prev = QLabel()
+        prev.setFixedSize(64, 64)
+        row.addWidget(prev)
+        col = QVBoxLayout()
+        col.setSpacing(6)
+        col.addWidget(label("PROFILBILD (optional)", 8.5, True, DIM))
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+        pick = PopButton("Bild wählen …", "folder", "glass", 36)
+        rm = PopButton("Entfernen", None, "flat", 36)
+        btns.addWidget(pick)
+        btns.addWidget(rm)
+        btns.addStretch(1)
+        col.addLayout(btns)
+        row.addLayout(col, 1)
+
+        def refresh():
+            pm = QPixmap(128, 128)
+            pm.fill(Qt.transparent)
+            pm.setDevicePixelRatio(2)
+            pp = QPainter(pm)
+            pp.setRenderHint(QPainter.Antialiasing)
+            rect = QRectF(0, 0, 64, 64)
+            if st.get("avatar"):
+                im = QImage(st["avatar"])
+                if not im.isNull():
+                    side = min(im.width(), im.height())
+                    im = im.copy((im.width() - side) // 2, (im.height() - side) // 2, side, side)
+                    path = QPainterPath()
+                    path.addRoundedRect(rect, 20, 20)
+                    pp.setClipPath(path)
+                    pp.drawImage(rect, im)
+                    pp.end()
+                    prev.setPixmap(pm)
+                    return
+            sid_eff = None if st.get("removed") else sid
+            paint_avatar(pp, rect, name_fn() or "?", 20, 24, sid_eff)
+            pp.end()
+            prev.setPixmap(pm)
+
+        def do_pick():
+            p, _ = QFileDialog.getOpenFileName(self, "Profilbild wählen", "", "Bilder (*.png *.jpg *.jpeg *.webp *.bmp)")
+            if p and not QImage(p).isNull():
+                st["avatar"], st["removed"] = p, False
+                refresh()
+            elif p:
+                self.say("Bild konnte nicht geladen werden", RED)
+
+        def do_remove():
+            st["avatar"], st["removed"] = None, True
+            refresh()
+        pick.clicked.connect(do_pick)
+        rm.clicked.connect(do_remove)
+        refresh()
+        box.refresh = refresh
+        return box
 
     # ------------------------------------------------------------ Server hinzufuegen / bearbeiten
     def style_edit(self, le):
@@ -1077,13 +1314,16 @@ class Window(QMainWindow):
         le.setMinimumHeight(44)
 
     def open_add_server(self, state=None):
-        st = state or {"name": "", "kind": "Roter Kill-X", "result": None}
+        st = state or {"name": "", "kind": "Roter Kill-X", "result": None, "avatar": None}
         card = DialogCard("Neuer Server", "Lege fest, woran Kill App auf diesem Server einen Kill erkennt.")
         card.body.addWidget(label("NAME", 8.5, True, DIM))
         name = QLineEdit(st["name"])
         name.setPlaceholderText("z. B. Mein Server")
         self.style_edit(name)
         card.body.addWidget(name)
+        ap = self.avatar_picker(st, name.text)
+        name.textChanged.connect(lambda _: ap.refresh())
+        card.body.addWidget(ap)
         card.body.addWidget(label("ERKENNUNG", 8.5, True, DIM))
         seg = Segmented(["Roter Kill-X", "Kill-Meldung"])
         seg.set_current(st["kind"])
@@ -1134,6 +1374,8 @@ class Window(QMainWindow):
                     card.err.setText("Bitte zuerst die Kill-Meldung markieren.")
                     return
                 srv = self.write_notify_server(sid, nm, st["result"])
+            if st.get("avatar"):
+                save_avatar(sid, st["avatar"])
             self.st["servers"].append(srv)
             self.save_settings()
             self.render_servers()
@@ -1166,6 +1408,10 @@ class Window(QMainWindow):
         name = QLineEdit(s["name"])
         self.style_edit(name)
         card.body.addWidget(name)
+        ast = {"avatar": None, "removed": False}
+        ap = self.avatar_picker(ast, name.text, s["id"])
+        name.textChanged.connect(lambda _: ap.refresh())
+        card.body.addWidget(ap)
         if s["kind"] == "notify":
             pick = PopButton("Kill-Meldung neu markieren …", "crosshair", "glass", 42)
 
@@ -1177,9 +1423,6 @@ class Window(QMainWindow):
                                             lambda: self.open_edit_server(s))
             pick.clicked.connect(do_pick)
             card.body.addWidget(pick)
-        elif builtin:
-            card.body.addWidget(label("Dieser Server ist fest eingebaut. Du kannst ihn umbenennen, aber nicht löschen.",
-                                      10, color=MUT, wrap=True))
 
         def save():
             nm = name.text().strip()
@@ -1190,12 +1433,15 @@ class Window(QMainWindow):
             if nm.lower() in others:
                 card.err.setText("Diesen Namen gibt es schon.")
                 return
+            if ast["avatar"]:
+                save_avatar(s["id"], ast["avatar"])
+            elif ast["removed"]:
+                remove_avatar(s["id"])
             self.rename_server(s, nm)
             self.overlay.dismiss()
-        if not builtin:
-            dl = PopButton("Löschen", "trash", "danger", 40)
-            dl.clicked.connect(lambda: self.open_confirm_delete(s))
-            card.btns.insertWidget(0, dl)
+        dl = PopButton("Löschen", "trash", "danger", 40)
+        dl.clicked.connect(lambda: self.open_confirm_delete(s))
+        card.btns.insertWidget(0, dl)
         cancel = PopButton("Abbrechen", None, "glass", 40)
         cancel.clicked.connect(self.overlay.dismiss)
         sv = PopButton("Speichern", "check", "accent", 40)
@@ -1225,13 +1471,13 @@ class Window(QMainWindow):
                     x["name"] = nm
         if self.server and self.server["id"] == s["id"]:
             self.server["name"] = nm
-            self.ed_chip.set_server(nm)
+            self.ed_chip.set_server(nm, s["id"])
         self.save_settings()
         self.render_servers()
         self.say("Gespeichert")
 
     def open_confirm_delete(self, s):
-        card = DialogCard("Server löschen?", f"„{s['name']}“ und seine Einstellungen werden entfernt.", 460)
+        card = DialogCard("Server löschen?", f"„{s['name']}“ wird entfernt." + (" Du kannst ihn später wiederherstellen." if s.get("builtin") else " Das kann nicht rückgängig gemacht werden."), 460)
         cancel = PopButton("Abbrechen", None, "glass", 40)
         cancel.clicked.connect(self.overlay.dismiss)
         yes = PopButton("Löschen", "trash", "danger", 40)
@@ -1241,18 +1487,31 @@ class Window(QMainWindow):
         self.overlay.present(card)
 
     def delete_server(self, s):
-        self.st["servers"] = [x for x in self.st["servers"] if x["id"] != s["id"]]
-        shutil.rmtree(os.path.join(core.DATA_DIR, "servers", s["id"]), ignore_errors=True)
+        if s.get("builtin"):
+            if s["id"] not in self.st["hidden"]:
+                self.st["hidden"].append(s["id"])
+        else:
+            self.st["servers"] = [x for x in self.st["servers"] if x["id"] != s["id"]]
+            shutil.rmtree(os.path.join(core.DATA_DIR, "servers", s["id"]), ignore_errors=True)
+        remove_avatar(s["id"])
         if self.st.get("last_server") == s["id"]:
-            self.st["last_server"] = "bruder"
+            self.st["last_server"] = ""
         if self.server and self.server["id"] == s["id"]:
             self.server = None
             self.nav[1].set_nav_enabled(False)
             self.ed_chip.set_server("")
+            if self.stack.cur == 1:
+                self.go_page(0)
         self.save_settings()
         self.render_servers()
         self.overlay.dismiss()
         self.say("Server gelöscht")
+
+    def restore_builtin(self):
+        self.st["hidden"] = []
+        self.save_settings()
+        self.render_servers()
+        self.say("Standard-Server wiederhergestellt")
 
     def open_region_picker(self, path, done, back):
         pm = QPixmap(path)
@@ -1428,11 +1687,11 @@ class Window(QMainWindow):
         top.addWidget(rw)
 
         g, lay = panel("Kills suchen", "Findet automatisch jeden Kill im Video")
-        self.s_pre = SliderRow("Vor dem Kill", 0, 10, 20, self.st["pre"], lambda v: f"{v:.1f} s")
-        self.s_post = SliderRow("Nach dem Kill", 0, 10, 20, self.st["post"], lambda v: f"{v:.1f} s")
+        self.s_pre = SliderRow("Vor dem Kill", 0, 10, 100, self.st["pre"], lambda v: f"{v:.1f} s")
+        self.s_post = SliderRow("Nach dem Kill", 0, 10, 100, self.st["post"], lambda v: f"{v:.1f} s")
         names = ["", "sehr niedrig", "niedrig", "niedrig", "mittel", "mittel", "mittel+", "hoch", "hoch", "sehr hoch",
                  "max"]
-        self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 9, self.st["sens"], lambda v: names[int(round(v))])
+        self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 0, self.st["sens"], lambda v: names[int(round(v))])
         for s_ in (self.s_pre, self.s_post, self.s_sens):
             lay.addWidget(s_)
         self.scan_btn = PopButton("Kills suchen", "crosshair", "accent", 46)

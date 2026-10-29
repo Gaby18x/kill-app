@@ -503,6 +503,71 @@ class Bar(QWidget):
             p.drawRoundedRect(fr, r.height() / 2, r.height() / 2)
 
 
+class SmoothSlider(QWidget):
+    """Schlichter, stufenlos gleitender Regler (kein Aufploppen, kein Einrasten beim Ziehen)."""
+    valueChanged = Signal(float)
+    PAD = 11
+
+    def __init__(self, lo, hi, value, step=0.0, parent=None):
+        super().__init__(parent)
+        self.lo, self.hi, self.step = float(lo), float(hi), float(step)
+        self._v = float(value)
+        self.drag = False
+        self.setFixedHeight(26)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def value(self):
+        return self._v
+
+    def _set(self, v):
+        v = max(self.lo, min(self.hi, v))
+        if self.step > 0:
+            v = round((v - self.lo) / self.step) * self.step + self.lo
+        if v != self._v:
+            self._v = v
+            self.valueChanged.emit(v)
+            self.update()
+
+    def _from_x(self, x):
+        t = (x - self.PAD) / max(1.0, self.width() - 2 * self.PAD)
+        return self.lo + max(0.0, min(1.0, t)) * (self.hi - self.lo)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.drag = True
+            self._set(self._from_x(e.position().x()))
+
+    def mouseMoveEvent(self, e):
+        if self.drag:
+            self._set(self._from_x(e.position().x()))
+
+    def mouseReleaseEvent(self, e):
+        self.drag = False
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        cy = self.height() / 2
+        left, right = self.PAD, self.width() - self.PAD
+        t = (self._v - self.lo) / max(1e-9, self.hi - self.lo)
+        x = left + (right - left) * t
+        p.setPen(Qt.NoPen)
+        p.setBrush(ink(38))
+        p.drawRoundedRect(QRectF(left, cy - 3, right - left, 6), 3, 3)
+        g = QLinearGradient(left, 0, right, 0)
+        g.setColorAt(0, T.acc)
+        g.setColorAt(1, T.acc2)
+        p.setBrush(g)
+        p.drawRoundedRect(QRectF(left, cy - 3, max(6.0, x - left), 6), 3, 3)
+        # Griff: weisser Kreis mit weichem Schatten, immer gleich gross
+        p.setBrush(QColor(30, 25, 70, 26))
+        p.drawEllipse(QPointF(x, cy + 1.5), 10.5, 10.5)
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QPointF(x, cy), 9, 9)
+        p.setBrush(T.acc)
+        p.drawEllipse(QPointF(x, cy), 3.4, 3.4)
+
+
 class SliderRow(QWidget):
     """Titel links, Wert rechts, darunter der Regler ueber die volle Breite."""
 
@@ -512,7 +577,7 @@ class SliderRow(QWidget):
         from PySide6.QtWidgets import QVBoxLayout
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
+        lay.setSpacing(0)
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         self.title = QLabel(title)
@@ -523,19 +588,15 @@ class SliderRow(QWidget):
         top.addWidget(self.title)
         top.addStretch(1)
         top.addWidget(self.val)
-        self.s = QSlider(Qt.Horizontal)
-        self.s.setRange(0, steps)
-        self.lo, self.hi, self.steps = lo, hi, steps
-        self.s.setValue(round((value - lo) / (hi - lo) * steps))
-        self.s.setCursor(Qt.PointingHandCursor)
-        self.s.setFixedHeight(22)
+        # steps > 0: feines Raster (nur zur Anzeige), steps = 0: voellig stufenlos
+        self.s = SmoothSlider(lo, hi, value, (hi - lo) / steps if steps > 0 else 0.0)
         lay.addLayout(top)
         lay.addWidget(self.s)
         self.s.valueChanged.connect(lambda _: self.val.setText(self.fmt(self.value())))
         self.val.setText(self.fmt(self.value()))
 
     def value(self):
-        return self.lo + self.s.value() / self.steps * (self.hi - self.lo)
+        return self.s.value()
 
 
 # ------------------------------------------------------------------ Uebergaenge
