@@ -1,6 +1,12 @@
+#ifndef MyVer
+#define MyVer "1.0"
+#endif
+
 [Setup]
+AppId={{9F2B6A1C-4D3E-4F7A-8B21-5C6D7E8F9A01}
+SetupIconFile=assets\icon.ico
 AppName=Kill App
-AppVersion=1.0
+AppVersion={#MyVer}
 DefaultDirName={autopf}\Kill App
 DefaultGroupName=Kill App
 OutputDir=installer
@@ -22,4 +28,4 @@ Name: "{group}\Kill App"; Filename: "{app}\KillApp.exe"
 Name: "{autodesktop}\Kill App"; Filename: "{app}\KillApp.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\KillApp.exe"; Description: "Kill App starten"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\KillApp.exe"; Description: "Kill App starten"; Flags: nowait postinstall

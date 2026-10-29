@@ -8,15 +8,22 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      APP_VER: 1.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Version setzen
+        shell: pwsh
+        run: |
+          (Get-Content killclip.py -Raw) -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$env:APP_VER`"" | Set-Content killclip.py -Encoding utf8 -NoNewline
+          Select-String -Path killclip.py -Pattern 'APP_VERSION = '
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconfirm --windowed --name KillApp --collect-all imageio_ffmpeg --collect-all customtkinter --add-data "profiles;profiles" killclip.py
+      - run: pyinstaller --noconfirm --windowed --name KillApp --icon assets/icon.ico --collect-all imageio_ffmpeg --collect-all customtkinter --add-data "profiles;profiles" --add-data "assets;assets" killclip.py
       - run: choco install innosetup -y --no-progress
-      - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
+      - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyVer=$env:APP_VER installer.iss'
       - uses: actions/upload-artifact@v4
         with:
           name: KillApp-Setup
@@ -24,6 +31,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Kill App Installer
+          tag_name: v${{ env.APP_VER }}
+          name: Kill App v${{ env.APP_VER }}
+          make_latest: true
           files: installer/KillApp-Setup.exe

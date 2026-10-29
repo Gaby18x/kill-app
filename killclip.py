@@ -3,15 +3,58 @@
 Erkennt den roten Kill-Hitmarker in der Bildmitte, legt pro Kill einen Clip
 (Standard: 4 s davor, 2 s danach) an und exportiert mit FFmpeg.
 """
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
 # ----------------------------------------------------------------- Kern ----
+
+APP_VERSION = "1.0"                 # wird beim Build automatisch gesetzt
+UPDATE_REPO = "Gaby18x/kill-app"    # oeffentliches Repo mit den Releases
+
+
+def parse_ver(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)) or (0,)
+
+
+def check_update():
+    """Gibt (version, download_url) zurueck, wenn es ein neueres Release gibt, sonst None."""
+    req = urllib.request.Request(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
+                                 headers={"User-Agent": "KillApp", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    tag = data.get("tag_name", "")
+    if parse_ver(tag) > parse_ver(APP_VERSION):
+        for a in data.get("assets", []):
+            if a["name"].lower().endswith(".exe"):
+                return tag.lstrip("v"), a["browser_download_url"]
+    return None
+
+
+def download_file(url, progress=None):
+    dst = os.path.join(tempfile.gettempdir(), "KillApp-Setup.exe")
+    req = urllib.request.Request(url, headers={"User-Agent": "KillApp"})
+    with urllib.request.urlopen(req, timeout=30) as r, open(dst, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        got = 0
+        while True:
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            got += len(chunk)
+            if progress and total:
+                progress(got / total)
+    return dst
+
 
 
 def resource(*parts):
@@ -189,7 +232,6 @@ def export_clip(ffmpeg, src, start, end, dst, mode):
 
 
 # ------------------------------------------------------------------ GUI ----
-import json
 import queue
 import threading
 import time
@@ -421,6 +463,52 @@ class App(ctk.CTk):
         self.after(40, self.pump)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(200, self.check_ffmpeg)
+        self.after(300, self.set_icon)
+        self.after(1500, self.start_update_check)
+
+    def set_icon(self):
+        try:
+            if sys.platform.startswith("win"):
+                self.iconbitmap(resource("assets", "icon.ico"))
+            else:
+                self.iconphoto(True, tk.PhotoImage(file=resource("assets", "logo.png")))
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------ Updates
+    def start_update_check(self):
+        def work():
+            try:
+                res = check_update()
+            except Exception:
+                return
+            if res:
+                self.ui(self.show_update, *res)
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_update(self, version, url):
+        self.update_url = url
+        self.update_lbl.configure(text=f"Update verfügbar: v{version}")
+        self.keys_box.pack_forget()
+        self.update_box.pack(side="bottom", fill="x", padx=20, pady=(0, 14))
+        self.toast(f"🚀  Neue Version v{version} verfügbar", ACC)
+
+    def do_update(self):
+        self.update_btn.configure(state="disabled", text="Lade herunter …")
+
+        def work():
+            try:
+                path = download_file(self.update_url,
+                                     lambda p: self.ui(self.update_btn.configure, {"text": f"Lade … {int(p * 100)} %"}))
+                self.ui(self.run_installer, path)
+            except Exception as e:
+                self.ui(self.update_btn.configure, {"state": "normal", "text": "Erneut versuchen"})
+                self.ui(self.toast, f"Update fehlgeschlagen: {e}", RED)
+        threading.Thread(target=work, daemon=True).start()
+
+    def run_installer(self, path):
+        subprocess.Popen([path, "/SILENT", "/NORESTART", "/CLOSEAPPLICATIONS"], creationflags=NOWIN)
+        self.on_close()
 
     def ui(self, fn, *args):
         """Thread-sicher: fuehrt fn(*args) im Hauptthread aus."""
@@ -506,6 +594,12 @@ class App(ctk.CTk):
         pad = dict(padx=20)
         logo = ctk.CTkFrame(sb, fg_color="transparent")
         logo.pack(anchor="w", pady=(26, 0), **pad)
+        try:
+            im = Image.open(resource("assets", "logo.png"))
+            self.logo_img = ctk.CTkImage(light_image=im, dark_image=im, size=(46, 46))
+            ctk.CTkLabel(logo, image=self.logo_img, text="").pack(side="left", padx=(0, 10))
+        except Exception:
+            pass
         self.label(logo, "KILL", 30, TEXT, True).pack(side="left")
         self.label(logo, " APP", 30, ACC_HI, True).pack(side="left")
         self.label(sb, "Automatischer Kill-Clip Cutter", 11, MUTED).pack(anchor="w", **pad)
@@ -544,7 +638,14 @@ class App(ctk.CTk):
         self.status.pack(fill="x", pady=(6, 0), **pad)
 
         keys = ctk.CTkFrame(sb, fg_color=CARD, corner_radius=12)
-        keys.pack(side="bottom", fill="x", pady=20, **pad)
+        keys.pack(side="bottom", fill="x", pady=(0, 16), **pad)
+        self.keys_box = keys
+        self.label(sb, f"Version {APP_VERSION}", 10, MUTED).pack(side="bottom", pady=(0, 6))
+        self.update_box = ctk.CTkFrame(sb, fg_color="#241f4d", corner_radius=12, border_width=1, border_color=ACC)
+        self.update_lbl = self.label(self.update_box, "", 12, TEXT, True)
+        self.update_lbl.pack(padx=14, pady=(10, 4))
+        self.update_btn = self.button(self.update_box, "Jetzt aktualisieren", self.do_update, "accent", height=34)
+        self.update_btn.pack(fill="x", padx=14, pady=(0, 12))
         self.label(keys, "TASTEN", 10, ACC_HI, True).pack(anchor="w", padx=14, pady=(10, 2))
         self.label(keys, "Leertaste  Play / Pause\n← →  ±1 s   (Shift: 1 Bild)\n↑ ↓  Vorheriger / Nächster Clip\n"
                          "I / O  Start / Ende setzen\nEntf  Clip löschen",
