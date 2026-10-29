@@ -96,6 +96,11 @@ class Theme:
         }
         return t.get(name, self.text)
 
+    def video_stops(self):
+        """Hintergrund der Vorschau-Flaeche (leer/Letterbox): dunkle Variante der Akzentfarbe."""
+        h, s, l = _hsl(self.acc)
+        return hsl(h, 0.40, 0.26, 0.94), hsl(h + 0.03, 0.46, 0.12, 0.96)
+
     # ---- Hintergrund
     def bg_stops(self):
         h, s, l = _hsl(self.bg)

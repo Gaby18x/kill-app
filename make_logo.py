@@ -1,62 +1,53 @@
-"""Erzeugt assets/logo.png und assets/icon.ico (Fadenkreuz + roter Kill-X)."""
+"""Erzeugt assets/logo.png und assets/icon.ico: schlichtes weisses "K" auf dunklem, abgerundetem Quadrat."""
 from PIL import Image, ImageDraw, ImageFilter
 
 S = 1024
-SS = 2                      # Supersampling
+SS = 2
 N = S * SS
+
 img = Image.new("RGBA", (N, N), (0, 0, 0, 0))
 
-# Hintergrund: abgerundetes Quadrat mit diagonalem Farbverlauf (dunkel -> violett)
+# Hintergrund: sehr dunkler, leicht blaeulicher Graphit-Verlauf
 grad = Image.new("RGBA", (N, N))
 px = grad.load()
-c0, c1 = (22, 16, 58), (124, 92, 255)
+c0, c1 = (44, 47, 66), (16, 17, 26)
 for y in range(N):
     for x in range(N):
-        t = (x * 0.35 + y * 0.65) / N
-        t = min(1.0, max(0.0, t * 1.15 - 0.1))
+        t = (x * 0.4 + y * 0.6) / N
         px[x, y] = tuple(int(c0[i] + (c1[i] - c0[i]) * t) for i in range(3)) + (255,)
 mask = Image.new("L", (N, N), 0)
-ImageDraw.Draw(mask).rounded_rectangle((0, 0, N - 1, N - 1), radius=int(N * 0.23), fill=255)
+ImageDraw.Draw(mask).rounded_rectangle((0, 0, N - 1, N - 1), radius=int(N * 0.24), fill=255)
 img.paste(grad, (0, 0), mask)
 
-cx = cy = N // 2
+# feiner Lichtrand oben
+rim = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+d = ImageDraw.Draw(rim)
+d.rounded_rectangle((3, 3, N - 4, N - 4), radius=int(N * 0.24), outline=(255, 255, 255, 38), width=4)
+img = Image.alpha_composite(img, rim)
+
+# Buchstabe K aus drei runden Strichen
+w = int(N * 0.118)
+white = (255, 255, 255, 250)
+k = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+d = ImageDraw.Draw(k)
 
 
-def layer():
-    return Image.new("RGBA", (N, N), (0, 0, 0, 0))
+def stroke(a, b):
+    ax, ay, bx, by = a[0] * N, a[1] * N, b[0] * N, b[1] * N
+    d.line((ax, ay, bx, by), fill=white, width=w)
+    for x, y in ((ax, ay), (bx, by)):
+        d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=white)
 
 
-# Fadenkreuz: Ring + vier Striche
-ring = layer()
-d = ImageDraw.Draw(ring)
-r = int(N * 0.30)
-d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(235, 230, 255, 235), width=int(N * 0.028))
-gap, ln, w = int(N * 0.09), int(N * 0.13), int(N * 0.028)
-d.rectangle((cx - w // 2, cy - r - ln // 2, cx + w // 2, cy - r + ln // 2), fill=(235, 230, 255, 235))
-d.rectangle((cx - w // 2, cy + r - ln // 2, cx + w // 2, cy + r + ln // 2), fill=(235, 230, 255, 235))
-d.rectangle((cx - r - ln // 2, cy - w // 2, cx - r + ln // 2, cy + w // 2), fill=(235, 230, 255, 235))
-d.rectangle((cx + r - ln // 2, cy - w // 2, cx + r + ln // 2, cy + w // 2), fill=(235, 230, 255, 235))
+stroke((0.355, 0.27), (0.355, 0.73))        # Stamm
+stroke((0.375, 0.50), (0.665, 0.27))        # oberer Arm
+stroke((0.475, 0.455), (0.675, 0.73))       # Bein
 
-# Roter Kill-X (vier Arme) mit Leuchten
-x_layer = layer()
-d = ImageDraw.Draw(x_layer)
-a, b, th = int(N * 0.045), int(N * 0.17), int(N * 0.058)
-for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
-    d.line((cx + sx * a, cy + sy * a, cx + sx * b, cy + sy * b), fill=(255, 61, 99, 255), width=th)
-    for (px_, py_) in ((cx + sx * a, cy + sy * a), (cx + sx * b, cy + sy * b)):
-        d.ellipse((px_ - th // 2, py_ - th // 2, px_ + th // 2, py_ + th // 2), fill=(255, 61, 99, 255))
-glow = x_layer.filter(ImageFilter.GaussianBlur(N * 0.03))
-glow2 = Image.new("RGBA", (N, N), (255, 61, 99, 0))
-glow2.putalpha(glow.split()[3].point(lambda v: min(255, int(v * 1.6))))
-
-# Leichter Glanz oben
-shine = layer()
-ImageDraw.Draw(shine).ellipse((-N * 0.2, -N * 0.75, N * 1.2, N * 0.45), fill=(255, 255, 255, 22))
-shine_masked = Image.new("RGBA", (N, N), (0, 0, 0, 0))
-shine_masked.paste(shine, (0, 0), mask)
-
-for l in (shine_masked, ring, glow2, x_layer):
-    img = Image.alpha_composite(img, l)
+shadow = k.filter(ImageFilter.GaussianBlur(N * 0.012))
+sh = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+sh.putalpha(shadow.split()[3].point(lambda v: int(v * 0.35)))
+img = Image.alpha_composite(img, sh)
+img = Image.alpha_composite(img, k)
 
 img = img.resize((S, S), Image.LANCZOS)
 img.save("assets/logo.png")

@@ -146,15 +146,9 @@ class ServerCard(QWidget):
         p.translate(c)
         p.scale(1 + 0.04 * self.pop, 1 + 0.04 * self.pop)
         p.translate(-c)
-        if hv > 0:
-            for grow, a in ((14, 16), (8, 26)):
-                p.setPen(Qt.NoPen)
-                p.setBrush(with_alpha(T.acc, a * hv))
-                p.drawRoundedRect(r.adjusted(-grow * hv, -grow * hv, grow * hv, grow * hv), 24 + grow * hv,
-                                  24 + grow * hv)
         g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0, white(210 + 30 * hv))
-        g.setColorAt(1, white(130 + 60 * hv))
+        g.setColorAt(0, white(220))
+        g.setColorAt(1, white(150))
         p.setPen(Qt.NoPen)
         p.setBrush(g)
         p.drawRoundedRect(r, 24, 24)
@@ -191,9 +185,9 @@ class ServerCard(QWidget):
                    int(Qt.AlignTop.value) | int(Qt.TextWordWrap.value), self.sub)
         er = self._edit_rect()
         p.setPen(Qt.NoPen)
-        p.setBrush(white(140 + 90 * self.ehov))
+        p.setBrush(white(150))
         p.drawEllipse(er)
-        paint_icon(p, "edit", er.adjusted(8, 8, -8, -8), T.icon)
+        paint_icon(p, "edit", er.adjusted(8 - 2 * self.ehov, 8 - 2 * self.ehov, -8 + 2 * self.ehov, -8 + 2 * self.ehov), T.icon)
         p.setPen(T.acc_text)
         p.setFont(app_font(10.5, True))
         p.drawText(QRectF(r.left() + 22, r.bottom() - 46, 120, 26), Qt.AlignVCenter, "Auswählen")
@@ -251,8 +245,6 @@ class NavItem(QWidget):
         p.translate(-c)
         a = self.sel
         p.setPen(Qt.NoPen)
-        p.setBrush(white(120 * self.pop * (1 - a)))
-        p.drawRoundedRect(r, 16, 16)
         p.setBrush(T.sel_fill(a))
         p.drawRoundedRect(r, 16, 16)
         if a > 0.02:
@@ -296,7 +288,7 @@ class SideServer(QWidget):
         p.scale(1 + 0.025 * self.pop, 1 + 0.025 * self.pop)
         p.translate(-c)
         p.setPen(Qt.NoPen)
-        p.setBrush(T.sel_fill() if self.active else white(120 * self.pop))
+        p.setBrush(T.sel_fill() if self.active else Qt.NoBrush)
         p.drawRoundedRect(r, 14, 14)
         paint_avatar(p, QRectF(r.left() + 10, r.center().y() - 11, 22, 22), self.name, 8, 9)
         p.setPen(ink(235 if self.active else 175))
@@ -345,8 +337,12 @@ class ClipRow(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
         r = QRectF(self.rect()).adjusted(2, 3, -2, -3)
+        c0 = r.center()
+        p.translate(c0)
+        p.scale(1 + 0.02 * self.hov, 1 + 0.02 * self.hov)
+        p.translate(-c0)
         p.setPen(QPen(with_alpha(T.acc, 90), 1.2) if self.selected else Qt.NoPen)
-        p.setBrush(T.sel_fill() if self.selected else white(130 * self.hov))
+        p.setBrush(T.sel_fill() if self.selected else Qt.NoBrush)
         p.drawRoundedRect(r, 18, 18)
         p.setPen(ink(110))
         p.setFont(app_font(10))
@@ -412,8 +408,9 @@ class VideoWidget(QWidget):
         path.addRoundedRect(r, 24, 24)
         p.setClipPath(path)
         g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0, QColor(58, 50, 104, 235))
-        g.setColorAt(1, QColor(30, 26, 64, 240))
+        c0, c1 = T.video_stops()
+        g.setColorAt(0, c0)
+        g.setColorAt(1, c1)
         p.fillRect(self.rect(), g)
         if self.img is not None and self.has_video:
             dpr = self.devicePixelRatioF()
@@ -587,7 +584,7 @@ class ServerChip(QWidget):
         p.scale(1 + 0.03 * self.pop, 1 + 0.03 * self.pop)
         p.translate(-c)
         p.setPen(QPen(white(240), 1.1))
-        p.setBrush(white(170 + 50 * self.pop))
+        p.setBrush(white(190))
         p.drawRoundedRect(r, 22, 22)
         if self.name:
             paint_avatar(p, QRectF(r.left() + 8, r.center().y() - 15, 30, 30), self.name, 15, 12)
@@ -629,9 +626,7 @@ class ColorDot(QWidget):
         p.setPen(QPen(white(240), 2))
         p.setBrush(self.getter())
         p.drawEllipse(c, r, r)
-        p.setPen(QPen(ink(60), 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(c, r + 2.5, r + 2.5)
+
 
 
 class PresetCard(QWidget):
@@ -668,7 +663,7 @@ class PresetCard(QWidget):
         p.translate(-c)
         on = self.active()
         p.setPen(QPen(QColor(T.acc) if on else white(220), 2 if on else 1.1))
-        p.setBrush(white(150 + 60 * self.pop))
+        p.setBrush(white(170))
         p.drawRoundedRect(r, 18, 18)
         cx, cy = r.center().x(), r.top() + 28
         for dx, col in ((-9, self.preset["acc"]), (9, self.preset["acc2"])):

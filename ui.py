@@ -351,35 +351,24 @@ class PopButton(QAbstractButton):
         hv = max(0.0, min(1.0, self.pop))
         k = self.kind
         if k == "accent":
-            for grow, a in ((9, 30), (5, 46)):
-                p.setPen(Qt.NoPen)
-                p.setBrush(with_alpha(T.acc, a * hv))
-                p.drawRoundedRect(r.adjusted(-grow * hv, -grow * hv, grow * hv, grow * hv), rad + grow * hv,
-                                  rad + grow * hv)
             g = QLinearGradient(r.topLeft(), r.topRight())
-            g.setColorAt(0, T.acc.lighter(100 + int(8 * hv)))
-            g.setColorAt(1, T.acc2.lighter(100 + int(6 * hv)))
+            g.setColorAt(0, T.acc)
+            g.setColorAt(1, T.acc2)
             p.setBrush(g)
             p.setPen(Qt.NoPen)
             p.drawRoundedRect(r, rad, rad)
             fg = QColor("#ffffff")
         elif k == "danger":
-            p.setBrush(with_alpha(RED, 38 + 40 * hv))
+            p.setBrush(with_alpha(RED, 50))
             p.setPen(QPen(with_alpha(RED, 140), 1))
             p.drawRoundedRect(r, rad, rad)
             fg = QColor(T.err)
         elif k == "flat":
-            p.setBrush(white(150 * hv))
-            p.setPen(Qt.NoPen)
-            p.drawRoundedRect(r, rad, rad)
             fg = ink(150 + 90 * hv)
         else:                                            # glass
-            p.setBrush(white(120 + 100 * hv))
+            p.setBrush(white(150))
             p.setPen(QPen(white(240), 1.1))
             p.drawRoundedRect(r, rad, rad)
-            p.setPen(QPen(with_alpha(T.acc, 30 + 50 * hv), 1))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), rad - 1, rad - 1)
             fg = ink(230)
         p.setPen(fg)
         fm = QFontMetrics(self.font())
