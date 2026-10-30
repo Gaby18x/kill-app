@@ -831,7 +831,9 @@ class DropHint(QWidget):
         p.setRenderHint(QPainter.TextAntialiasing)
         c = QColor(T.scrim)
         c.setAlpha(int(c.alpha() * 0.85 * self.k))
+        p.setClipPath(self.parent().clip_path())
         p.fillRect(self.rect(), c)
+        p.setClipping(False)
         w, h = 520, 250
         r = QRectF((self.width() - w) / 2, (self.height() - h) / 2 + (1 - self.k) * 14, w, h)
         p.setOpacity(self.k)
@@ -859,6 +861,7 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle("Kill App")
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)        # keine Windows-Titelleiste
+        self.setAttribute(Qt.WA_TranslucentBackground)                # das Fenster selbst ist der abgerundete Kasten
         self.setMinimumSize(1280, 820)
         self.resize(1440, 900)
         self.bridge = Bridge()
@@ -887,12 +890,9 @@ class Window(QMainWindow):
         self.bg = Background()
         self.setCentralWidget(self.bg)
         root = QHBoxLayout(self.bg)
-        root.setContentsMargins(22, 40, 22, 22)
-        self.frame = Glass(radius=38, alpha=36)
-        root.addWidget(self.frame)
-        fl = QHBoxLayout(self.frame)
-        fl.setContentsMargins(16, 16, 16, 16)
-        fl.setSpacing(14)
+        root.setContentsMargins(34, 46, 34, 34)
+        root.setSpacing(14)
+        fl = root
         self.sidebar = self.build_sidebar()
         fl.addWidget(self.sidebar)
         self.stack = FadeStack()
@@ -1022,8 +1022,13 @@ class Window(QMainWindow):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        if hasattr(self, "bg"):
+            rad = 0.0 if (self.isMaximized() or self.isFullScreen()) else 34.0
+            if rad != self.bg.radius:
+                self.bg.radius = rad
+                self.bg.update()
         if hasattr(self, "controls"):
-            self.controls.move(self.bg.width() - self.controls.width() - 18, 5)
+            self.controls.move(self.bg.width() - self.controls.width() - 26, 9)
             self.controls.maximized = self.isMaximized()
             self.controls.raise_()
         if hasattr(self, "overlay"):

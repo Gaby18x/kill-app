@@ -249,14 +249,43 @@ class Background(QWidget):
         else:
             self._timer.start(90)            # erst nach dem Ziehen neu rendern (bis dahin wird skaliert)
 
+    radius = 34.0               # Eckenradius des Fensters (0 = eckig, z. B. maximiert)
+
+    def clip_path(self):
+        path = QPainterPath()
+        if self.radius > 0:
+            path.addRoundedRect(QRectF(self.rect()), self.radius, self.radius)
+        else:
+            path.addRect(QRectF(self.rect()))
+        return path
+
     def paintEvent(self, e):
         if self._pm is None:
             self._rebuild()
         p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setClipPath(self.clip_path())
         if self._size == self.size():
             p.drawPixmap(0, 0, self._pm)
         else:
             p.drawPixmap(self.rect(), self._pm)
+        # feine Glasschicht ueber dem Verlauf (wie ein Milchglas-Rahmen)
+        r = QRectF(self.rect()).adjusted(0.6, 0.6, -0.6, -0.6)
+        g = QLinearGradient(r.topLeft(), r.bottomRight())
+        g.setColorAt(0, white(86))
+        g.setColorAt(1, white(16))
+        p.setPen(Qt.NoPen)
+        p.setBrush(g)
+        p.drawRect(r)
+        if self.radius > 0:
+            p.setClipping(False)
+            bg = QLinearGradient(r.topLeft(), r.bottomRight())
+            bg.setColorAt(0, white(235))
+            bg.setColorAt(0.5, white(120))
+            bg.setColorAt(1, white(190))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(bg, 1.2))
+            p.drawRoundedRect(r, self.radius, self.radius)
 
 
 # ------------------------------------------------------------------ Glas
@@ -757,6 +786,8 @@ class Overlay(QWidget):
         p = QPainter(self)
         c = QColor(T.scrim)
         c.setAlpha(int(c.alpha() * self.k * 1.0))
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setClipPath(self.parent().clip_path())
         p.fillRect(self.rect(), c)
 
 
