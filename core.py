@@ -148,11 +148,14 @@ def verify_text(frame, anchor_xy, ks, words, thr, region=TEXT_REGION):
     return all(v >= thr for v in scores.values()), scores
 
 
-def frames_from_ffmpeg(ffmpeg, path, vf, w, h, cancel, gpu=True):
-    """Liest vorverarbeitete Frames als Rohdaten (BGR) per Pipe. Nutzt GPU-Decoding, wenn moeglich."""
+def frames_from_ffmpeg(ffmpeg, path, vf, w, h, cancel, gpu=True, ss=None, dur=None):
+    """Liest vorverarbeitete Frames als Rohdaten (BGR) per Pipe. Nutzt GPU-Decoding, wenn moeglich.
+    ss/dur: nur dieses Zeitfenster (in Sekunden) lesen."""
     n = w * h * 3
+    seek = (["-ss", f"{ss:.3f}"] if ss is not None else []) + (["-t", f"{dur:.3f}"] if dur is not None else [])
     for hw in ((True, False) if gpu else (False,)):
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"] + (["-hwaccel", "auto"] if hw else []) + \
+              ["-skip_loop_filter", "all"] + seek + \
               ["-i", path, "-an", "-sn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              creationflags=NOWIN, bufsize=n * 8)
@@ -173,6 +176,51 @@ def frames_from_ffmpeg(ffmpeg, path, vf, w, h, cancel, gpu=True):
             return
 
 
+def keyframes_from_ffmpeg(ffmpeg, path, vf, w, h, cancel, ss=None, dur=None):
+    """Liest NUR die Keyframes (I-Bilder) mit ihren Zeitpunkten - sehr schnell, da fast nichts dekodiert wird.
+    Liefert (zeit_in_s, bild). ss/dur: nur dieses Zeitfenster."""
+    n = w * h * 3
+    off = ss or 0.0
+    seek = (["-ss", f"{ss:.3f}"] if ss is not None else []) + (["-t", f"{dur:.3f}"] if dur is not None else [])
+    for opt in (["-fps_mode", "passthrough"], ["-vsync", "0"]):
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "info", "-nostats", "-skip_frame", "nokey"] + seek + ["-i", path,
+               "-an", "-sn", "-vf", vf + ",showinfo"] + opt + ["-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NOWIN,
+                             bufsize=n * 4)
+        pts = []
+
+        def reader(pr=p, lst=pts):
+            for line in iter(pr.stderr.readline, b""):
+                m = re.search(rb"pts_time:\s*(-?[0-9.]+)", line)
+                if m:
+                    lst.append(float(m.group(1)))
+        th = threading.Thread(target=reader, daemon=True)
+        th.start()
+        got = 0
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    return
+                buf = p.stdout.read(n)
+                if len(buf) < n:
+                    break
+                t0 = time.time()
+                while len(pts) <= got and time.time() - t0 < 2.0:
+                    time.sleep(0.001)
+                if len(pts) > got:
+                    yield off + pts[got], np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+                got += 1
+        finally:
+            p.kill()
+            p.wait()
+        if got:
+            return
+
+
+# Groesster Keyframe-Abstand, bei dem die Schnellsuche noch genutzt wird (OBS-Standard: ca. 4,2 s)
+MAX_KEYGAP = 4.6
+
+
 def group_hits(hits, gap):
     kills, last = [], None
     for t in hits:
@@ -182,7 +230,7 @@ def group_hits(hits, gap):
     return kills
 
 
-def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_kill=None, gpu=True):
+def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_kill=None, gpu=True, thorough=False):
     """server: Dict mit "kind" = "bruder" | "notify" | "xhit". Gibt (clips, info) zurueck.
     clips: Liste von (start, ende, kill_zeit, thumbnail_bgr)."""
     ffmpeg = find_ffmpeg()
@@ -197,9 +245,15 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     duration = total / fps
 
+    def prog(v):
+        if progress:
+            progress(max(0.0, min(1.0, v)))
+
     hits = []
+    info = {}
+    pre_verified = False
+    t_start = time.time()
     if kind in ("bruder", "notify"):
-        ofps = 5
         if kind == "bruder":
             ow = 960
             k = 0.5 * (16 / 9) * h / w            # Skalierung der Vorlage (1080p-Referenz -> aktuelles Bild)
@@ -224,42 +278,129 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             rx0, ry0, rx1, ry1 = server["region"]
             region = (ry0, ry1, rx0, rx1)
         oh = int(round(ow * h / w / 2)) * 2
-        vf = f"fps={ofps},scale={ow}:{oh}:flags=area"
+        scale_vf = f"scale={ow}:{oh}:flags=area"
         text_thr = min(0.85, max(0.55, 0.85 - 0.025 * sens))
-        fw, fh = ow, oh
-        min_run, gap = 2, 1.5
+
+        def detect(fr):
+            """Gibt (Treffer, Lage) fuer ein verkleinertes Bild zurueck."""
+            if kind == "bruder":
+                m = purple_mask(fr)
+                if m.sum() >= need:
+                    _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED))
+                    if mx >= thr:
+                        return True, ((ml[0] + pad) * w / ow, (ml[1] + pad) * w / ow)
+                return False, None
+            _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(fr, tpl, cv2.TM_CCOEFF_NORMED))
+            return (True, (ml[0] * w / ow, ml[1] * w / ow)) if mx >= thr else (False, None)
+
+        # --- Schnellsuche: nur Keyframes ansehen (die Meldung steht mehrere Sekunden, also wird sie getroffen)
+        fast = None
+        times, khits, sparse = [], [], False
+        # Probe: sind die Keyframes dicht genug? (sonst gruendliche Suche)
+        probe = [t for t, _ in keyframes_from_ffmpeg(ffmpeg, path, "scale=16:16", 16, 16, cancel, None, 75)]
+        if thorough or (len(probe) >= 4 and float(np.median(np.diff(probe))) > MAX_KEYGAP):
+            sparse = True
+        if not sparse and len(probe) >= 2 and not (cancel is not None and cancel.is_set()):
+            nseg = max(1, min(os.cpu_count() or 2, 6, int(duration // 90)))
+            bounds = [duration * i / nseg for i in range(nseg + 1)]
+            parts = [None] * nseg
+            done = [0.0] * nseg
+
+            def work(i):
+                ts, hs = [], []
+                for t, fr in keyframes_from_ffmpeg(ffmpeg, path, scale_vf, ow, oh, cancel, bounds[i],
+                                                   bounds[i + 1] - bounds[i] + 0.05):
+                    if t < bounds[i] - 0.05 or t >= bounds[i + 1]:
+                        continue                    # Grenzbild gehoert zum Nachbarabschnitt
+                    ts.append(t)
+                    ok_, loc = detect(fr)
+                    if ok_:
+                        hs.append((t, t, loc))
+                    done[i] = t - bounds[i]
+                parts[i] = (ts, hs)
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(nseg) as ex:
+                futs = [ex.submit(work, i) for i in range(nseg)]
+                while not all(f.done() for f in futs):
+                    prog(0.9 * sum(done) / max(1.0, duration))
+                    time.sleep(0.1)
+                for f in futs:
+                    f.result()
+            for ts, hs in parts:
+                times += ts
+                khits += hs
+            times.sort()
+            khits.sort(key=lambda x: x[0])
+        if cancel is not None and cancel.is_set():
+            cap.release()
+            return [], {"notices": 0, "mode": "abgebrochen"}
+        keygap = float(np.median(np.diff(times))) if len(times) >= 3 else None
+        if not sparse and keygap is not None and keygap <= MAX_KEYGAP:
+            fast = (khits, keygap)
+
+        if fast is not None:
+            khits, keygap = fast
+            gap = keygap * 1.05 + 0.3          # nur aufeinanderfolgende Keyframes gehoeren zu einer Meldung
+            info['mode'] = f'schnell (Keyframe alle {keygap:.1f} s)'
+            # Anzahl aller "Information"-Meldungen (nur fuer die Anzeige)
+            info["notices"] = len(group_hits([x[0] for x in khits], gap))
+            # Jeden Treffer einzeln auf den Kill-Text pruefen (Springen auf einen Keyframe ist billig)
+            from concurrent.futures import ThreadPoolExecutor
+            tl = threading.local()
+            caps_open = []
+
+            def check(item):
+                t, _, loc = item
+                if loc is None or (cancel is not None and cancel.is_set()):
+                    return None
+                c = getattr(tl, "cap", None)
+                if c is None:                       # jeder Arbeiter bekommt sein eigenes Video-Handle
+                    c = tl.cap = cv2.VideoCapture(path)
+                    caps_open.append(c)
+                c.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
+                ok, fr = c.read()
+                return item if ok and verify_text(fr, loc, ks, words, text_thr, region)[0] else None
+            with ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 2))) as ex:
+                hits = [r for r in ex.map(check, khits) if r is not None]
+            for c in caps_open:
+                c.release()
+            prog(0.95)
+            pre_verified = True
+            info["mode"] = f"schnell (Keyframe alle {keygap:.1f} s)"
+        else:
+            info["mode"] = "gruendlich"
+            ofps, run = 4, 0
+            vf = f"fps={ofps},{scale_vf}"
+            for i, fr in frames_from_ffmpeg(ffmpeg, path, vf, ow, oh, cancel, gpu):
+                ok_, loc = detect(fr)
+                run = run + 1 if ok_ else 0
+                if run >= 2:
+                    hits.append(((i - run + 1) / ofps, i / ofps, loc))
+                if i % 20 == 0:
+                    prog(i / max(1, duration * ofps))
+            gap = 1.5
+        min_run = 1
     else:
         ofps = 15
         half = max(20, int(60 * h / 1080))
         vf = (f"fps={ofps},crop={2 * half}:{2 * half}:{(w - 2 * half) // 2}:{(h - 2 * half) // 2},"
               f"scale=120:120:flags=area")
         diff = int(70 - 5 * sens)
-        fw, fh = 120, 120
-        min_run, gap = 2, 1.2
+        run = 0
+        for i, fr in frames_from_ffmpeg(ffmpeg, path, vf, 120, 120, cancel, gpu):
+            ok_ = is_hitmarker(fr, diff)
+            run = run + 1 if ok_ else 0
+            if run >= 2:
+                hits.append(((i - run + 1) / ofps, i / ofps, None))
+            if i % 25 == 0:
+                prog(i / max(1, duration * ofps))
+        gap = 1.2
 
-    run = 0
-    for i, fr in frames_from_ffmpeg(ffmpeg, path, vf, fw, fh, cancel, gpu):
-        loc = None
-        if kind == "bruder":
-            m = purple_mask(fr)
-            hit = False
-            if m.sum() >= need:
-                _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED))
-                if mx >= thr:
-                    hit, loc = True, ((ml[0] + pad) * w / ow, (ml[1] + pad) * w / ow)
-        elif kind == "notify":
-            _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(fr, tpl, cv2.TM_CCOEFF_NORMED))
-            hit = mx >= thr
-            if hit:
-                loc = (ml[0] * w / ow, ml[1] * w / ow)
-        else:
-            hit = is_hitmarker(fr, diff)
-        run = run + 1 if hit else 0
-        if run >= min_run:
-            hits.append(((i - run + 1) / ofps, i / ofps, loc))     # (Beginn des Treffers, jetzt, Lage)
-        if progress and i % 25 == 0:
-            progress(min(1.0, i / max(1, duration * ofps)))
+    if cancel is not None and cancel.is_set() and not hits:
+        cap.release()
+        return [], {"notices": 0, "mode": info.get("mode", "")}
 
+    info["t_suche"] = round(time.time() - t_start, 1)
     groups = []
     for t0, t, loc in hits:
         if groups and t - groups[-1]["last"] <= gap:
@@ -268,17 +409,36 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             g["locs"].append((t, loc))
         else:
             groups.append({"start": t0, "last": t, "locs": [(t, loc)]})
-    info = {"notices": len(groups)}
+    info.setdefault("notices", len(groups))
 
     if kind in ("bruder", "notify"):
+        fastmode = info["mode"].startswith("schnell")
         # Nur Meldungen mit dem richtigen Text sind Kills
         good = []
-        for g in groups:
-            ok_any = False
-            cand = [g["start"] + d for d in (0.4, 0.9, 1.5, 2.2) if g["start"] + d <= g["last"] + 0.2]
-            for t in cand or [(g["start"] + g["last"]) / 2]:
+        for gi, g in enumerate(groups):
+            if cancel is not None and cancel.is_set():
+                break
+            if pre_verified:
+                good.append(g)
+                if on_kill:
+                    on_kill(len(good))
+                continue
+            if fastmode:
+                # direkt auf den Keyframes pruefen (Springen auf einen Keyframe kostet fast nichts)
+                kt = [x[0] for x in g["locs"]]
+                cand = [kt[len(kt) // 2], kt[-1], kt[0]]
+            else:
+                cand = [g["start"] + d for d in (0.4, 0.9, 1.5, 2.2) if g["start"] + d <= g["last"] + 0.2]
+                cand += [g["last"], (g["start"] + g["last"]) / 2]
+            ok_any, seen = False, set()
+            for t in cand:
+                if round(t, 2) in seen:
+                    continue
+                seen.add(round(t, 2))
                 near = min(g["locs"], key=lambda x: abs(x[0] - t))[1]
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(min(t, duration - 0.1) * fps))
+                if near is None:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
                 ok, fr = cap.read()
                 if ok and verify_text(fr, near, ks, words, text_thr, region)[0]:
                     ok_any = True
@@ -287,7 +447,34 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                 good.append(g)
                 if on_kill:
                     on_kill(len(good))
+            if progress:
+                prog(0.9 + 0.05 * (gi + 1) / max(1, len(groups)))
         groups = good
+        info["t_pruefen"] = round(time.time() - t_start - info["t_suche"], 1)
+        # Feinsuche nur fuer echte Kills: genauen Beginn der Meldung in einem kurzen Zeitfenster bestimmen
+        if fastmode and groups:
+            import bisect
+            from concurrent.futures import ThreadPoolExecutor
+
+            def refine(g):
+                if cancel is not None and cancel.is_set():
+                    return g["start"]
+                k_i = bisect.bisect_left(times, g["start"] - 0.01) - 1
+                s0 = times[k_i] if k_i >= 0 else max(0.0, g["start"] - keygap)
+                dur = g["start"] - s0 + 0.2
+                flags = [detect(fr)[0] for _, fr in
+                         frames_from_ffmpeg(ffmpeg, path, f"fps=10,{scale_vf}", ow, oh, cancel, False, s0, dur)]
+                # Beginn = erstes Bild der ununterbrochenen Treffer-Reihe, die bis zum Keyframe reicht
+                if flags and flags[-1]:
+                    j = len(flags) - 1
+                    while j > 0 and flags[j - 1]:
+                        j -= 1
+                    return min(g["start"], s0 + j / 10.0)
+                return g["start"]
+            with ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 2))) as ex:
+                for g, st in zip(groups, ex.map(refine, groups)):
+                    g["start"] = st
+            prog(1.0)
     elif on_kill:
         on_kill(len(groups))
 
@@ -299,6 +486,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
         th = cv2.resize(fr, (256, int(256 * h / w)), interpolation=cv2.INTER_AREA) if ok else None
         out.append((max(0.0, t - pre), min(duration, t + post), t, th))
     cap.release()
+    info["sekunden"] = round(time.time() - t_start, 1)
     return out, info
 
 
@@ -337,6 +525,8 @@ class Player(threading.Thread):
         self.resync = False
         self.ended = False
         self.latest = None
+        self.seek_id = 0              # zaehlt jede Sprung-Anfrage
+        self.cur_id = 0               # Sprung-Nummer, zu der das zuletzt dekodierte Bild gehoert
         self.stop_flag = False
         self.cur = 0.0
         self.t0 = self.pos0 = 0.0
@@ -344,6 +534,7 @@ class Player(threading.Thread):
     def request_seek(self, t):
         with self.lock:
             self.seek_to = t
+            self.seek_id += 1
         self.ev.set()
 
     def set_play(self, on, speed=1.0):
@@ -368,7 +559,7 @@ class Player(threading.Thread):
         f = cv2.resize(f, (max(2, int(fw * sc)), max(2, int(fh * sc))), interpolation=interp)
         rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         with self.lock:
-            self.latest = (kind, self.cur, rgb)
+            self.latest = (kind, self.cur, rgb, self.cur_id)
 
     def run(self):
         cap, fps = self.cap, self.fps
@@ -377,6 +568,8 @@ class Player(threading.Thread):
                 seek, self.seek_to = self.seek_to, None
                 playing, speed, resync = self.playing, self.speed, self.resync
                 self.resync = False
+                if seek is not None:
+                    self.cur_id = self.seek_id
             if seek is not None:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0.0, min(seek, self.duration - 0.1)) * fps))
                 ok, f = cap.read()

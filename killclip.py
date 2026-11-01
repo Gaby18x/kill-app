@@ -931,7 +931,7 @@ class Window(QMainWindow):
     def load_settings(self):
         d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Verlustfrei", "open": True, "loop": True,
              "autoupd": True, "gpu": True, "servers": [], "names": {}, "last_server": "bruder",
-             "hidden": [], "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
+             "hidden": [], "thorough": False, "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
         try:
             with open(SETTINGS) as f:
                 d.update(json.load(f))
@@ -946,7 +946,8 @@ class Window(QMainWindow):
     def save_settings(self):
         self.st.update(pre=self.s_pre.value(), post=self.s_post.value(), sens=int(round(self.s_sens.value())),
                        mode=self.seg_mode.current(), open=self.tg_open.isChecked(), loop=self.tg_loop.isChecked(),
-                       autoupd=self.tg_upd.isChecked(), gpu=self.tg_gpu.isChecked())
+                       autoupd=self.tg_upd.isChecked(), gpu=self.tg_gpu.isChecked(),
+                       thorough=self.tg_thorough.isChecked())
         try:
             with open(SETTINGS, "w") as f:
                 json.dump(self.st, f)
@@ -1832,6 +1833,8 @@ class Window(QMainWindow):
         g, gl = panel("Kill-Suche", alpha=150)
         self.tg_gpu = toggle_row(gl, "GPU-Beschleunigung nutzen", "Beschleunigt das Dekodieren beim Suchen, wenn "
                                  "möglich.", self.st["gpu"])
+        self.tg_thorough = toggle_row(gl, "Gründliche Suche (langsamer)", "Sucht Bild für Bild. Nur nötig, wenn "
+                                      "eine sehr kurze Meldung übersehen wurde.", self.st["thorough"])
         v.addWidget(g)
         g, gl = panel("Updates", alpha=150)
         self.tg_upd = toggle_row(gl, "Beim Start nach Updates suchen", "Neue Versionen werden automatisch gefunden.",
@@ -2023,7 +2026,9 @@ class Window(QMainWindow):
             self.play_btn.icon_name = "play"
             self.play_btn.update()
 
-    def draw_frame(self, kind, pos, rgb):
+    def draw_frame(self, kind, pos, rgb, fid=None):
+        if fid is not None and self.player is not None and fid < self.player.seek_id:
+            return                      # veraltetes Bild (vor dem letzten Sprung dekodiert) verwerfen
         self.video.set_frame(rgb)
         if self._thumb_pending:
             self._thumb_pending = False
@@ -2086,10 +2091,19 @@ class Window(QMainWindow):
         self.play_btn.icon_name = "pause" if self.playing else "play"
         self.play_btn.update()
         if self.playing:
-            self.play_clip = next((c for c in self.clips if c.start <= self.pos <= c.end), None)
+            self.play_clip = self.clip_for_play()
             if self.play_clip and self.pos >= self.play_clip.end - 0.05:
                 self.seek(self.play_clip.start)
         self.player.set_play(self.playing, self.speed)
+
+    def clip_for_play(self):
+        """Welcher Clip wird in Schleife abgespielt? Bevorzugt den ausgewaehlten (auch bei ueberlappenden Clips)."""
+        if self.sel is not None and 0 <= self.sel < len(self.clips):
+            c = self.clips[self.sel]
+            if c.start - 0.05 <= self.pos <= c.end:
+                return c
+        inside = [c for c in self.clips if c.start <= self.pos <= c.end]
+        return min(inside, key=lambda c: abs(c.kill - self.pos)) if inside else None
 
     # ------------------------------------------------------------ Kill-Suche
     def set_status(self, text, state="idle"):
@@ -2117,10 +2131,11 @@ class Window(QMainWindow):
         self.set_status("Suche läuft …", "busy")
         args = (self.path, self.s_pre.value(), self.s_post.value(), self.server, int(round(self.s_sens.value())))
         gpu = self.tg_gpu.isChecked()
+        thorough = self.tg_thorough.isChecked()
 
         def work():
             try:
-                res = scan_video(*args, gpu=gpu, progress=lambda p: self.ui(self.scan_bar.set_value, p),
+                res = scan_video(*args, gpu=gpu, thorough=thorough, progress=lambda p: self.ui(self.scan_bar.set_value, p),
                                  on_kill=lambda n: self.ui(self.set_status, f"Suche läuft …  {n} "
                                                            f"{'Kill' if n == 1 else 'Kills'}", "busy"),
                                  cancel=self.cancel)
@@ -2150,6 +2165,8 @@ class Window(QMainWindow):
         n = len(self.clips)
         word = "Kill" if n == 1 else "Kills"
         extra = f" · {info['notices']} Meldungen geprüft" if self.server["kind"] != "xhit" else ""
+        if info.get("sekunden") is not None:
+            extra += f" · {info['sekunden']:.0f} s"
         self.set_status(("Abgebrochen · " if cancelled else "Fertig · ") + f"{n} {word}{extra}", "ok" if n else "warn")
         self.say(f"{n} {word} gefunden" if n else "Keine Kills gefunden – Empfindlichkeit erhöhen?",
                  T.acc if n else AMBER)
@@ -2197,6 +2214,7 @@ class Window(QMainWindow):
             r.selected = j == i
             r.update()
         c = self.clips[i]
+        self.play_clip = c
         self.timeline.focus_on(c.start, c.end)
         if seek:
             if self.playing:
