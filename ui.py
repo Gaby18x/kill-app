@@ -700,14 +700,18 @@ class SliderRow(QWidget):
         self.val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.val.setFont(app_font(10, True))
         top.addWidget(self.title)
-        if hint:
-            top.addWidget(InfoDot(hint))
         top.addStretch(1)
         top.addWidget(self.val)
         # steps > 0: feines Raster (nur zur Anzeige), steps = 0: voellig stufenlos
         self.s = SmoothSlider(lo, hi, value, (hi - lo) / steps if steps > 0 else 0.0)
         lay.addLayout(top)
         lay.addWidget(self.s)
+        if hint:
+            h = QLabel(hint)
+            h.setProperty("role", "dim")
+            h.setWordWrap(True)
+            h.setFont(app_font(9))
+            lay.addWidget(h)
         self.s.valueChanged.connect(lambda _: self.val.setText(self.fmt(self.value())))
         self.val.setText(self.fmt(self.value()))
 

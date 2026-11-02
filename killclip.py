@@ -1888,11 +1888,9 @@ class Window(QMainWindow):
         names = ["", "sehr niedrig", "niedrig", "niedrig", "mittel", "mittel", "mittel+", "hoch", "hoch", "sehr hoch",
                  "max"]
         self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 0, self.st["sens"], lambda v: names[int(round(v))],
-                                hint="Wie streng die App prüft, ob eine Meldung wirklich ein Kill ist.\n\n"
-                                     "Höher = toleranter: findet auch unscharfe oder schlecht aufgenommene "
-                                     "Meldungen, schlägt aber öfter fälschlich an.\n"
-                                     "Niedriger = strenger: weniger Fehlalarme, aber echte Kills können "
-                                     "übersehen werden.\n\nDie Mitte passt meistens.")
+                                hint="Wie streng geprüft wird, ob eine Meldung ein Kill ist. Höher findet auch unscharfe "
+                                     "Meldungen, schlägt aber öfter fälschlich an. Niedriger ist strenger. "
+                                     "Die Mitte passt meistens.")
         for s_ in (self.s_pre, self.s_post, self.s_sens):
             lay.addWidget(s_)
         self.scan_btn = PopButton("Kills suchen", "crosshair", "accent", 46)
