@@ -20,8 +20,22 @@ def app_font(size=10.0, bold=False):
 
 
 # ------------------------------------------------------------------ Animation
-def tween(w, name, end, ms=160, curve=QEasingCurve.OutCubic):
-    """Animiert das Float-Attribut `name` von Widget `w` weich auf `end` (und zeichnet dabei neu)."""
+def _bezier(x1, y1, x2, y2):
+    c = QEasingCurve(QEasingCurve.BezierSpline)
+    c.addCubicBezierSegment(QPointF(x1, y1), QPointF(x2, y2), QPointF(1, 1))
+    return c
+
+
+def ease_out():
+    """Kraeftiges Ease-Out: startet sofort schnell (fuehlt sich reaktionsschnell an), bremst weich ab. Kein Ueberschwingen."""
+    return _bezier(0.23, 1, 0.32, 1)
+
+
+def tween(w, name, end, ms=160, curve=None):
+    """Animiert das Float-Attribut `name` von Widget `w` weich auf `end` (und zeichnet dabei neu).
+    Unterbrechbar: eine neue Animation startet vom aktuellen Wert."""
+    if curve is None:
+        curve = ease_out()
     d = w.__dict__.setdefault("_tw", {})
     a = d.get(name)
     if a is None:
@@ -318,6 +332,16 @@ class Glass(QFrame):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(bg, 1.2))
             p.drawRoundedRect(r, self.radius, self.radius)
+            if self.radius >= 14 and r.width() > 60:
+                # feine Lichtkante direkt unter dem oberen Rand: wirkt wie geschliffenes Glas
+                x0, x1, y = r.left() + self.radius * 0.7, r.right() - self.radius * 0.7, r.top() + 2.2
+                hl = QLinearGradient(x0, 0, x1, 0)
+                hl.setColorAt(0, white(0))
+                hl.setColorAt(0.2, white(95))
+                hl.setColorAt(0.8, white(95))
+                hl.setColorAt(1, white(0))
+                p.setPen(QPen(hl, 1))
+                p.drawLine(QPointF(x0, y), QPointF(x1, y))
 
 
 # ------------------------------------------------------------------ Buttons
@@ -332,7 +356,8 @@ class PopButton(QAbstractButton):
         self.pop = 0.0
         self.press = 0.0
         self.setCursor(Qt.PointingHandCursor)
-        self.setFocusPolicy(Qt.NoFocus)
+        self.setFocusPolicy(Qt.TabFocus)             # nur per Tab erreichbar (Klick nimmt keinen Fokus)
+        self._kfocus = False
         self.setFont(app_font(10, True))
         self.setFixedHeight(height + 2 * self.M)
         if icon_only:
@@ -350,19 +375,29 @@ class PopButton(QAbstractButton):
         return QSize(max(w, self.h + 2 * self.M), self.h + 2 * self.M)
 
     def enterEvent(self, e):
-        tween(self, "pop", 1.0, 170, QEasingCurve.OutBack)
+        tween(self, "pop", 1.0, 150)
 
     def leaveEvent(self, e):
-        tween(self, "pop", 0.0, 170)
-        tween(self, "press", 0.0, 90)
+        tween(self, "pop", 0.0, 120)                 # Ausblenden etwas schneller als Einblenden
+        tween(self, "press", 0.0, 120)
 
     def mousePressEvent(self, e):
-        tween(self, "press", 1.0, 70)
+        tween(self, "press", 1.0, 100)
         super().mousePressEvent(e)
 
     def mouseReleaseEvent(self, e):
-        tween(self, "press", 0.0, 110)
+        tween(self, "press", 0.0, 160)
         super().mouseReleaseEvent(e)
+
+    def focusInEvent(self, e):
+        self._kfocus = e.reason() in (Qt.TabFocusReason, Qt.BacktabFocusReason)
+        super().focusInEvent(e)
+        self.update()
+
+    def focusOutEvent(self, e):
+        self._kfocus = False
+        super().focusOutEvent(e)
+        self.update()
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -370,7 +405,7 @@ class PopButton(QAbstractButton):
         p.setRenderHint(QPainter.TextAntialiasing)
         M = self.M
         r = QRectF(self.rect()).adjusted(M, M, -M, -M)
-        s = 1 + 0.06 * self.pop - 0.035 * self.press
+        s = 1 + 0.018 * self.pop - 0.048 * self.press       # Hover: kaum sichtbar, Druck: 0,97
         c = r.center()
         p.translate(c)
         p.scale(s, s)
@@ -399,6 +434,10 @@ class PopButton(QAbstractButton):
             p.setPen(QPen(white(240), 1.1))
             p.drawRoundedRect(r, rad, rad)
             fg = ink(230)
+        if self._kfocus and self.hasFocus():            # sichtbarer Tastatur-Fokus
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(T.acc, 2))
+            p.drawRoundedRect(r.adjusted(-3, -3, 3, 3), rad + 3, rad + 3)
         p.setPen(fg)
         fm = QFontMetrics(self.font())
         tw = 0 if self.icon_only else fm.horizontalAdvance(self.text())
@@ -473,14 +512,30 @@ class Toggle(QAbstractButton):
         self.k = 1.0 if checked else 0.0
         self.setFixedSize(50, 30)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFocusPolicy(Qt.NoFocus)
-        self.toggled.connect(lambda c: tween(self, "k", 1.0 if c else 0.0, 180, QEasingCurve.OutBack))
+        self.setFocusPolicy(Qt.TabFocus)
+        self._kfocus = False
+        self.toggled.connect(lambda c: tween(self, "k", 1.0 if c else 0.0, 170))
+
+    def focusInEvent(self, e):
+        self._kfocus = e.reason() in (Qt.TabFocusReason, Qt.BacktabFocusReason)
+        super().focusInEvent(e)
+        self.update()
+
+    def focusOutEvent(self, e):
+        self._kfocus = False
+        super().focusOutEvent(e)
+        self.update()
 
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(2, 4, -2, -4)
         k = max(0.0, min(1.0, self.k))
+        if self._kfocus and self.hasFocus():
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(T.acc, 2))
+            p.drawRoundedRect(r.adjusted(-2.5, -2.5, 2.5, 2.5), r.height() / 2 + 2.5, r.height() / 2 + 2.5)
+            p.setPen(Qt.NoPen)
         off = T.toggle_off()
 
         def mixc(c):
@@ -640,8 +695,8 @@ class FadeStack(QWidget):
         self.eff = None
         self.incoming = None
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(170)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.setDuration(180)
+        self.anim.setEasingCurve(ease_out())
         self.anim.setStartValue(0.0)
         self.anim.setEndValue(1.0)
         self.anim.valueChanged.connect(self._tick)
@@ -713,8 +768,7 @@ class Overlay(QWidget):
         self.k = 0.0
         self.hide()
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(240)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.setEasingCurve(ease_out())
         self.anim.valueChanged.connect(self._tick)
         self.anim.finished.connect(self._finished)
         self.closing = False
@@ -739,6 +793,7 @@ class Overlay(QWidget):
         self.raise_()
         self.closing = False
         self.anim.stop()
+        self.anim.setDuration(210)
         self.anim.setStartValue(self.k)
         self.anim.setEndValue(1.0)
         self.anim.start()
@@ -748,6 +803,7 @@ class Overlay(QWidget):
             return
         self.closing = True
         self.anim.stop()
+        self.anim.setDuration(130)                    # Abgang schneller als Auftritt
         self.anim.setStartValue(self.k)
         self.anim.setEndValue(0.0)
         self.anim.start()
@@ -755,7 +811,7 @@ class Overlay(QWidget):
     def _center(self):
         if self.card:
             c = self.card
-            off = int((1 - self.k) * 22)
+            off = int((1 - self.k) * 10)
             c.move((self.width() - c.width()) // 2, (self.height() - c.height()) // 2 + off)
 
     def _tick(self, v):
@@ -804,8 +860,8 @@ class Toast(Glass):
         self.setGraphicsEffect(self.eff)
         self.k = 0.0
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(260)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.setDuration(230)
+        self.anim.setEasingCurve(ease_out())
         self.anim.valueChanged.connect(self._tick)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -820,6 +876,7 @@ class Toast(Glass):
         self.show()
         self.raise_()
         self.anim.stop()
+        self.anim.setDuration(230)
         self.anim.setStartValue(self.k)
         self.anim.setEndValue(1.0)
         self.anim.start()
@@ -827,6 +884,7 @@ class Toast(Glass):
 
     def _hide(self):
         self.anim.stop()
+        self.anim.setDuration(140)
         self.anim.setStartValue(self.k)
         self.anim.setEndValue(0.0)
         self.anim.start()
@@ -840,7 +898,7 @@ class Toast(Glass):
 
     def reposition(self):
         pw, ph = self.parent().width(), self.parent().height()
-        self.move((pw - self.width()) // 2, int(-self.height() + (self.height() + 26) * self.k))
+        self.move((pw - self.width()) // 2, int(26 - (1 - self.k) * 16))
 
     def paintEvent(self, e):
         super().paintEvent(e)

@@ -83,8 +83,8 @@ class Theme:
         """Farbe fuer eine Textrolle (wird auch fuer das QSS benutzt)."""
         t = {
             "text": self.text,
-            "muted": self.ink(150),
-            "dim": self.ink(105),
+            "muted": self.ink(178 if not self.dark else 170),     # >= 4,5:1 Kontrast (gut lesbar)
+            "dim": self.ink(150 if not self.dark else 128),
             "acc": self.acc_text,
             "err": self.err,
             "ok": self.okc,

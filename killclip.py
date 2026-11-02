@@ -172,7 +172,7 @@ class ServerCard(QWidget):
         return QRectF(self.M + self.W - 84, self.M + 14, 32, 32)
 
     def enterEvent(self, e):
-        tween(self, "pop", 1.0, 200, QEasingCurve.OutBack)
+        tween(self, "pop", 1.0, 160)
 
     def leaveEvent(self, e):
         tween(self, "pop", 0.0, 180)
@@ -202,7 +202,7 @@ class ServerCard(QWidget):
         hv = max(0.0, min(1.0, self.pop))
         c = r.center()
         p.translate(c)
-        p.scale(1 + 0.04 * self.pop, 1 + 0.04 * self.pop)
+        p.scale(1 + 0.018 * self.pop, 1 + 0.018 * self.pop)
         p.translate(-c)
         g = QLinearGradient(r.topLeft(), r.bottomRight())
         g.setColorAt(0, white(220))
@@ -302,7 +302,7 @@ class NavItem(QWidget):
         p.setRenderHint(QPainter.TextAntialiasing)
         p.setOpacity(1.0 if self.enabled_nav else 0.45)
         r = QRectF(self.rect()).adjusted(4, 4, -4, -4)
-        s = 1 + 0.03 * self.pop
+        s = 1 + 0.012 * self.pop
         c = r.center()
         p.translate(c)
         p.scale(s, s)
@@ -350,7 +350,7 @@ class SideServer(QWidget):
         r = QRectF(self.rect()).adjusted(4, 3, -4, -3)
         c = r.center()
         p.translate(c)
-        p.scale(1 + 0.025 * self.pop, 1 + 0.025 * self.pop)
+        p.scale(1 + 0.012 * self.pop, 1 + 0.012 * self.pop)
         p.translate(-c)
         p.setPen(Qt.NoPen)
         p.setBrush(T.sel_fill() if self.active else Qt.NoBrush)
@@ -374,6 +374,7 @@ class ClipRow(QWidget):
         self.selected = False
         self.hov = 0.0
         self.xhov = 0.0
+        self.appear = 1.0                 # 0 -> 1: Einblenden (Deckkraft + leichtes Aufsteigen)
         self.setFixedHeight(66)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -402,9 +403,12 @@ class ClipRow(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
         r = QRectF(self.rect()).adjusted(2, 3, -2, -3)
+        if self.appear < 1.0:
+            p.setOpacity(max(0.0, self.appear))
+            p.translate(0, (1 - self.appear) * 8)
         c0 = r.center()
         p.translate(c0)
-        p.scale(1 + 0.02 * self.hov, 1 + 0.02 * self.hov)
+        p.scale(1 + 0.008 * self.hov, 1 + 0.008 * self.hov)
         p.translate(-c0)
         p.setPen(QPen(with_alpha(T.acc, 90), 1.2) if self.selected else Qt.NoPen)
         p.setBrush(T.sel_fill() if self.selected else Qt.NoBrush)
@@ -440,6 +444,41 @@ class ClipRow(QWidget):
         p.setBrush(with_alpha(RED, 55 * self.xhov))
         p.drawEllipse(xr)
         paint_icon(p, "close", xr.adjusted(9, 9, -9, -9), with_alpha(T.icon, int(120 + 110 * self.xhov)), 1.7)
+
+
+class SkeletonRow(QWidget):
+    """Platzhalter in der Clip-Liste, solange die Suche laeuft (statt eines Drehkreises)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(66)
+        self.ph = 0.0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._step)
+        self.timer.start(33)
+
+    def _step(self):
+        if self.isVisible():
+            self.ph = (self.ph + 0.022) % 1.0
+            self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(2, 3, -2, -3)
+        p.setPen(Qt.NoPen)
+        base, hi = ink(18), ink(34)
+        t = QRectF(r.left() + 40, r.top() + 8, 70, r.height() - 16)
+        blocks = [(t, 9), (QRectF(t.right() + 14, r.top() + 14, 120, 12), 6),
+                  (QRectF(t.right() + 14, r.top() + 34, 80, 10), 5), (QRectF(r.left() + 8, r.center().y() - 6, 18, 12), 5)]
+        x = (self.ph * 1.6 - 0.3) * self.width()
+        for rect, rad in blocks:
+            g = QLinearGradient(x - 90, 0, x + 90, 0)
+            g.setColorAt(0, base)
+            g.setColorAt(0.5, hi)
+            g.setColorAt(1, base)
+            p.setBrush(g)
+            p.drawRoundedRect(rect, rad, rad)
 
 
 class VideoWidget(QWidget):
@@ -647,7 +686,7 @@ class ServerChip(QWidget):
         r = QRectF(self.rect()).adjusted(3, 2, -3, -2)
         c = r.center()
         p.translate(c)
-        p.scale(1 + 0.03 * self.pop, 1 + 0.03 * self.pop)
+        p.scale(1 + 0.012 * self.pop, 1 + 0.012 * self.pop)
         p.translate(-c)
         p.setPen(QPen(white(240), 1.1))
         p.setBrush(white(190))
@@ -676,7 +715,7 @@ class ColorDot(QWidget):
         self.setCursor(Qt.PointingHandCursor)
 
     def enterEvent(self, e):
-        tween(self, "pop", 1.0, 150, QEasingCurve.OutBack)
+        tween(self, "pop", 1.0, 150)
 
     def leaveEvent(self, e):
         tween(self, "pop", 0.0, 150)
@@ -710,7 +749,7 @@ class PresetCard(QWidget):
         return T.acc.name().lower() == self.preset["acc"].lower() and T.acc2.name().lower() == self.preset["acc2"].lower()
 
     def enterEvent(self, e):
-        tween(self, "pop", 1.0, 150, QEasingCurve.OutBack)
+        tween(self, "pop", 1.0, 150)
 
     def leaveEvent(self, e):
         tween(self, "pop", 0.0, 150)
@@ -725,7 +764,7 @@ class PresetCard(QWidget):
         r = QRectF(self.rect()).adjusted(4, 4, -4, -4)
         c = r.center()
         p.translate(c)
-        p.scale(1 + 0.05 * self.pop, 1 + 0.05 * self.pop)
+        p.scale(1 + 0.025 * self.pop, 1 + 0.025 * self.pop)
         p.translate(-c)
         on = self.active()
         p.setPen(QPen(QColor(T.acc) if on else white(220), 2 if on else 1.1))
@@ -1102,7 +1141,7 @@ class Window(QMainWindow):
         logo.addStretch(1)
         lay.addLayout(logo)
         lay.addSpacing(26)
-        lay.addWidget(self.caption("MENÜ"))
+        lay.addWidget(self.caption("Menü"))
         self.nav = []
         for i, (ic, tx) in enumerate((("server", "Server"), ("film", "Editor"), ("gear", "Einstellungen"))):
             n = NavItem(ic, tx)
@@ -1111,7 +1150,7 @@ class Window(QMainWindow):
             self.nav.append(n)
         self.nav[1].set_nav_enabled(False)
         lay.addSpacing(18)
-        lay.addWidget(self.caption("MEINE SERVER"))
+        lay.addWidget(self.caption("Meine Server"))
         self.side_scroll = QScrollArea()
         self.side_scroll.setWidgetResizable(True)
         self.side_scroll.setFrameShape(QScrollArea.NoFrame)
@@ -1130,7 +1169,7 @@ class Window(QMainWindow):
         return sb
 
     def caption(self, text):
-        lb = label(text, 8.5, True, DIM)
+        lb = label(text, 10, True, MUT)
         lb.setContentsMargins(10, 4, 0, 4)
         return lb
 
@@ -1262,7 +1301,7 @@ class Window(QMainWindow):
         row.addWidget(prev)
         col = QVBoxLayout()
         col.setSpacing(6)
-        col.addWidget(label("PROFILBILD (optional)", 8.5, True, DIM))
+        col.addWidget(label("Profilbild (optional)", 10.5, True, MUT))
         btns = QHBoxLayout()
         btns.setSpacing(8)
         pick = PopButton("Bild wählen …", "folder", "glass", 36)
@@ -1322,7 +1361,7 @@ class Window(QMainWindow):
     def open_add_server(self, state=None):
         st = state or {"name": "", "kind": "Roter Kill-X", "result": None, "avatar": None}
         card = DialogCard("Neuer Server", "Lege fest, woran Kill App auf diesem Server einen Kill erkennt.")
-        card.body.addWidget(label("NAME", 8.5, True, DIM))
+        card.body.addWidget(label("Name", 10.5, True, MUT))
         name = QLineEdit(st["name"])
         name.setPlaceholderText("z. B. Mein Server")
         self.style_edit(name)
@@ -1330,7 +1369,7 @@ class Window(QMainWindow):
         ap = self.avatar_picker(st, name.text)
         name.textChanged.connect(lambda _: ap.refresh())
         card.body.addWidget(ap)
-        card.body.addWidget(label("ERKENNUNG", 8.5, True, DIM))
+        card.body.addWidget(label("Erkennung", 10.5, True, MUT))
         seg = Segmented(["Roter Kill-X", "Kill-Meldung"])
         seg.set_current(st["kind"])
         card.body.addWidget(seg)
@@ -1410,7 +1449,7 @@ class Window(QMainWindow):
     def open_edit_server(self, s):
         builtin = s.get("builtin")
         card = DialogCard("Server bearbeiten", KIND_TEXT.get(s["kind"], ""))
-        card.body.addWidget(label("NAME", 8.5, True, DIM))
+        card.body.addWidget(label("Name", 10.5, True, MUT))
         name = QLineEdit(s["name"])
         self.style_edit(name)
         card.body.addWidget(name)
@@ -1662,10 +1701,10 @@ class Window(QMainWindow):
         self.clip_scroll.setFixedWidth(290)
         mid.addWidget(self.clip_scroll)
 
-        tlc = Glass(radius=22, alpha=95)
+        tlc = QWidget()
         tv = QVBoxLayout(tlc)
-        tv.setContentsMargins(10, 8, 14, 8)
-        tv.setSpacing(2)
+        tv.setContentsMargins(0, 2, 0, 0)
+        tv.setSpacing(4)
         self.timeline = Timeline(self)
         self.timeline.seek.connect(self.seek)
         self.timeline.pick.connect(lambda i: self.select(i, seek=False))
@@ -1897,7 +1936,7 @@ class Window(QMainWindow):
         r.addWidget(self.seg_dark)
         lay.addLayout(r)
         lay.addSpacing(4)
-        lay.addWidget(label("FARBTHEMA", 8.5, True, DIM))
+        lay.addWidget(label("Farbthema", 10.5, True, MUT))
         pr = QHBoxLayout()
         pr.setSpacing(8)
         for name, pre in PRESETS.items():
@@ -1907,7 +1946,7 @@ class Window(QMainWindow):
         pr.addStretch(1)
         lay.addLayout(pr)
         lay.addSpacing(4)
-        lay.addWidget(label("EIGENE FARBEN", 8.5, True, DIM))
+        lay.addWidget(label("Eigene Farben", 10.5, True, MUT))
         for key, title, sub in (("acc", "Akzentfarbe", "Knöpfe, Regler, Hervorhebungen"),
                                 ("acc2", "Zweite Akzentfarbe", "Farbverlauf in Knöpfen und Balken"),
                                 ("bg", "Hintergrund", "Farbton des Hintergrund-Verlaufs")):
@@ -2129,6 +2168,8 @@ class Window(QMainWindow):
         self.scan_btn.set_kind("danger")
         self.scan_bar.set_value(0, False)
         self.set_status("Suche läuft …", "busy")
+        if not self.clips:
+            self.rebuild_cards()                          # Platzhalter statt leerer Liste
         args = (self.path, self.s_pre.value(), self.s_post.value(), self.server, int(round(self.s_sens.value())))
         gpu = self.tg_gpu.isChecked()
         thorough = self.tg_thorough.isChecked()
@@ -2152,6 +2193,8 @@ class Window(QMainWindow):
 
     def scan_failed(self, msg):
         self.scan_reset()
+        if not self.clips:
+            self.rebuild_cards()
         self.set_status("Fehler: " + msg[:140], "bad")
         self.say("Suche fehlgeschlagen", RED)
 
@@ -2161,7 +2204,7 @@ class Window(QMainWindow):
         self.scan_bar.set_value(1.0)
         self.clips = [Clip(a, b, k, bgr_to_pixmap(th) if th is not None else None) for a, b, k, th in res]
         self.sel = None
-        self.rebuild_cards()
+        self.rebuild_cards(animate=True)
         n = len(self.clips)
         word = "Kill" if n == 1 else "Kills"
         extra = f" · {info['notices']} Meldungen geprüft" if self.server["kind"] != "xhit" else ""
@@ -2174,23 +2217,51 @@ class Window(QMainWindow):
             self.select(0)
 
     # ------------------------------------------------------------ Clips
-    def rebuild_cards(self):
+    def empty_state(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setAlignment(Qt.AlignCenter)
+        v.setSpacing(6)
+        ic = QLabel()
+        ic.setPixmap(icon_pixmap("crosshair" if self.player else "film", T.icon, 40, 1.5))
+        ic.setAlignment(Qt.AlignCenter)
+        v.addSpacing(34)
+        v.addWidget(ic)
+        v.addSpacing(6)
+        t = label("Noch keine Clips" if self.player else "Noch kein Video", 12, True)
+        t.setAlignment(Qt.AlignCenter)
+        v.addWidget(t)
+        h = label("Starte die Kill-Suche – gefundene Kills erscheinen hier." if self.player else
+                  "Öffne eine Aufnahme, dann kannst du die Kills suchen.", 10, False, MUT, True)
+        h.setAlignment(Qt.AlignCenter)
+        v.addWidget(h)
+        v.addSpacing(8)
+        b = PopButton("Kills suchen" if self.player else "Video öffnen", "crosshair" if self.player else "folder",
+                      "glass", 38)
+        b.clicked.connect(self.start_scan if self.player else self.open_video)
+        v.addWidget(b, 0, Qt.AlignHCenter)
+        return w
+
+    def rebuild_cards(self, animate=False):
         host = QWidget()
         host.setAttribute(Qt.WA_TranslucentBackground)
         v = QVBoxLayout(host)
         v.setContentsMargins(0, 0, 6, 0)
         v.setSpacing(2)
         self.rows = []
-        if not self.clips:
-            l = label("Noch keine Clips.\nStarte rechts die Kill-Suche.", 10.5, color=DIM)
-            l.setAlignment(Qt.AlignCenter)
-            v.addSpacing(40)
-            v.addWidget(l)
+        if not self.clips and self.scanning:
+            for _ in range(3):
+                v.addWidget(SkeletonRow())
+        elif not self.clips:
+            v.addWidget(self.empty_state())
         for i, c in enumerate(self.clips):
             row = ClipRow(i, c)
             row.selected = i == self.sel
             row.clicked.connect(lambda i=i: self.select(i))
             row.delete.connect(lambda i=i: self.delete(i))
+            if animate:                                   # Liste erscheint nacheinander (kurze Staffelung)
+                row.appear = 0.0
+                QTimer.singleShot(min(i, 8) * 45, lambda r=row: self._appear(r))
             v.addWidget(row)
             self.rows.append(row)
         v.addStretch(1)
@@ -2200,6 +2271,13 @@ class Window(QMainWindow):
         self.total_lbl.setText(f"Gesamt {fmt_short(total)}" if self.clips else "")
         self.exp_all.setText(f"Alle exportieren ({len(self.clips)})" if self.clips else "Alle exportieren")
         self.timeline.update()
+
+    @staticmethod
+    def _appear(row):
+        try:
+            tween(row, "appear", 1.0, 240)
+        except RuntimeError:                              # Zeile wurde inzwischen ersetzt
+            pass
 
     def clip_changed(self, i):
         if 0 <= i < len(self.rows):
