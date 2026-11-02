@@ -1887,10 +1887,7 @@ class Window(QMainWindow):
         self.s_post = SliderRow("Nach dem Kill", 0, 10, 100, self.st["post"], lambda v: f"{v:.1f} s")
         names = ["", "sehr niedrig", "niedrig", "niedrig", "mittel", "mittel", "mittel+", "hoch", "hoch", "sehr hoch",
                  "max"]
-        self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 0, self.st["sens"], lambda v: names[int(round(v))],
-                                hint="Wie streng geprüft wird, ob eine Meldung ein Kill ist. Höher findet auch unscharfe "
-                                     "Meldungen, schlägt aber öfter fälschlich an. Niedriger ist strenger. "
-                                     "Die Mitte passt meistens.")
+        self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 0, self.st["sens"], lambda v: names[int(round(v))])
         for s_ in (self.s_pre, self.s_post, self.s_sens):
             lay.addWidget(s_)
         self.scan_btn = PopButton("Kills suchen", "crosshair", "accent", 46)
