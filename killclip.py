@@ -1,6 +1,7 @@
 """Kill App - schneidet automatisch Kill-Clips aus GTA/FiveM-Aufnahmen (helle Glas-Oberflaeche, Qt)."""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,10 +28,38 @@ TXT, MUT, DIM, ACC_TEXT = "text", "muted", "dim", "acc"
 SETTINGS = os.path.join(os.path.expanduser("~"), ".killapp.json")
 
 MODES = {
-    "Verlustfrei": ("copy", "1:1 Kopie ohne Neu-Kodieren. Blitzschnell, Schnitt am Keyframe."),
-    "Bildgenau": ("exact", "Neu kodiert (CRF 12). Bildgenau, praktisch ohne Verlust."),
-    "Klein": ("h265", "H.265 (CRF 18). Deutlich kleiner, optisch gleich."),
+    "Genau": ("exact", "Bildgenau, neu kodiert in sehr hoher Qualität."),
+    "Klein": ("h265", "Bildgenau, deutlich kleinere Dateien (H.265)."),
+    "Schnell": ("copy", "Sofort fertig, aber Schnitt am Keyframe – Clip kann länger sein."),
 }
+VIDEO_EXT = (".mp4", ".mkv", ".mov", ".flv", ".ts", ".avi", ".webm", ".m4v", ".wmv")
+
+
+def sanitize_name(name):
+    """Entfernt Zeichen, die in Dateinamen nicht erlaubt sind."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name or "").strip().strip(".")[:80]
+
+
+def natural_key(name):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+
+
+def list_videos(folder):
+    try:
+        files = [f for f in os.listdir(folder) if f.lower().endswith(VIDEO_EXT)]
+    except OSError:
+        return []
+    return sorted(files, key=natural_key)
+
+
+def open_path(path):
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception:
+        pass
 BUILTIN_SERVERS = [
     {"id": "bruder", "name": "Bruder", "kind": "bruder", "builtin": True},
     {"id": "standard", "name": "Standard", "kind": "xhit", "builtin": True},
@@ -64,6 +93,8 @@ class Clip:
         self.start, self.end = start, end
         self.kill = start if kill is None else kill
         self.thumb = thumb          # QPixmap
+        self.name = None            # eigener Dateiname (None = automatische Nummer)
+        self.last_name = None       # Name, unter dem der Clip zuletzt exportiert wurde
 
 
 class Bridge(QObject):
@@ -367,6 +398,7 @@ class ClipRow(QWidget):
     """Eintrag in der Clip-Liste (wie ein Titel in einer Playlist)."""
     clicked = Signal()
     delete = Signal()
+    rename = Signal()
 
     def __init__(self, index, clip, parent=None):
         super().__init__(parent)
@@ -374,6 +406,8 @@ class ClipRow(QWidget):
         self.selected = False
         self.hov = 0.0
         self.xhov = 0.0
+        self.ehov = 0.0
+        self.title_text = None
         self.appear = 1.0                 # 0 -> 1: Einblenden (Deckkraft + leichtes Aufsteigen)
         self.setFixedHeight(66)
         self.setMouseTracking(True)
@@ -382,21 +416,32 @@ class ClipRow(QWidget):
     def _xr(self):
         return QRectF(self.width() - 40, (self.height() - 28) / 2, 28, 28)
 
+    def _er(self):
+        return QRectF(self.width() - 72, (self.height() - 28) / 2, 28, 28)
+
     def enterEvent(self, e):
         tween(self, "hov", 1.0, 130)
 
     def leaveEvent(self, e):
         tween(self, "hov", 0.0, 130)
         tween(self, "xhov", 0.0, 100)
+        tween(self, "ehov", 0.0, 100)
 
     def mouseMoveEvent(self, e):
         tween(self, "xhov", 1.0 if self._xr().contains(e.position()) else 0.0, 100)
+        tween(self, "ehov", 1.0 if self._er().contains(e.position()) else 0.0, 100)
 
     def mousePressEvent(self, e):
         if self._xr().contains(e.position()):
             self.delete.emit()
+        elif self._er().contains(e.position()):
+            self.rename.emit()
         else:
             self.clicked.emit()
+
+    def mouseDoubleClickEvent(self, e):
+        if not self._xr().contains(e.position()) and not self._er().contains(e.position()):
+            self.rename.emit()
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -427,23 +472,121 @@ class ClipRow(QWidget):
             sw, sh = (ph * ta, ph) if pw / ph > ta else (pw, pw / ta)
             p.drawPixmap(t, self.c.thumb, QRectF((pw - sw) / 2, (ph - sh) / 2, sw, sh))
             p.restore()
+        tx = t.right() + 14
+        avail = max(40, self.width() - 160 - tx)
         p.setPen(ink(240))
         p.setFont(app_font(10.5, True))
-        p.drawText(QRectF(t.right() + 14, r.top() + 11, 150, 20), Qt.AlignVCenter, f"KILL {self.i + 1:02d}")
+        name = self.title_text or f"Clip {self.i + 1}"
+        p.drawText(QRectF(tx, r.top() + 11, avail, 20), Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(name, Qt.ElideRight, int(avail)))
         c = self.c
-        p.setPen(ink(125))
+        p.setPen(ink(150))
         p.setFont(app_font(9))
-        p.drawText(QRectF(t.right() + 14, r.top() + 32, 160, 18), Qt.AlignVCenter,
-                   f"{fmt_short(c.start)} – {fmt_short(c.end)}")
-        p.setPen(ink(125))
+        sub = f"{fmt_short(c.start)} – {fmt_short(c.end)}" + ("  ·  exportiert" if c.last_name else "")
+        p.drawText(QRectF(tx, r.top() + 32, avail, 18), Qt.AlignVCenter, sub)
+        p.setPen(ink(150))
         p.setFont(app_font(9.5))
-        p.drawText(QRectF(r.right() - 104, r.top(), 56, r.height()), Qt.AlignVCenter | Qt.AlignRight,
+        p.drawText(QRectF(r.right() - 150, r.top(), 66, r.height()), Qt.AlignVCenter | Qt.AlignRight,
                    f"{c.end - c.start:.1f} s")
-        xr = self._xr()
+        er = self._er()
         p.setPen(Qt.NoPen)
+        p.setBrush(white(160 * self.ehov))
+        p.drawEllipse(er)
+        paint_icon(p, "edit", er.adjusted(7, 7, -7, -7), with_alpha(T.icon, int(120 + 110 * self.ehov)), 1.6)
+        xr = self._xr()
         p.setBrush(with_alpha(RED, 55 * self.xhov))
         p.drawEllipse(xr)
         paint_icon(p, "close", xr.adjusted(9, 9, -9, -9), with_alpha(T.icon, int(120 + 110 * self.xhov)), 1.7)
+
+
+class LibRow(QWidget):
+    """Datei im Export-Ordner."""
+    rename = Signal()
+    open_file = Signal()
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.thumb = None
+        self.detail = ""
+        self.hov = 0.0
+        self.ehov = 0.0
+        self.phov = 0.0
+        self.appear = 1.0
+        self.setFixedHeight(70)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def _er(self):
+        return QRectF(self.width() - 80, (self.height() - 32) / 2, 32, 32)
+
+    def _pr(self):
+        return QRectF(self.width() - 44, (self.height() - 32) / 2, 32, 32)
+
+    def enterEvent(self, e):
+        tween(self, "hov", 1.0, 120)
+
+    def leaveEvent(self, e):
+        tween(self, "hov", 0.0, 120)
+        tween(self, "ehov", 0.0, 100)
+        tween(self, "phov", 0.0, 100)
+
+    def mouseMoveEvent(self, e):
+        tween(self, "ehov", 1.0 if self._er().contains(e.position()) else 0.0, 100)
+        tween(self, "phov", 1.0 if self._pr().contains(e.position()) else 0.0, 100)
+
+    def mousePressEvent(self, e):
+        if self._er().contains(e.position()):
+            self.rename.emit()
+        else:
+            self.open_file.emit()
+
+    def mouseDoubleClickEvent(self, e):
+        self.open_file.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        r = QRectF(self.rect()).adjusted(2, 3, -2, -3)
+        if self.appear < 1.0:
+            p.setOpacity(max(0.0, self.appear))
+            p.translate(0, (1 - self.appear) * 8)
+        p.setPen(Qt.NoPen)
+        p.setBrush(white(120 * self.hov))
+        p.drawRoundedRect(r, 18, 18)
+        t = QRectF(r.left() + 10, r.top() + 8, 84, r.height() - 16)
+        p.setBrush(ink(18))
+        p.drawRoundedRect(t, 10, 10)
+        if self.thumb:
+            path = QPainterPath()
+            path.addRoundedRect(t, 10, 10)
+            p.save()
+            p.setClipPath(path)
+            pw, ph = self.thumb.width(), self.thumb.height()
+            ta = t.width() / t.height()
+            sw, sh = (ph * ta, ph) if pw / ph > ta else (pw, pw / ta)
+            p.drawPixmap(t, self.thumb, QRectF((pw - sw) / 2, (ph - sh) / 2, sw, sh))
+            p.restore()
+        tx = t.right() + 14
+        avail = max(40, self.width() - 100 - tx)
+        p.setPen(ink(240))
+        p.setFont(app_font(10.5, True))
+        stem = os.path.splitext(os.path.basename(self.path))[0]
+        p.drawText(QRectF(tx, r.top() + 12, avail, 20), Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(stem, Qt.ElideRight, int(avail)))
+        p.setPen(ink(150))
+        p.setFont(app_font(9))
+        p.drawText(QRectF(tx, r.top() + 34, avail, 18), Qt.AlignVCenter, self.detail)
+        er = self._er()
+        p.setPen(Qt.NoPen)
+        p.setBrush(white(160 * self.ehov))
+        p.drawEllipse(er)
+        paint_icon(p, "edit", er.adjusted(8, 8, -8, -8), with_alpha(T.icon, int(130 + 100 * self.ehov)), 1.6)
+        pr = self._pr()
+        p.setBrush(with_alpha(T.acc, 70 * self.phov))
+        p.drawEllipse(pr)
+        paint_icon(p, "play", pr.adjusted(9, 9, -9, -9), with_alpha(T.icon, int(130 + 100 * self.phov)), 1.6)
 
 
 class SkeletonRow(QWidget):
@@ -842,9 +985,6 @@ def tween_list(w, k, end):
     a.start()
 
 
-VIDEO_EXT = (".mp4", ".mkv", ".mov", ".flv", ".ts", ".avi", ".webm", ".m4v", ".wmv")
-
-
 class DropHint(QWidget):
     """Zeigt beim Reinziehen einer Datei einen Hinweis ("Video hier loslassen")."""
 
@@ -920,6 +1060,11 @@ class Window(QMainWindow):
         self.play_clip = None
         self.speed = 1.0
         self.update_url = None
+        self.mark_in = self.mark_out = None
+        self.dir_widgets = []
+        self.lib_gen = 0
+        self.lib_rows = {}
+        self.lib_cache = {}
         self._tick = 0
         self._last_tl = 0.0
         self._thumb_pending = False
@@ -938,8 +1083,9 @@ class Window(QMainWindow):
         fl.addWidget(self.stack, 1)
         self.page_server = self.build_server_page()
         self.page_editor = self.build_editor_page()
+        self.page_library = self.build_library_page()
         self.page_settings = self.build_settings_page()
-        for pg in (self.page_server, self.page_editor, self.page_settings):
+        for pg in (self.page_server, self.page_editor, self.page_library, self.page_settings):
             self.stack.add(pg)
         self.overlay = Overlay(self.bg)
         self.toast = Toast(self.bg)
@@ -968,14 +1114,16 @@ class Window(QMainWindow):
         self.bridge.call.emit(fn, args)
 
     def load_settings(self):
-        d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Verlustfrei", "open": True, "loop": True,
+        d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Genau", "open": True, "loop": True,
              "autoupd": True, "gpu": True, "servers": [], "names": {}, "last_server": "bruder",
-             "hidden": [], "thorough": False, "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
+             "hidden": [], "export_dir": "", "thorough": False, "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
         try:
             with open(SETTINGS) as f:
                 d.update(json.load(f))
         except Exception:
             pass
+        if d.get("mode") in ("Verlustfrei", "Bildgenau") or d.get("mode") not in MODES:
+            d["mode"] = "Genau"                 # alte Namen -> bildgenauer Modus (Schnitt stimmt auf das Bild)
         if not isinstance(d.get("servers"), list):
             d["servers"] = []
         if not isinstance(d.get("names"), dict):
@@ -1143,7 +1291,8 @@ class Window(QMainWindow):
         lay.addSpacing(26)
         lay.addWidget(self.caption("Menü"))
         self.nav = []
-        for i, (ic, tx) in enumerate((("server", "Server"), ("film", "Editor"), ("gear", "Einstellungen"))):
+        for i, (ic, tx) in enumerate((("server", "Server"), ("film", "Editor"), ("folder", "Bibliothek"),
+                                      ("gear", "Einstellungen"))):
             n = NavItem(ic, tx)
             n.clicked.connect(lambda i=i: self.nav_clicked(i))
             lay.addWidget(n)
@@ -1205,6 +1354,8 @@ class Window(QMainWindow):
             self.stack.go(i)
         if i == 1 and self.player:
             QTimer.singleShot(60, lambda: self.player.request_seek(self.pos))
+        if i == 2:
+            self.refresh_library()
 
     # ------------------------------------------------------------ Seite: Server
     def page_header(self, title, sub):
@@ -1731,12 +1882,17 @@ class Window(QMainWindow):
         rl.setSpacing(14)
         top.addWidget(rw)
 
-        g, lay = panel("Kills suchen", "Findet automatisch jeden Kill im Video")
+        g, lay = panel("Kills suchen")
         self.s_pre = SliderRow("Vor dem Kill", 0, 10, 100, self.st["pre"], lambda v: f"{v:.1f} s")
         self.s_post = SliderRow("Nach dem Kill", 0, 10, 100, self.st["post"], lambda v: f"{v:.1f} s")
         names = ["", "sehr niedrig", "niedrig", "niedrig", "mittel", "mittel", "mittel+", "hoch", "hoch", "sehr hoch",
                  "max"]
-        self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 0, self.st["sens"], lambda v: names[int(round(v))])
+        self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 0, self.st["sens"], lambda v: names[int(round(v))],
+                                hint="Wie streng die App prüft, ob eine Meldung wirklich ein Kill ist.\n\n"
+                                     "Höher = toleranter: findet auch unscharfe oder schlecht aufgenommene "
+                                     "Meldungen, schlägt aber öfter fälschlich an.\n"
+                                     "Niedriger = strenger: weniger Fehlalarme, aber echte Kills können "
+                                     "übersehen werden.\n\nDie Mitte passt meistens.")
         for s_ in (self.s_pre, self.s_post, self.s_sens):
             lay.addWidget(s_)
         self.scan_btn = PopButton("Kills suchen", "crosshair", "accent", 46)
@@ -1748,14 +1904,19 @@ class Window(QMainWindow):
         lay.addWidget(self.status)
         rl.addWidget(g)
 
-        g, lay = panel("Export", "Clips als einzelne Videodateien speichern")
+        g, lay = panel("Export")
         self.seg_mode = Segmented(list(MODES), height=36)
-        self.seg_mode.set_current(self.st["mode"] if self.st["mode"] in MODES else "Verlustfrei")
-        self.mode_desc = ElidedLabel("", 9.5, False, DIM)
+        self.seg_mode.set_current(self.st["mode"] if self.st["mode"] in MODES else "Genau")
+        self.mode_desc = QLabel()
+        self.mode_desc.setWordWrap(True)
+        self.mode_desc.setFont(app_font(9))
+        self.mode_desc.setProperty("role", "muted")
+        self.mode_desc.setMinimumHeight(30)
         self.seg_mode.changed.connect(lambda v: self.mode_desc.setText(MODES[v][1]))
         self.mode_desc.setText(MODES[self.seg_mode.current()][1])
         lay.addWidget(self.seg_mode)
         lay.addWidget(self.mode_desc)
+        lay.addWidget(self.make_dir_row())
         self.exp_all = PopButton("Alle exportieren", "upload", "accent", 44)
         self.exp_all.clicked.connect(lambda: self.export(False))
         lay.addWidget(self.exp_all)
@@ -1875,6 +2036,9 @@ class Window(QMainWindow):
         self.tg_thorough = toggle_row(gl, "Gründliche Suche (langsamer)", "Sucht Bild für Bild. Nur nötig, wenn "
                                       "eine sehr kurze Meldung übersehen wurde.", self.st["thorough"])
         v.addWidget(g)
+        g, gl = panel("Export", "Wohin die Clips gespeichert werden", alpha=150)
+        gl.addWidget(self.make_dir_row())
+        v.addWidget(g)
         g, gl = panel("Updates", alpha=150)
         self.tg_upd = toggle_row(gl, "Beim Start nach Updates suchen", "Neue Versionen werden automatisch gefunden.",
                                  self.st["autoupd"])
@@ -1926,7 +2090,7 @@ class Window(QMainWindow):
             self.apply_theme(**{key: c.name()})
 
     def build_appearance_panel(self):
-        g, lay = panel("Darstellung", "Modus und Farben der ganzen App", alpha=150)
+        g, lay = panel("Darstellung", "Hell oder dunkel und das Farbthema der ganzen App", alpha=150)
         r = QHBoxLayout()
         r.addWidget(label("Design", 11, True), 1)
         self.seg_dark = Segmented(["Hell", "Dunkel"], height=36)
@@ -1945,24 +2109,6 @@ class Window(QMainWindow):
             pr.addWidget(pc)
         pr.addStretch(1)
         lay.addLayout(pr)
-        lay.addSpacing(4)
-        lay.addWidget(label("Eigene Farben", 10.5, True, MUT))
-        for key, title, sub in (("acc", "Akzentfarbe", "Knöpfe, Regler, Hervorhebungen"),
-                                ("acc2", "Zweite Akzentfarbe", "Farbverlauf in Knöpfen und Balken"),
-                                ("bg", "Hintergrund", "Farbton des Hintergrund-Verlaufs")):
-            row = QHBoxLayout()
-            col = QVBoxLayout()
-            col.setSpacing(0)
-            col.addWidget(label(title, 11, True))
-            col.addWidget(label(sub, 9.5, color=DIM))
-            row.addLayout(col, 1)
-            dot = ColorDot(lambda key=key: QColor(self.st[key]))
-            dot.clicked.connect(lambda key=key, title=title: self.pick_color(key, title))
-            row.addWidget(dot)
-            lay.addLayout(row)
-        rb = PopButton("Zurücksetzen", "refresh", "glass", 38)
-        rb.clicked.connect(lambda: self.apply_theme(**DEFAULT))
-        lay.addWidget(rb, 0, Qt.AlignLeft)
         return g
 
     # ------------------------------------------------------------ Updates
@@ -2040,6 +2186,7 @@ class Window(QMainWindow):
         self.open_btn.setText("Wechseln")
         self.open_btn.set_kind("glass")
         self.clips, self.sel = [], None
+        self.mark_in = self.mark_out = None
         self.rebuild_cards()
         self.scan_bar.set_value(0, False)
         self.set_status("Bereit – jetzt „Kills suchen“")
@@ -2259,6 +2406,7 @@ class Window(QMainWindow):
             row.selected = i == self.sel
             row.clicked.connect(lambda i=i: self.select(i))
             row.delete.connect(lambda i=i: self.delete(i))
+            row.rename.connect(lambda i=i: self.open_rename_clip(i))
             if animate:                                   # Liste erscheint nacheinander (kurze Staffelung)
                 row.appear = 0.0
                 QTimer.singleShot(min(i, 8) * 45, lambda r=row: self._appear(r))
@@ -2266,6 +2414,7 @@ class Window(QMainWindow):
             self.rows.append(row)
         v.addStretch(1)
         self.clip_scroll.setWidget(host)
+        self.refresh_names()
         self.count_lbl.setText(str(len(self.clips)))
         total = sum(c.end - c.start for c in self.clips)
         self.total_lbl.setText(f"Gesamt {fmt_short(total)}" if self.clips else "")
@@ -2314,32 +2463,337 @@ class Window(QMainWindow):
         if self.clips:
             self.select(min(i, len(self.clips) - 1), seek=False)
 
-    def add_clip(self):
-        if not self.player:
-            return
-        c = Clip(max(0, self.pos - self.s_pre.value()), min(self.duration, self.pos + self.s_post.value()), self.pos)
+    def make_thumb(self):
         arr = self.video.arr
-        if arr is not None:
-            small = cv2.resize(arr, (256, int(256 * arr.shape[0] / arr.shape[1])), interpolation=cv2.INTER_AREA)
-            h, w = small.shape[:2]
-            c.thumb = QPixmap.fromImage(QImage(small.data, w, h, 3 * w, QImage.Format_RGB888).copy())
+        if arr is None:
+            return None
+        small = cv2.resize(arr, (256, int(256 * arr.shape[0] / arr.shape[1])), interpolation=cv2.INTER_AREA)
+        h, w = small.shape[:2]
+        return QPixmap.fromImage(QImage(small.data, w, h, 3 * w, QImage.Format_RGB888).copy())
+
+    def create_clip(self, start, end, kill=None):
+        c = Clip(max(0.0, start), min(self.duration, end), kill if kill is not None else start)
+        c.thumb = self.make_thumb()
         self.clips.append(c)
         self.clips.sort(key=lambda x: x.start)
         idx = self.clips.index(c)
+        self.mark_in = self.mark_out = None
         self.rebuild_cards()
         self.select(idx, seek=False)
+        return c
+
+    def add_clip(self):
+        if not self.player:
+            return
+        self.create_clip(self.pos - self.s_pre.value(), self.pos + self.s_post.value(), self.pos)
         self.say("Clip hinzugefügt")
 
     def set_edge(self, which):
-        if self.sel is None:
-            self.say("Wähle zuerst einen Clip aus", RED)
+        """Start/Ende setzen: aendert den gewaehlten Clip, wenn die Position darin liegt - sonst entsteht ein neuer
+        Clip aus Start- und Ende-Markierung."""
+        if not self.player:
             return
-        c = self.clips[self.sel]
+        c = self.clips[self.sel] if self.sel is not None and 0 <= self.sel < len(self.clips) else None
+        if c is not None and c.start - 1.0 <= self.pos <= c.end + 1.0:
+            if which == 0:
+                c.start = min(self.pos, c.end - 0.5)
+            else:
+                c.end = max(self.pos, c.start + 0.5)
+            self.clip_changed(self.sel)
+            self.refresh_names()
+            return
         if which == 0:
-            c.start = min(self.pos, c.end - 0.5)
+            if self.mark_out is not None and self.pos < self.mark_out - 0.4:
+                n = self.mark_out - self.pos
+                self.create_clip(self.pos, self.mark_out)
+                self.say(f"Clip erstellt ({n:.1f} s)")
+            else:
+                self.mark_in, self.mark_out = self.pos, None
+                self.say(f"Start gesetzt bei {fmt_short(self.pos)} – jetzt „Ende hier“ drücken")
         else:
-            c.end = max(self.pos, c.start + 0.5)
-        self.clip_changed(self.sel)
+            if self.mark_in is not None and self.pos > self.mark_in + 0.4:
+                n = self.pos - self.mark_in
+                self.create_clip(self.mark_in, self.pos)
+                self.say(f"Clip erstellt ({n:.1f} s)")
+            else:
+                self.mark_out, self.mark_in = self.pos, None
+                self.say(f"Ende gesetzt bei {fmt_short(self.pos)} – jetzt „Start hier“ drücken")
+        self.timeline.update()
+
+    # ------------------------------------------------------------ Export-Ordner und Namen
+    def export_dir(self):
+        d = self.st.get("export_dir") or ""
+        return d if d and os.path.isdir(d) else ""
+
+    def make_dir_row(self):
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        col.addWidget(label("Export-Ordner", 10.5, True))
+        pl = ElidedLabel("", 9, False, MUT)
+        col.addWidget(pl)
+        row.addLayout(col, 1)
+        b = PopButton("Wählen", "folder", "glass", 34)
+        b.clicked.connect(lambda: self.choose_export_dir())
+        row.addWidget(b)
+        self.dir_widgets.append((pl, b))
+        self.refresh_dir_labels()
+        return box
+
+    def refresh_dir_labels(self):
+        d = self.export_dir()
+        for lbl, btn in self.dir_widgets:
+            lbl.setText(d if d else "Noch nicht festgelegt – wird beim ersten Export gefragt")
+            lbl.setToolTip(d)
+            btn.setText("Ändern" if d else "Wählen")
+
+    def choose_export_dir(self, then=None):
+        start = self.export_dir() or self.st.get("outdir") or ""
+        d = QFileDialog.getExistingDirectory(self, "Export-Ordner wählen", start)
+        if not d:
+            return
+        self.st["export_dir"] = d
+        self.st["outdir"] = d
+        self.save_settings()
+        self.refresh_names()
+        self.refresh_library()
+        self.say("Export-Ordner gespeichert")
+        if then:
+            then()
+
+    def plan_names(self, clips):
+        """Dateinamen fuer die Clips: eigener Name, sonst die naechste freie Nummer im Export-Ordner."""
+        folder = self.export_dir()
+        used, nums = set(), []
+        if folder:
+            try:
+                for f in os.listdir(folder):
+                    stem = os.path.splitext(f)[0]
+                    used.add(stem.lower())
+                    if stem.isdigit():
+                        nums.append(int(stem))
+            except OSError:
+                pass
+        nxt = (max(nums) + 1) if nums else 1
+        out = []
+        for c in clips:
+            base = sanitize_name(c.name) if c.name else ""
+            if base:
+                n, k = base, 2
+                while n.lower() in used:
+                    n = f"{base} ({k})"
+                    k += 1
+            else:
+                while str(nxt) in used:
+                    nxt += 1
+                n = str(nxt)
+                nxt += 1
+            used.add(n.lower())
+            out.append(n)
+        return out
+
+    def refresh_names(self):
+        if not hasattr(self, "rows"):
+            return
+        plan = self.plan_names(self.clips)
+        for i, row in enumerate(self.rows):
+            if i < len(self.clips):
+                nm = self.clips[i].last_name or plan[i]
+                row.title_text = f"Clip {nm}" if nm.isdigit() else nm
+                row.update()
+        self.refresh_dir_labels()
+
+    def open_rename_clip(self, i):
+        if not (0 <= i < len(self.clips)):
+            return
+        c = self.clips[i]
+        plan = self.plan_names(self.clips)
+        card = DialogCard("Clip benennen", "Der Name wird beim Export als Dateiname verwendet. "
+                                           "Leer lassen für die automatische Nummer.")
+        card.body.addWidget(label("Name", 10.5, True, MUT))
+        le = QLineEdit(c.name or "")
+        le.setPlaceholderText(plan[i])
+        self.style_edit(le)
+        card.body.addWidget(le)
+
+        def save():
+            c.name = sanitize_name(le.text()) or None
+            c.last_name = None
+            self.refresh_names()
+            self.overlay.dismiss()
+        le.returnPressed.connect(save)
+        cancel = PopButton("Abbrechen", None, "glass", 40)
+        cancel.clicked.connect(self.overlay.dismiss)
+        sv = PopButton("Speichern", "check", "accent", 40)
+        sv.clicked.connect(save)
+        card.btns.addWidget(cancel)
+        card.btns.addWidget(sv)
+        self.overlay.present(card)
+        QTimer.singleShot(120, le.setFocus)
+
+    # ------------------------------------------------------------ Bibliothek (Export-Ordner)
+    def build_library_page(self):
+        main = Glass(radius=32, alpha=125)
+        lay = QVBoxLayout(main)
+        lay.setContentsMargins(30, 26, 22, 22)
+        top = QHBoxLayout()
+        hdr = QVBoxLayout()
+        hdr.setSpacing(2)
+        hdr.addWidget(label("Bibliothek", 24, True))
+        self.lib_sub = ElidedLabel("", 10.5, False, MUT)
+        hdr.addWidget(self.lib_sub)
+        top.addLayout(hdr, 1)
+        b1 = PopButton("Ordner wählen", "folder", "glass", 40)
+        b1.clicked.connect(lambda: self.choose_export_dir())
+        b2 = PopButton("Im Explorer öffnen", None, "glass", 40)
+        b2.clicked.connect(lambda: self.export_dir() and open_path(self.export_dir()))
+        b3 = PopButton("", "refresh", "glass", 40, icon_only=True)
+        b3.setToolTip("Aktualisieren")
+        b3.clicked.connect(self.refresh_library)
+        for b in (b1, b2, b3):
+            top.addWidget(b)
+        lay.addLayout(top)
+        lay.addSpacing(10)
+        self.lib_scroll = QScrollArea()
+        self.lib_scroll.setWidgetResizable(True)
+        self.lib_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.lib_scroll.viewport().setAutoFillBackground(False)
+        lay.addWidget(self.lib_scroll, 1)
+        return main
+
+    def refresh_library(self):
+        self.lib_gen += 1
+        gen = self.lib_gen
+        d = self.export_dir()
+        host = QWidget()
+        host.setAttribute(Qt.WA_TranslucentBackground)
+        v = QVBoxLayout(host)
+        v.setContentsMargins(0, 0, 8, 0)
+        v.setSpacing(2)
+        self.lib_rows = {}
+        if not d:
+            self.lib_sub.setText("Noch kein Export-Ordner gewählt")
+            e = QLabel()
+            e.setPixmap(icon_pixmap("folder", T.icon, 40, 1.5))
+            e.setAlignment(Qt.AlignCenter)
+            v.addSpacing(60)
+            v.addWidget(e)
+            t = label("Hier erscheinen deine exportierten Clips", 12, True)
+            t.setAlignment(Qt.AlignCenter)
+            v.addWidget(t)
+            h = label("Wähle einen Ordner. Dort werden alle Clips gespeichert, und du siehst sie hier.", 10, False,
+                      MUT, True)
+            h.setAlignment(Qt.AlignCenter)
+            v.addWidget(h)
+            v.addSpacing(8)
+            b = PopButton("Ordner wählen", "folder", "accent", 42)
+            b.clicked.connect(lambda: self.choose_export_dir())
+            v.addWidget(b, 0, Qt.AlignHCenter)
+            v.addStretch(1)
+        else:
+            files = list_videos(d)
+            self.lib_sub.setText(f"{d}  ·  {len(files)} {'Clip' if len(files) == 1 else 'Clips'}")
+            if not files:
+                t = label("Noch keine Clips in diesem Ordner", 12, True)
+                t.setAlignment(Qt.AlignCenter)
+                v.addSpacing(70)
+                v.addWidget(t)
+                h = label("Exportiere Clips aus dem Editor – sie erscheinen dann hier.", 10, False, MUT, True)
+                h.setAlignment(Qt.AlignCenter)
+                v.addWidget(h)
+            paths = []
+            for f in files:
+                p = os.path.join(d, f)
+                row = LibRow(p)
+                try:
+                    row.detail = f"{os.path.splitext(f)[1][1:].upper()}  ·  {os.path.getsize(p) / 1e6:.0f} MB"
+                except OSError:
+                    pass
+                row.rename.connect(lambda p=p: self.open_rename_file(p))
+                row.open_file.connect(lambda p=p: open_path(p))
+                v.addWidget(row)
+                self.lib_rows[p] = row
+                paths.append(p)
+            v.addStretch(1)
+            if paths:
+                threading.Thread(target=self._load_lib_info, args=(paths, gen), daemon=True).start()
+        self.lib_scroll.setWidget(host)
+
+    def _load_lib_info(self, paths, gen):
+        for p in paths:
+            if gen != self.lib_gen:
+                return
+            try:
+                key = (p, os.path.getmtime(p), os.path.getsize(p))
+            except OSError:
+                continue
+            info = self.lib_cache.get(key)
+            if info is None:
+                thumb, dur = None, 0.0
+                cap = cv2.VideoCapture(p)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
+                    n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                    dur = n / fps
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(n * 0.15))
+                    ok, fr = cap.read()
+                    if ok:
+                        h, w = fr.shape[:2]
+                        thumb = cv2.resize(fr, (192, max(2, int(192 * h / w))), interpolation=cv2.INTER_AREA)
+                cap.release()
+                info = (thumb, dur, key[2])
+                self.lib_cache[key] = info
+            self.ui(self._apply_lib, gen, p, *info)
+
+    def _apply_lib(self, gen, path, thumb, dur, size):
+        row = self.lib_rows.get(path)
+        if gen != self.lib_gen or row is None:
+            return
+        if thumb is not None:
+            row.thumb = bgr_to_pixmap(thumb)
+        ext = os.path.splitext(path)[1][1:].upper()
+        row.detail = f"{ext}  ·  {fmt_short(dur)}  ·  {size / 1e6:.0f} MB"
+        row.update()
+
+    def open_rename_file(self, path):
+        stem, ext = os.path.splitext(os.path.basename(path))
+        card = DialogCard("Clip umbenennen", f"Dateiendung bleibt {ext}.")
+        card.body.addWidget(label("Name", 10.5, True, MUT))
+        le = QLineEdit(stem)
+        self.style_edit(le)
+        card.body.addWidget(le)
+
+        def save():
+            nm = sanitize_name(le.text())
+            if not nm:
+                card.err.setText("Bitte einen Namen eingeben.")
+                return
+            new = os.path.join(os.path.dirname(path), nm + ext)
+            if new.lower() != path.lower() and os.path.exists(new):
+                card.err.setText("Diesen Namen gibt es in dem Ordner schon.")
+                return
+            try:
+                os.rename(path, new)
+            except OSError as e:
+                card.err.setText(f"Umbenennen nicht möglich: {e}")
+                return
+            self.overlay.dismiss()
+            self.refresh_names()
+            self.refresh_library()
+            self.say("Umbenannt")
+        le.returnPressed.connect(save)
+        cancel = PopButton("Abbrechen", None, "glass", 40)
+        cancel.clicked.connect(self.overlay.dismiss)
+        sv = PopButton("Speichern", "check", "accent", 40)
+        sv.clicked.connect(save)
+        card.btns.addWidget(cancel)
+        card.btns.addWidget(sv)
+        self.overlay.present(card)
+        QTimer.singleShot(120, le.setFocus)
+        QTimer.singleShot(150, le.selectAll)
 
     # ------------------------------------------------------------ Export
     def export(self, only_selected):
@@ -2356,24 +2810,25 @@ class Window(QMainWindow):
             idx = [self.sel]
         else:
             idx = list(range(len(self.clips)))
-        out = QFileDialog.getExistingDirectory(self, "Zielordner wählen", self.st.get("outdir") or "")
-        if not out:
+        if not self.export_dir():
+            self.choose_export_dir(then=lambda: self.export(only_selected))
             return
-        self.st["outdir"] = out
+        out = self.export_dir()
         mode = MODES[self.seg_mode.current()][0]
-        base, ext = os.path.splitext(os.path.basename(self.path))
-        jobs = [(self.clips[i].start, self.clips[i].end, os.path.join(out, f"{base}_kill{i + 1:02d}{ext}"))
-                for i in idx]
+        ext = os.path.splitext(self.path)[1] or ".mp4"
+        sel = [self.clips[i] for i in idx]
+        names = self.plan_names(sel)
+        jobs = [(c.start, c.end, os.path.join(out, n + ext), c, n) for c, n in zip(sel, names)]
         self.exp_bar.set_value(0, False)
         self.exp_all.setEnabled(False)
 
         def work():
             try:
-                for n, (a, b, dst) in enumerate(jobs, 1):
+                for n, (a, b, dst, c, nm) in enumerate(jobs, 1):
                     self.ui(self.set_status, f"Export {n}/{len(jobs)} …", "busy")
                     export_clip(self.ffmpeg, self.path, a, b, dst, mode)
                     self.ui(self.exp_bar.set_value, n / len(jobs))
-                self.ui(self.export_done, out, len(jobs))
+                self.ui(self.export_done, out, [(c, nm) for _, _, _, c, nm in jobs])
             except Exception as e:
                 self.ui(self.export_failed, str(e))
         threading.Thread(target=work, daemon=True).start()
@@ -2383,18 +2838,17 @@ class Window(QMainWindow):
         self.set_status("Export fehlgeschlagen", "bad")
         self.say("Export-Fehler: " + msg[:90], RED)
 
-    def export_done(self, out, n):
+    def export_done(self, out, items):
         self.exp_all.setEnabled(True)
+        n = len(items)
+        for c, nm in items:
+            c.last_name = nm
         self.set_status(f"{n} Clips exportiert", "ok")
-        self.say(f"{n} Clips exportiert")
+        self.say(f"{n} {'Clip' if n == 1 else 'Clips'} exportiert")
+        self.refresh_names()
+        self.refresh_library()
         if self.tg_open.isChecked():
-            try:
-                if sys.platform.startswith("win"):
-                    os.startfile(out)
-                else:
-                    subprocess.Popen(["xdg-open", out])
-            except Exception:
-                pass
+            open_path(out)
 
     # ------------------------------------------------------------ Tasten
     def keyPressEvent(self, e):

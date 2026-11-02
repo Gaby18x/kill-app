@@ -498,8 +498,8 @@ def export_clip(ffmpeg, src, start, end, dst, mode):
     elif mode == "h265":
         cmd += ["-c:v", "libx265", "-crf", "18", "-preset", "medium",
                 "-tag:v", "hvc1", "-x265-params", "log-level=error", "-c:a", "copy"]
-    else:  # exact: bildgenau, nahezu verlustfrei
-        cmd += ["-c:v", "libx264", "-crf", "12", "-preset", "slow", "-c:a", "copy"]
+    else:  # exact: bildgenauer Schnitt, neu kodiert in sehr hoher Qualitaet (kaum sichtbarer Unterschied), zuegig
+        cmd += ["-c:v", "libx264", "-crf", "14", "-preset", "veryfast", "-c:a", "copy"]
     cmd.append(dst)
     subprocess.run(cmd, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 

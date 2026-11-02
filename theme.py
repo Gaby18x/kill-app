@@ -11,6 +11,7 @@ PRESETS = {
     "Sunset": {"acc": "#f0703c", "acc2": "#f7b267", "bg": "#f06a8c"},
     "Rosé": {"acc": "#e8589a", "acc2": "#f7a1c8", "bg": "#e8589a"},
     "Gold": {"acc": "#d99a1e", "acc2": "#f5d06f", "bg": "#e0a03a"},
+    "Grau": {"acc": "#5f6575", "acc2": "#8b91a3", "bg": "#8b909c"},
 }
 DEFAULT = PRESETS["Flieder"]
 
@@ -43,11 +44,15 @@ class Theme:
         self.dark = bool(dark)
         self.acc, self.acc2, self.bg = QColor(acc), QColor(acc2), QColor(bg)
         h, s, l = _hsl(self.acc)
+        # wie bunt ist das Farbthema? (Grau-Thema: kaum Saettigung -> alles bleibt neutral)
+        self.sk_acc = min(1.0, s / 0.5)
+        self.sk_bg = min(1.0, _hsl(self.bg)[1] / 0.45)
         # Akzentfarbe fuer Text: auf hellem Glas dunkler, auf dunklem heller (immer gut lesbar)
-        self.acc_text = hsl(h, max(s, 0.45), 0.42) if not self.dark else hsl(h, max(s, 0.55), 0.76)
+        self.acc_text = (hsl(h, max(s, 0.45), 0.42) if not self.dark else hsl(h, max(s, 0.55), 0.76)) if s > 0.25 else \
+            (hsl(h, s, 0.36) if not self.dark else hsl(h, s, 0.80))
         # Schrift auf Akzent-Flaechen: weiss, bei sehr hellen Akzenten dunkel
         self.on_acc = QColor("#1c1838") if (lum(self.acc) + lum(self.acc2)) / 2 > 0.66 else QColor("#ffffff")
-        self.icon = hsl(h, 0.28, 0.46, 0.9) if not self.dark else hsl(h, 0.35, 0.80, 0.9)
+        self.icon = hsl(h, 0.28 * self.sk_acc, 0.46, 0.9) if not self.dark else hsl(h, 0.35 * self.sk_acc, 0.80, 0.9)
         # Textfarben
         self.text = QColor(236, 237, 252) if self.dark else QColor(42, 40, 72)
         self.k_white = 0.2 if self.dark else 1.0           # Glas-Weiss ist im Dunkeln viel schwaecher
@@ -56,7 +61,7 @@ class Theme:
         self.warn = QColor("#ffc15a") if self.dark else QColor("#c4801f")
         self.busy = QColor("#8fb0ff") if self.dark else QColor("#4a7be0")
         self.dialog_fill = QColor(30, 27, 62, 248) if self.dark else QColor(255, 255, 255, 238)
-        self.scrim = QColor(0, 0, 0, 150) if self.dark else hsl(h, 0.35, 0.28, 0.37)
+        self.scrim = QColor(0, 0, 0, 150) if self.dark else hsl(h, 0.35 * self.sk_acc, 0.28, 0.37)
         self._bg_cache = None
 
     # ---- Farben mit Alpha
@@ -99,25 +104,27 @@ class Theme:
     def video_stops(self):
         """Hintergrund der Vorschau-Flaeche (leer/Letterbox): dunkle Variante der Akzentfarbe."""
         h, s, l = _hsl(self.acc)
-        return hsl(h, 0.40, 0.26, 0.94), hsl(h + 0.03, 0.46, 0.12, 0.96)
+        return hsl(h, 0.40 * self.sk_acc, 0.26, 0.94), hsl(h + 0.03, 0.46 * self.sk_acc, 0.12, 0.96)
 
     # ---- Hintergrund
     def bg_stops(self):
         h, s, l = _hsl(self.bg)
+        k = self.sk_bg
         if self.dark:
-            return (hsl(h, 0.55, 0.075), hsl(h + 0.04, 0.55, 0.115), hsl(h - 0.05, 0.50, 0.085))
-        return (hsl(h - 0.03, 0.55, 0.86), hsl(h + 0.05, 0.60, 0.90), hsl(h - 0.08, 0.55, 0.87))
+            return (hsl(h, 0.55 * k, 0.075), hsl(h + 0.04, 0.55 * k, 0.115), hsl(h - 0.05, 0.50 * k, 0.085))
+        return (hsl(h - 0.03, 0.55 * k, 0.86), hsl(h + 0.05, 0.60 * k, 0.90), hsl(h - 0.08, 0.55 * k, 0.87))
 
     def bg_blobs(self):
         """(x, y, radius, Farbe, Alpha) - weiche Farbflecken."""
         h, s, l = _hsl(self.bg)
         a2 = _hsl(self.acc2)
         a1 = _hsl(self.acc)
+        k = self.sk_bg
         if self.dark:
-            return [(0.06, 0.98, 0.55, hsl(a2[0], 0.75, 0.50), 80), (0.95, 0.04, 0.60, hsl(a1[0], 0.8, 0.52), 95),
-                    (0.80, 0.98, 0.45, hsl(h + 0.08, 0.7, 0.45), 70), (0.28, 0.12, 0.40, hsl(h - 0.06, 0.7, 0.50), 55)]
-        return [(0.05, 0.98, 0.55, hsl(a2[0] + 0.02, 0.85, 0.80), 150), (0.95, 0.04, 0.60, hsl(a1[0], 0.85, 0.74), 150),
-                (0.80, 0.98, 0.45, hsl(h + 0.10, 0.85, 0.80), 140), (0.28, 0.12, 0.40, hsl(h - 0.06, 0.80, 0.78), 110)]
+            return [(0.06, 0.98, 0.55, hsl(a2[0], 0.75 * k, 0.50), 80), (0.95, 0.04, 0.60, hsl(a1[0], 0.8 * k, 0.52), 95),
+                    (0.80, 0.98, 0.45, hsl(h + 0.08, 0.7 * k, 0.45), 70), (0.28, 0.12, 0.40, hsl(h - 0.06, 0.7 * k, 0.50), 55)]
+        return [(0.05, 0.98, 0.55, hsl(a2[0] + 0.02, 0.85 * k, 0.80), 150), (0.95, 0.04, 0.60, hsl(a1[0], 0.85 * k, 0.74), 150),
+                (0.80, 0.98, 0.45, hsl(h + 0.10, 0.85 * k, 0.80), 140), (0.28, 0.12, 0.40, hsl(h - 0.06, 0.80 * k, 0.78), 110)]
 
     # ---- Globales Stylesheet
     def qss(self):

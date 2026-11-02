@@ -652,10 +652,40 @@ class SmoothSlider(QWidget):
         p.drawEllipse(QPointF(x, cy), 3.4, 3.4)
 
 
+class InfoDot(QWidget):
+    """Kleines "i" im Kreis; der Hilfetext erscheint beim Daruberfahren."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(20, 20)
+        self.setToolTip(text)
+        self.setCursor(Qt.WhatsThisCursor)
+        self.hov = 0.0
+
+    def enterEvent(self, e):
+        tween(self, "hov", 1.0, 120)
+
+    def leaveEvent(self, e):
+        tween(self, "hov", 0.0, 120)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QRectF(self.rect()).center()
+        col = ink(120 + 90 * self.hov)
+        p.setPen(QPen(col, 1.3))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(c, 7.2, 7.2)
+        p.setPen(QPen(col, 1.6))
+        p.setBrush(col)
+        p.drawEllipse(QPointF(c.x(), c.y() - 3.0), 0.9, 0.9)
+        p.drawLine(QPointF(c.x(), c.y() - 0.8), QPointF(c.x(), c.y() + 3.4))
+
+
 class SliderRow(QWidget):
     """Titel links, Wert rechts, darunter der Regler ueber die volle Breite."""
 
-    def __init__(self, title, lo, hi, steps, value, fmt, parent=None):
+    def __init__(self, title, lo, hi, steps, value, fmt, parent=None, hint=None):
         super().__init__(parent)
         self.fmt = fmt
         from PySide6.QtWidgets import QVBoxLayout
@@ -670,6 +700,8 @@ class SliderRow(QWidget):
         self.val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.val.setFont(app_font(10, True))
         top.addWidget(self.title)
+        if hint:
+            top.addWidget(InfoDot(hint))
         top.addStretch(1)
         top.addWidget(self.val)
         # steps > 0: feines Raster (nur zur Anzeige), steps = 0: voellig stufenlos
@@ -1078,6 +1110,19 @@ class Timeline(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(RED)
             p.drawPolygon(QPolygonF([QPointF(k - 6, y0 + 1), QPointF(k + 6, y0 + 1), QPointF(k, y0 + 12)]))
+        for attr, txt in (("mark_in", "Start"), ("mark_out", "Ende")):
+            tm = getattr(m, attr, None)
+            if tm is not None and self.v0 <= tm <= self.v1:
+                mx = self.x_of(tm)
+                p.setPen(QPen(T.acc, 2))
+                p.drawLine(QPointF(mx, y0 + 2), QPointF(mx, y1 - 2))
+                p.setPen(Qt.NoPen)
+                p.setBrush(T.acc)
+                fr = QRectF(mx - 24, y1 - 22, 48, 16)
+                p.drawRoundedRect(fr, 8, 8)
+                p.setPen(T.on_acc)
+                p.setFont(app_font(8, True))
+                p.drawText(fr, Qt.AlignCenter, txt)
         p.setClipping(False)
         px = self.x_of(m.pos)
         if P <= px <= w - P:
