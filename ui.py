@@ -1129,10 +1129,12 @@ class Overlay(QWidget):
         if self.opaque:                                   # ganzes Fenster zudecken (Anmeldung, Pflicht-Update)
             p.setRenderHint(QPainter.Antialiasing)
             p.setClipPath(self.parent().clip_path())
-            if getattr(self, "_bd", None) is None or self._bd.size() != self.size():
-                self._bd = Background.login_backdrop(self.width(), self.height())
+            bg = Background.instance
             p.setOpacity(min(1.0, self.k * 1.4))
-            p.drawPixmap(0, 0, self._bd)
+            if bg is not None and bg._pm is not None:     # der normale App-Hintergrund mit seinem Verlauf
+                p.drawPixmap(self.rect(), bg._pm)
+            else:
+                p.fillRect(self.rect(), QColor(0, 0, 0) if T.dark else QColor(225, 226, 230))
             return
         p.setRenderHint(QPainter.Antialiasing)
         p.setClipPath(self.parent().clip_path())

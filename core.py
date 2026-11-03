@@ -326,13 +326,14 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     s_one = v
                 if v > best_s:
                     best_f, best_s = float(f), v
-            if best_s > 0.45 and best_s >= s_one + 0.03:
+            # nur wechseln, wenn eine andere Groesse deutlich besser passt (sonst bleibt alles wie bisher)
+            if best_s > 0.45 and best_s >= s_one + 0.06:
                 return best_f
             return 1.0
 
         def verify(fr, loc):
             """Text-Pruefung, etwas tolerant gegenueber kleinen Groessenunterschieden."""
-            for s_ in (1.0, 0.95, 1.05):
+            for s_ in (1.0, 0.95, 1.05, 0.9, 1.1):
                 if verify_text(fr, loc, ks * s_, words, text_thr, region)[0]:
                     return True
             return False

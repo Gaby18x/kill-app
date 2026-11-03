@@ -32,6 +32,7 @@ from ui import (Background, Bar, ElidedLabel, FadeStack, Glass, Overlay, PopButt
 
 # Textrollen (Farben kommen aus dem Farbsystem, damit der Modus umschaltbar ist)
 TXT, MUT, DIM, ACC_TEXT = "text", "muted", "dim", "acc"
+OK_GREEN = QColor("#34c77b")
 
 SETTINGS = os.path.join(os.path.expanduser("~"), ".killapp.json")
 
@@ -633,7 +634,8 @@ class ThemePopover(QWidget):
         par = self.parent()
         dock = getattr(par.window(), "dock", None)
         inside = self.rect().adjusted(-10, -24, 10, 10).contains(self.mapFromGlobal(gp))
-        on_item = dock is not None and dock.hover_i == len(dock.items) - 1
+        md = getattr(par.window(), "mode_dot", None)
+        on_item = md is not None and md.rect().adjusted(-4, -4, 4, 14).contains(md.mapFromGlobal(gp))
         if not inside and not on_item:
             self.watch.stop()
             self.hide()
@@ -815,9 +817,11 @@ class BellNotify(QWidget):
         x = int(max(free_l, (free_l + right) / 2 - 170))
         self.setGeometry(x, 12 + (Dock.PANEL - self.H) // 2, max(self.H + 40, right - x), self.H)
 
-    def show_text(self, text, color=None):
+    def show_text(self, text, kind="neutral"):
         self.text = text
-        self.color = QColor(color) if color is not None else None
+        if not isinstance(kind, str):                  # alte Aufrufe mit Farbe
+            kind = "err" if kind is not None and QColor(kind) == QColor(RED) else "neutral"
+        self.color = {"err": QColor("#ff5d6c"), "ok": QColor(OK_GREEN)}.get(kind)
         self.reposition()
         first = not self.isVisible() or self.pop < 0.5
         self.show()
@@ -855,9 +859,16 @@ class BellNotify(QWidget):
         p.scale(min(1.15, s), min(1.15, s))
         p.translate(-c)
         p.setOpacity(min(1.0, s))
-        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setPen(QPen(with_alpha(self.color, 150) if self.color is not None else T.glass_edge(1.0), 1))
         p.setBrush(T.card_fill(235))
         p.drawRoundedRect(r, H / 2, H / 2)
+        if self.color is not None:                     # zarter Farbschimmer: rot = Fehler, gruen = geklappt
+            g = QLinearGradient(r.topLeft(), r.topRight())
+            g.setColorAt(0, with_alpha(self.color, 50))
+            g.setColorAt(1, with_alpha(self.color, 0))
+            p.setPen(Qt.NoPen)
+            p.setBrush(g)
+            p.drawRoundedRect(r, H / 2, H / 2)
         # Glocke
         bc = QRectF(5, 5, H - 10, H - 10)
         col = self.color if self.color is not None else ink(235)
@@ -1935,13 +1946,20 @@ class IconDot(QWidget):
         self.dot = on
         self.update()
 
+    hovered_in = None
+
     def enterEvent(self, e):
         tween(self, "pop", 1.0, 140)
+        if self.hovered_in:
+            self.hovered_in()
 
     def leaveEvent(self, e):
         tween(self, "pop", 0.0, 140)
 
     def mousePressEvent(self, e):
+        if self.hovered_in:                     # Mond: nur aufklappen, kein eigener Klick
+            self.hovered_in()
+            return
         self.clicked.emit()
 
     def paintEvent(self, e):
@@ -2268,7 +2286,6 @@ class Window(QMainWindow):
             {"icon": "folder", "label": "Bibliothek", "fn": lambda: self.nav_clicked(2)},
             {"icon": "gear", "label": "Einstellungen", "fn": lambda: self.nav_clicked(3)},
             {"icon": "upload", "label": "Video öffnen", "fn": self._top_open, "sep": True},
-            {"icon": "moon", "label": "Hell / Dunkel", "fn": self._toggle_dark, "nolabel": True},
         ], self.bg)
         self.dock.on_geom = lambda big: self.place_dock(big)
         self.dock.hovered.connect(self._dock_hover)
@@ -2369,7 +2386,18 @@ class Window(QMainWindow):
             self.toast.show_text("FFmpeg nicht gefunden – Export nicht möglich", RED)
 
     def say(self, text, color=None):
-        self.toast.show_text(text, color)
+        """Meldung oben. Fehler (rot), Erfolg (gruen), sonst neutral."""
+        kind = "neutral"
+        if color is not None and QColor(color) == QColor(RED):
+            kind = "err"
+        elif color is not None and QColor(color) == QColor(OK_GREEN):
+            kind = "ok"
+        elif color is None and re.search(r"hinzugefügt|aktualisiert|gespeichert|Gespeichert|gelöscht|Angemeldet|"
+                                         r"gesendet|geändert|kopiert|Rückgängig gemacht|Wiederhergestellt|"
+                                         r"exportiert|erstellt|Umbenannt|gefunden", text) and \
+                not re.search(r"nicht|Keine|fehl|Fehler", text):
+            kind = "ok"
+        self.toast.show_text(text, kind)
 
     # ---- rahmenloses Fenster: Verschieben, Groesse aendern, Maximieren
     def place_dock(self, big=None):
@@ -2557,10 +2585,12 @@ class Window(QMainWindow):
         self.top_chip.clicked.connect(self.open_server_menu)
         lay.addWidget(self.top_chip)
         lay.addSpacing(4)
-        self.upd_dot = IconDot("refresh", "Nach Updates suchen")
-        self.upd_dot.clicked.connect(self._top_update)
+        self.upd_dot = IconDot("refresh", "Updates")          # (nur noch fuer den Update-Punkt im Dock)
+        self.upd_dot.hide()
+        self.mode_dot = IconDot("moon", "")
+        self.mode_dot.hovered_in = lambda: self._open_mode_pop()
         lay.addSpacing(6)
-        lay.addWidget(self.upd_dot)
+        lay.addWidget(self.mode_dot)
         self.btn_update = PopButton("Update installieren", "upload", "glass", 36)
         self.btn_update.clicked.connect(self.do_update)
         self.btn_update.hide()
@@ -2596,13 +2626,14 @@ class Window(QMainWindow):
         self.theme_pop.sync()
 
     def _dock_hover(self, i):
-        """Ueber Hell/Dunkel im Dock: kleines Fenster mit beiden Moeglichkeiten aufklappen."""
-        ti = len(self.dock.items) - 1
-        if i == ti:
-            xs, tw = self.dock._layout()
-            off = (self.dock.width() - tw) / 2
-            cx = self.dock.x() + off + xs[ti] + self.dock.w[ti] / 2
-            self.theme_pop.open_at(int(cx), self.dock.y() + Dock.PANEL + 20)
+        pass
+
+    def _open_mode_pop(self):
+        """Ueber dem Mond oben rechts: Hell / Dunkel zur Auswahl aufklappen (der Mond selbst ist kein Knopf)."""
+        m = self.mode_dot
+        p = m.mapTo(self.bg, m.rect().center())
+        cx = min(p.x(), self.bg.width() - self.theme_pop.width() // 2 - 12)
+        self.theme_pop.open_at(int(cx), m.mapTo(self.bg, m.rect().bottomLeft()).y() + 8)
 
     def _toggle_dark(self):
         self.apply_theme(dark=not self.st["dark"])
@@ -3385,7 +3416,7 @@ class Window(QMainWindow):
         self.theme_dots.picked.connect(lambda n: self.apply_theme(**PRESETS[n]))
         look.body.addWidget(self.theme_dots)
 
-        allg = BentoCard("pills", None, "Allgemein", "Vorschau, Export und Aufnahmen von OBS / NVIDIA.")
+        allg = BentoCard(None, None, "Allgemein", "Vorschau, Export und Aufnahmen von OBS / NVIDIA.")
         self.tg_loop = toggle_row(allg.body, "Clip wiederholen", "Spielt den Clip in Schleife.", self.st["loop"])
         self.tg_open = toggle_row(allg.body, "Ordner öffnen", "Nach dem Export im Explorer.", self.st["open"])
         self.tg_watch = toggle_row(allg.body, "Neue Aufnahmen melden", "Schaut im Aufnahme-Ordner nach neuen Videos.",
@@ -3539,8 +3570,8 @@ class Window(QMainWindow):
 
     def gate_theme(self, on):
         """Anmelde- und Update-Fenster immer im Standard-Grau zeigen; danach wieder das gewaehlte Thema."""
-        if on:
-            T.configure(False, DEFAULT["acc"], DEFAULT["acc2"], DEFAULT["bg"])
+        if on:                                           # Anmeldung / Pflicht-Update: immer dunkles Standard-Grau
+            T.configure(True, DEFAULT["acc"], DEFAULT["acc2"], DEFAULT["bg"])
         else:
             T.configure(*self.theme_colors())
         self._repaint_theme()
@@ -3652,7 +3683,7 @@ class Window(QMainWindow):
         err.setStyleSheet("color: #ff9aa8;")
         L.addWidget(err)
         L.addSpacing(6)
-        go = PopButton("Anmelden", "arrow", "blue", 50)
+        go = PopButton("Anmelden", "arrow", "white", 50)
         go.icon_right = True
         L.addWidget(go)
         L.addSpacing(10)
@@ -3673,7 +3704,7 @@ class Window(QMainWindow):
         orrow.addWidget(ln2, 1)
         L.addLayout(orrow)
         L.addSpacing(10)
-        alt = PopButton("Mit Einladungscode registrieren", "ticket", "white", 48)
+        alt = PopButton("Mit Einladungscode registrieren", "ticket", "glass", 48)
         L.addWidget(alt)
         L.addSpacing(12)
         bottom = QLabel()
@@ -3693,9 +3724,9 @@ class Window(QMainWindow):
             alt.icon_name = "back" if new else "ticket"
             forgot.setVisible(not new)
             bottom.setText(('<span style="color:rgba(255,255,255,190)">Schon ein Konto? </span>'
-                            '<b style="color:#5b8cff">Anmelden</b>') if new else
+                            '<b style="color:#ffffff">Anmelden</b>') if new else
                            ('<span style="color:rgba(255,255,255,190)">Noch kein Konto? </span>'
-                            '<b style="color:#5b8cff">Einladung einlösen</b>'))
+                            '<b style="color:#ffffff">Einladung einlösen</b>'))
             card.fit()
             self.overlay._center()
 
@@ -4810,7 +4841,7 @@ class Window(QMainWindow):
             extra += f" · {info['sekunden']:.0f} s"
         self.set_status(("Abgebrochen · " if cancelled else "Fertig · ") + f"{n} {word}{extra}", "ok" if n else "warn")
         self.say(f"{n} {word} gefunden" if n else "Keine Kills gefunden – Empfindlichkeit erhöhen?",
-                 T.acc if n else AMBER)
+                 OK_GREEN if n else None)
         if n:
             self.select(0)
 
