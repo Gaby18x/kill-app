@@ -561,6 +561,9 @@ class PopButton(QAbstractButton):
         self.kind = kind
         self.update()
 
+    def minimumSizeHint(self):                       # Text darf nie abgeschnitten werden
+        return self.sizeHint()
+
     def sizeHint(self):
         fm = QFontMetrics(self.font())
         w = fm.horizontalAdvance(self.text()) + 2 * 20 + 2 * self.M

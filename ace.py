@@ -2532,7 +2532,7 @@ class Window(QMainWindow):
                 self.go_page(1)
             self.unsaved.nudge()
             card = DialogCard("Ungespeicherte Änderungen", f"{n} {'Clip ist' if n == 1 else 'Clips sind'} noch nicht "
-                              "exportiert. Wenn du ACE jetzt schließt, gehen sie verloren.", 480)
+                              "exportiert. Wenn du ACE jetzt schließt, gehen sie verloren.", 560)
             no = PopButton("Abbrechen", None, "glass", 40)
             no.clicked.connect(self.overlay.dismiss)
             ex = PopButton("Exportieren", "upload", "glass", 40)
