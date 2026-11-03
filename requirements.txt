@@ -1,4 +1,5 @@
 PySide6-Essentials
+PySide6-Addons
 opencv-python-headless
 numpy
 imageio-ffmpeg

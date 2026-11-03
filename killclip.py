@@ -11,10 +11,15 @@ import uuid
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QColorDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+except Exception:          # Ton ist optional - ohne Multimedia laeuft die App trotzdem
+    QAudioOutput = QMediaPlayer = None
 
 import core
 from core import Player, check_update, download_file, export_clip, find_ffmpeg, resource, scan_video
@@ -1051,6 +1056,16 @@ class Window(QMainWindow):
         self.server = None
         self.path = None
         self.player = None
+        self.audio = self.aout = None
+        if QMediaPlayer is not None:
+            try:
+                self.audio = QMediaPlayer()
+                self.aout = QAudioOutput()
+                self.aout.setVolume(0.8)
+                self.audio.setAudioOutput(self.aout)
+            except Exception:
+                self.audio = None
+        self._shown_id = 0
         self.fps, self.duration, self.pos = 60.0, 0.0, 0.0
         self.has_video = False
         self.clips, self.sel = [], None
@@ -1146,6 +1161,8 @@ class Window(QMainWindow):
         self.cancel.set()
         if self.player:
             self.player.stop()
+        if self.audio:
+            self.audio.stop()
         super().closeEvent(e)
 
     def check_ffmpeg(self):
@@ -2166,6 +2183,10 @@ class Window(QMainWindow):
         if self.player:
             self.player.stop()
         self.player, self.path = pl, p
+        self._shown_id = 0
+        if self.audio:
+            self.audio.stop()
+            self.audio.setSource(QUrl.fromLocalFile(p))
         self.fps, self.duration = pl.fps, pl.duration
         self.has_video = True
         self.video.has_video = True
@@ -2202,14 +2223,23 @@ class Window(QMainWindow):
         fr = pl.take()
         if fr:
             self.draw_frame(*fr)
+        if self.playing and self._tick % 90 == 0:
+            self.audio_sync(self.pos)
         if pl.ended and self.playing:
             self.playing = False
+            if self.audio:
+                self.audio.pause()
             self.play_btn.icon_name = "play"
             self.play_btn.update()
 
     def draw_frame(self, kind, pos, rgb, fid=None):
-        if fid is not None and self.player is not None and fid < self.player.seek_id:
-            return                      # veraltetes Bild (vor dem letzten Sprung dekodiert) verwerfen
+        if fid is not None and self.player is not None:
+            if kind == "play":
+                if fid < self.player.seek_id:
+                    return              # veraltetes Abspiel-Bild (vor dem letzten Sprung) verwerfen
+            elif fid < self._shown_id:
+                return                  # Sprung-Bilder: ruhig anzeigen, solange sie nicht aelter als das letzte sind
+            self._shown_id = max(self._shown_id, fid)
         self.video.set_frame(rgb)
         if self._thumb_pending:
             self._thumb_pending = False
@@ -2225,6 +2255,7 @@ class Window(QMainWindow):
             if c and pos >= c.end:
                 if self.tg_loop.isChecked():
                     self.player.request_seek(c.start)
+                    self.audio_sync(c.start, True)
                 else:
                     self.toggle_play()
         self.video.time_text = fmt(self.pos)
@@ -2257,13 +2288,41 @@ class Window(QMainWindow):
         t = min(max(0.0, t), max(0.0, self.duration - 0.1))
         self.pos = t
         self.player.request_seek(t)
+        if self.playing:
+            self.audio_sync(t, True)
         self.timeline.update()
         self.seekbar.update()
+
+    def audio_sync(self, t, force=False):
+        a = self.audio
+        if not a:
+            return
+        try:
+            if force or abs(a.position() / 1000.0 - t) > 0.25:
+                a.setPosition(int(max(0.0, t) * 1000))
+        except Exception:
+            pass
+
+    def audio_state(self):
+        a = self.audio
+        if not a:
+            return
+        try:
+            if self.playing:
+                a.setPlaybackRate(self.speed)
+                a.setPosition(int(max(0.0, self.pos) * 1000))
+                a.play()
+            else:
+                a.pause()
+        except Exception:
+            pass
 
     def set_speed(self, v):
         self.speed = float(v.replace("×", ""))
         if self.player:
             self.player.set_play(self.playing, self.speed)
+        if self.audio:
+            self.audio.setPlaybackRate(self.speed)
 
     def toggle_play(self):
         if not self.player:
@@ -2276,6 +2335,7 @@ class Window(QMainWindow):
             if self.play_clip and self.pos >= self.play_clip.end - 0.05:
                 self.seek(self.play_clip.start)
         self.player.set_play(self.playing, self.speed)
+        self.audio_state()
 
     def clip_for_play(self):
         """Welcher Clip wird in Schleife abgespielt? Bevorzugt den ausgewaehlten (auch bei ueberlappenden Clips)."""
