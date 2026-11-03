@@ -60,7 +60,7 @@ class Theme:
         self.okc = QColor("#5fe3b5") if self.dark else QColor("#1f9d73")
         self.warn = QColor("#ffc15a") if self.dark else QColor("#c4801f")
         self.busy = QColor("#8fb0ff") if self.dark else QColor("#4a7be0")
-        self.dialog_fill = QColor(30, 27, 62, 248) if self.dark else QColor(255, 255, 255, 238)
+        self.dialog_fill = hsl(h, 0.32 * self.sk_acc, 0.14, 0.97) if self.dark else QColor(255, 255, 255, 238)
         self.scrim = QColor(0, 0, 0, 150) if self.dark else hsl(h, 0.35 * self.sk_acc, 0.28, 0.37)
         self._bg_cache = None
 
@@ -162,7 +162,7 @@ QSlider::sub-page:horizontal {{ background: {acc}; border-radius: 3px; }}
 QSlider::handle:horizontal {{ background: white; border: 2px solid {acc}; width: 14px; height: 14px; margin: -7px 0;
                               border-radius: 9px; }}
 QSlider::handle:horizontal:hover {{ width: 18px; height: 18px; margin: -9px 0; border-radius: 11px; }}
-QToolTip {{ background: {'#262244' if T.dark else 'white'}; color: {r['text']}; border: 1px solid {rgba(self.alpha_of(T.acc, 120))};
+QToolTip {{ background: {T.dialog_fill.name() if T.dark else 'white'}; color: {r['text']}; border: 1px solid {rgba(self.alpha_of(T.acc, 120))};
            padding: 4px 8px; }}
 """
 

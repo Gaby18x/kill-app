@@ -59,7 +59,9 @@ function page(code, valid, installer) {
   const body = valid
     ? `<p>Dein Zugang ist bereit.</p>
        <a class="b" href="${installer}">1. ACE herunterladen</a>
-       <p class="s">Installieren (Windows blendet evtl. eine Warnung ein: „Weitere Informationen“, dann „Trotzdem ausführen“).</p>
+       <p class="s">Windows oder dein Browser blockt die Datei vielleicht, weil sie neu und unsigniert ist. Das ist normal:<br>
+       • Browser: bei der Download-Meldung auf „…“ bzw. „Behalten“ klicken.<br>
+       • Windows-Fenster „Der Computer wurde geschützt“: auf „Weitere Informationen“ und dann „Trotzdem ausführen“ klicken.</p>
        <a class="b g" href="ace://invite/${code}">2. Zugang in der App aktivieren</a>
        <p class="s">Oder in der App den Einladungscode eingeben:</p><div class="c">${code}</div>`
     : `<p>Dieser Link ist ungültig oder wurde schon benutzt. Bitte frag nach einem neuen.</p>`;
@@ -118,7 +120,7 @@ export default {
         const name = b.username.toLowerCase();
         if (await env.KV.get("user:" + name)) return J({ error: "Diesen Benutzernamen gibt es schon." }, 409);
         await createUser(env, name, b.password, "user", inv.label);
-        await env.KV.put("inv:" + code, JSON.stringify({ ...inv, used: true, by: name }), { expirationTtl: 30 * DAY });
+        await env.KV.put("inv:" + code, JSON.stringify({ ...inv, used: true, by: name, usedAt: Date.now() }));
         return J({ token: await newSession(env, name), role: "user", name });
       }
 
@@ -163,6 +165,21 @@ export default {
         const code = rnd(5).toUpperCase();
         await env.KV.put("inv:" + code, JSON.stringify({ label: String(b.label || "").slice(0, 40), used: false, created: Date.now() }), { expirationTtl: 14 * DAY });
         return J({ code, link: url.origin + "/d/" + code });
+      }
+      if (m === "GET" && path === "/invites") {
+        const l = await env.KV.list({ prefix: "inv:" });
+        const out = [];
+        for (const k of l.keys) {
+          const i = await env.KV.get(k.name, "json");
+          if (i) out.push({ code: k.name.slice(4), label: i.label, used: !!i.used, by: i.by || "", created: i.created || 0 });
+        }
+        out.sort((a, b) => b.created - a.created);
+        return J({ invites: out });
+      }
+      if (m === "POST" && path === "/invites/delete") {
+        const b = await body(req);
+        await env.KV.delete("inv:" + String(b.code || "").replace(/[^A-Za-z0-9]/g, ""));
+        return J({ ok: true });
       }
       if (m === "GET" && path === "/users") {
         const l = await env.KV.list({ prefix: "user:" });

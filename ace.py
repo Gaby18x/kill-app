@@ -1209,6 +1209,8 @@ class Window(QMainWindow):
             pass
         if d.get("mode") in ("Verlustfrei", "Bildgenau") or d.get("mode") not in MODES:
             d["mode"] = "Genau"                 # alte Namen -> bildgenauer Modus (Schnitt stimmt auf das Bild)
+        if d.get("theme_ver", 0) < 2:           # neues Standard-Grau: einmalig auf das Standardthema zuruecksetzen
+            d.update(acc=DEFAULT["acc"], acc2=DEFAULT["acc2"], bg=DEFAULT["bg"], theme_ver=2)
         if not isinstance(d.get("servers"), list):
             d["servers"] = []
         if not isinstance(d.get("names"), dict):
@@ -2469,7 +2471,10 @@ class Window(QMainWindow):
         self.show_login()
 
     def build_account_panel(self):
-        self.acct_g, self.acct_lay = panel("Konto", alpha=150)
+        self.acct_g, lay = panel("Konto", alpha=150)
+        self.acct_lay = QVBoxLayout()
+        self.acct_lay.setSpacing(8)
+        lay.addLayout(self.acct_lay)
         self.refresh_account_panel()
         return self.acct_g
 
@@ -2500,12 +2505,10 @@ class Window(QMainWindow):
             inv = PopButton("Einladung für eine Person erstellen", "plus", "accent", 42)
             inv.clicked.connect(self.open_invite)
             lay.addWidget(inv)
-            ub = PopButton("Konten anzeigen", "refresh", "glass", 40)
-            ub.clicked.connect(self.load_users)
-            lay.addWidget(ub)
             self.users_box = QVBoxLayout()
             self.users_box.setSpacing(6)
             lay.addLayout(self.users_box)
+            self.load_users()
 
     def _clear_layout(self, l):
         while l.count():
@@ -2560,7 +2563,7 @@ class Window(QMainWindow):
         nm = QLineEdit()
         self.style_edit(nm)
         card.body.addWidget(nm)
-        cancel = PopButton("Schließen", None, "glass", 40)
+        cancel = PopButton("Abbrechen", None, "glass", 40)
         cancel.clicked.connect(self.overlay.dismiss)
         go = PopButton("Link erstellen", "check", "accent", 40)
         card.btns.addWidget(cancel)
@@ -2579,19 +2582,21 @@ class Window(QMainWindow):
             threading.Thread(target=work, daemon=True).start()
 
         def shown(r):
-            nm.setReadOnly(True)
+            QApplication.clipboard().setText(r["link"])
+            c2 = DialogCard("Einladung erstellt", "Der Link ist kopiert. Schick ihn weiter, er ist 14 Tage gültig und "
+                            "nur einmal benutzbar.", 520)
             link = QLineEdit(r["link"])
             self.style_edit(link)
             link.setReadOnly(True)
-            card.body.addWidget(label("Diesen Link schickst du weiter (14 Tage gültig, einmal benutzbar):", 10.5, True, MUT))
-            card.body.addWidget(link)
-            go.setText("Link kopieren")
-            go.setEnabled(True)
-            go.clicked.disconnect()
-            go.clicked.connect(lambda: (QApplication.clipboard().setText(r["link"]), self.say("Link kopiert")))
-            QApplication.clipboard().setText(r["link"])
-            card.fit()
-            self.overlay._center()
+            c2.body.addWidget(link)
+            cp = PopButton("Link kopieren", "check", "glass", 40)
+            cp.clicked.connect(lambda: (QApplication.clipboard().setText(r["link"]), self.say("Link kopiert")))
+            ok = PopButton("Fertig", None, "accent", 40)
+            ok.clicked.connect(self.overlay.dismiss)
+            c2.btns.addWidget(cp)
+            c2.btns.addWidget(ok)
+            self.overlay.present(c2)
+            self.load_users()
         go.clicked.connect(make)
         nm.returnPressed.connect(make)
         self.overlay.present(card)
@@ -2601,14 +2606,37 @@ class Window(QMainWindow):
 
         def work():
             try:
-                r = auth.call("GET", "/users", token=tok)
-                self.ui(self.show_users, r["users"])
+                u = auth.call("GET", "/users", token=tok)["users"]
+                i = auth.call("GET", "/invites", token=tok)["invites"]
+                self.ui(self.show_users, u, i)
             except auth.ApiError as e:
                 self.ui(self.say, str(e), RED)
         threading.Thread(target=work, daemon=True).start()
 
-    def show_users(self, users):
-        self._clear_layout(self.users_box)
+    def show_users(self, users, invites=()):
+        if not hasattr(self, "users_box") or self.users_box is None:
+            return
+        try:
+            self._clear_layout(self.users_box)
+        except RuntimeError:
+            return
+        if invites:
+            self.users_box.addWidget(label("Einladungen", 11, True))
+            for i in invites:
+                row = QHBoxLayout()
+                who = i["label"] or "ohne Namen"
+                state = f"angemeldet als {i['by']}" if i["used"] else "noch nicht angemeldet"
+                row.addWidget(label(f"{who}  ·  {state}", 10.5, color=("ok" if i["used"] else MUT)), 1)
+                if not i["used"]:
+                    link = f"{core.ACCOUNT_URL.rstrip('/')}/d/{i['code']}"
+                    b1 = PopButton("Link kopieren", None, "glass", 36)
+                    b1.clicked.connect(lambda _=False, l=link: (QApplication.clipboard().setText(l), self.say("Link kopiert")))
+                    row.addWidget(b1)
+                b2 = PopButton("", "close", "flat", 36, icon_only=True)
+                b2.clicked.connect(lambda _=False, c=i["code"]: self.user_action("/invites/delete", {"code": c}))
+                row.addWidget(b2)
+                self.users_box.addLayout(row)
+        self.users_box.addWidget(label("Konten", 11, True))
         for u in users:
             row = QHBoxLayout()
             txt = u["name"] + (f"  ·  {u['label']}" if u.get("label") else "") + ("  ·  gesperrt" if u["disabled"] else "")
