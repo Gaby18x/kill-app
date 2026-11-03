@@ -643,6 +643,127 @@ class ThemePopover(QWidget):
         p.drawRoundedRect(r, 16, 16)
 
 
+class ServerMenuRow(QWidget):
+    clicked = Signal()
+
+    def __init__(self, srv, active, parent=None):
+        super().__init__(parent)
+        self.s, self.active = srv, active
+        self.hov = 0.0
+        self.appear = 0.0
+        self.setFixedHeight(56)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def enterEvent(self, e):
+        tween(self, "hov", 1.0, 120)
+
+    def leaveEvent(self, e):
+        tween(self, "hov", 0.0, 160)
+
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        p.setOpacity(max(0.0, min(1.0, self.appear)))
+        p.translate(0, (1 - self.appear) * 6)
+        r = QRectF(self.rect()).adjusted(4, 2, -4, -2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, int(16 * self.hov)) if T.dark else QColor(0, 0, 0, int(10 * self.hov)))
+        p.drawRoundedRect(r, 12, 12)
+        paint_avatar(p, QRectF(r.left() + 10, r.center().y() - 16, 32, 32), self.s["name"], 16, 12, self.s["id"])
+        p.setPen(ink(240))
+        p.setFont(app_font(10, True))
+        p.drawText(QRectF(r.left() + 52, r.top() + 8, r.width() - 90, 20), Qt.AlignVCenter, self.s["name"])
+        p.setPen(ink(130))
+        p.setFont(app_font(8.5))
+        p.drawText(QRectF(r.left() + 52, r.top() + 27, r.width() - 90, 16), Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(KIND_TEXT.get(self.s["kind"], ""), Qt.ElideRight, int(r.width() - 92)))
+        if self.active:
+            paint_icon(p, "check", QRectF(r.right() - 30, r.center().y() - 9, 18, 18), T.okc, 2.0)
+
+
+class ServerMenu(QWidget):
+    """Klappt unter dem Server oben rechts auf: alle Server zum direkten Wechseln (mit weichem Einblenden)."""
+
+    def __init__(self, parent, on_pick, on_all):
+        super().__init__(parent)
+        self.on_pick, self.on_all = on_pick, on_all
+        self.k = 0.0
+        self.panel = QWidget(self)
+        self.panel.paintEvent = self._paint_panel
+        self.v = QVBoxLayout(self.panel)
+        self.v.setContentsMargins(8, 10, 8, 8)
+        self.v.setSpacing(0)
+        self.hide()
+
+    def mousePressEvent(self, e):            # Klick daneben schliesst
+        self.close_menu()
+
+    def _paint_panel(self, e):
+        p = QPainter(self.panel)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.panel.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(T.card_fill(240))
+        p.drawRoundedRect(r, 16, 16)
+
+    def open_menu(self, servers, active_id, anchor):
+        while self.v.count():
+            it = self.v.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        cap = label("Server wechseln", 8.5, True, MUT)
+        cap.setContentsMargins(12, 2, 0, 6)
+        self.v.addWidget(cap)
+        rows = []
+        for s in servers:
+            row = ServerMenuRow(s, s["id"] == active_id)
+            row.clicked.connect(lambda s=s: (self.close_menu(), self.on_pick(s)))
+            self.v.addWidget(row)
+            rows.append(row)
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {T.glass_edge(1.0).name()}; margin: 0 10px;")
+        self.v.addSpacing(6)
+        self.v.addWidget(line)
+        self.v.addSpacing(6)
+        allb = PopButton("Alle Server ansehen", "server", "glass", 36)
+        allb.clicked.connect(lambda: (self.close_menu(), self.on_all()))
+        self.v.addWidget(allb)
+        self.setGeometry(self.parent().rect())
+        w = 300
+        self.panel.setFixedWidth(w)
+        self.panel.adjustSize()
+        self.ax, self.ay = anchor.x() + anchor.width() - w, anchor.y() + anchor.height() + 6
+        self.panel.move(self.ax, self.ay)
+        self.show()
+        self.raise_()
+        self.k = 0.0
+        tween(self, "k", 1.0, 260)
+        for i, r in enumerate(rows):
+            QTimer.singleShot(30 + i * 40, lambda r=r: tween(r, "appear", 1.0, 220))
+
+    def __setattr__(self, n, v):
+        super().__setattr__(n, v)
+        if n == "k" and hasattr(self, "panel"):
+            self.panel.move(self.ax if hasattr(self, "ax") else 0, int(getattr(self, "ay", 0) - 8 * (1 - v)))
+            eff = self.panel.graphicsEffect()
+            if eff is None:
+                from PySide6.QtWidgets import QGraphicsOpacityEffect
+                eff = QGraphicsOpacityEffect(self.panel)
+                self.panel.setGraphicsEffect(eff)
+            eff.setOpacity(max(0.0, min(1.0, v)))
+            if v >= 0.999:
+                self.panel.setGraphicsEffect(None)
+
+    def close_menu(self):
+        tween(self, "k", 0.0, 140)
+        QTimer.singleShot(150, self.hide)
+
+
 class _NavProxy:
     """Damit der alte Code (self.nav[i].set_selected / set_nav_enabled) weiter funktioniert."""
 
@@ -741,7 +862,7 @@ class UnsavedBar(QWidget):
 def serif_font(size=15.0, weight=QFont.DemiBold):
     """Serifenschrift fuer die Bento-Titel (wie im Vorbild)."""
     f = QFont()
-    f.setFamilies(["Source Serif 4", "Georgia", "Times New Roman", "serif"])
+    f.setFamilies(["Montserrat", "Segoe UI", "Arial"])
     f.setPointSizeF(size)
     f.setWeight(weight)
     return f
@@ -853,7 +974,9 @@ class BentoCard(Glass):
             ic.setPixmap(icon_pixmap(icon, T.text, 16, 1.6))
             tr.addWidget(ic)
         t = QLabel(title)
-        t.setFont(serif_font(15.5))
+        t.setFont(serif_font(15.5 if visual else 19))
+        if not visual:
+            self.lay.addSpacing(6)
         tr.addWidget(t)
         tr.addStretch(1)
         self.head = tr
@@ -867,22 +990,80 @@ class BentoCard(Glass):
         self.lay.addLayout(self.body)
 
 
+class ThemePreview(QWidget):
+    """Kleine Vorschau der App im aktuellen Farbthema (aendert sich sofort mit)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(150)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        base = QColor(0, 0, 0) if T.dark else QColor(255, 255, 255)
+        g = QLinearGradient(r.topLeft(), r.bottomLeft())
+        g.setColorAt(0, base)
+        g.setColorAt(0.5, base)
+        g.setColorAt(1, T.glow())
+        path = QPainterPath()
+        path.addRoundedRect(r, 14, 14)
+        p.setClipPath(path)
+        p.fillRect(r, g)
+        p.setClipping(False)
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r, 14, 14)
+        W, H = r.width(), r.height()
+        # Dock oben
+        dk = QRectF(r.center().x() - 54, r.top() + 10, 108, 20)
+        p.setBrush(T.card_fill(200))
+        p.drawRoundedRect(dk, 8, 8)
+        p.setPen(Qt.NoPen)
+        for i in range(5):
+            p.setBrush(ink(60 if i else 200))
+            p.drawEllipse(QPointF(dk.left() + 14 + i * 20, dk.center().y()), 5, 5)
+        # Karten
+        cw = (W - 50) / 3
+        for i in range(3):
+            c = QRectF(r.left() + 14 + i * (cw + 11), r.top() + 42, cw, H - 56)
+            p.setPen(QPen(T.glass_edge(1.0), 1))
+            p.setBrush(T.glass_veil(0.8))
+            p.drawRoundedRect(c, 9, 9)
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink(70))
+            p.drawRoundedRect(QRectF(c.left() + 10, c.top() + 12, c.width() * 0.55, 6), 3, 3)
+            p.setBrush(ink(35))
+            p.drawRoundedRect(QRectF(c.left() + 10, c.top() + 24, c.width() * 0.75, 5), 2.5, 2.5)
+            if i == 1:
+                pf, _ = T.pill()
+                p.setBrush(pf)
+                p.drawRoundedRect(QRectF(c.left() + 10, c.bottom() - 26, c.width() - 20, 16), 6, 6)
+            if i == 2:
+                p.setBrush(T.pill()[0])
+                tg = QRectF(c.right() - 36, c.bottom() - 24, 26, 14)
+                p.drawRoundedRect(tg, 7, 7)
+                p.setBrush(QColor(255, 255, 255))
+                p.drawEllipse(QPointF(tg.right() - 7, tg.center().y()), 5, 5)
+
+
 class ThemeDots(QWidget):
-    """Farbthemen als runde Punkte (aktuelles Thema mit Ring)."""
+    """Farbthemen als runde Punkte mit Namen darunter (aktuelles Thema mit Ring)."""
     picked = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.names = list(PRESETS)
         self.hov = -1
-        self.setFixedHeight(56)
+        self.setFixedHeight(66)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
 
     def _r(self, i):
         n = len(self.names)
-        step = min(42.0, (self.width() - 8) / n)
-        return QRectF(4 + i * step + (step - 30) / 2, 4, 30, 30)
+        step = (self.width() - 8) / n
+        d = min(38.0, step - 10)
+        return QRectF(4 + i * step + (step - d) / 2, 6, d, d)
 
     def mouseMoveEvent(self, e):
         h = -1
@@ -911,7 +1092,8 @@ class ThemeDots(QWidget):
             pr = PRESETS[n]
             r = self._r(i)
             s = 1.08 if i == self.hov else 1.0
-            rr = QRectF(r.center().x() - 15 * s, r.center().y() - 15 * s, 30 * s, 30 * s)
+            d = r.width() * s
+            rr = QRectF(r.center().x() - d / 2, r.center().y() - d / 2, d, d)
             g = QLinearGradient(rr.topLeft(), rr.bottomRight())
             g.setColorAt(0, QColor(pr["acc2"]))
             g.setColorAt(1, QColor(pr["acc"]))
@@ -922,10 +1104,9 @@ class ThemeDots(QWidget):
                 p.setBrush(Qt.NoBrush)
                 p.setPen(QPen(ink(230), 2))
                 p.drawEllipse(rr.adjusted(-4, -4, 4, 4))
-        lab = self.names[self.hov] if self.hov >= 0 else (cur or "")
-        p.setPen(ink(150))
-        p.setFont(app_font(9))
-        p.drawText(QRectF(4, 40, self.width(), 16), Qt.AlignLeft | Qt.AlignVCenter, lab)
+            p.setPen(ink(235 if (n == cur or i == self.hov) else 140))
+            p.setFont(app_font(8.5, n == cur))
+            p.drawText(QRectF(r.center().x() - 34, r.bottom() + 6, 68, 16), Qt.AlignCenter, n)
 
 
 class LoginCard(QWidget):
@@ -1934,6 +2115,7 @@ class Window(QMainWindow):
         self.nav[1].set_nav_enabled(False)
         self.navbar = self.dock
         self.dock.select = lambda i, animate=True: self.nav[i].set_selected(True)
+        self.server_menu = ServerMenu(self.bg, self.switch_server, lambda: self.go_page(0))
         self.overlay = Overlay(self.bg)
         self.toast = Toast(self.bg)
         self.drop_hint = DropHint(self.bg)
@@ -2204,7 +2386,7 @@ class Window(QMainWindow):
         lay.addWidget(self.page_lbl)
         lay.addStretch(1)
         self.top_chip = ServerChip()
-        self.top_chip.clicked.connect(lambda: self.go_page(0))
+        self.top_chip.clicked.connect(self.open_server_menu)
         lay.addWidget(self.top_chip)
         lay.addSpacing(4)
         self.upd_dot = IconDot("refresh", "Nach Updates suchen")
@@ -2218,6 +2400,16 @@ class Window(QMainWindow):
         self.side_scroll = QScrollArea(sb)
         self.side_scroll.hide()
         return sb
+
+    def open_server_menu(self):
+        """Ohne gewaehlten Server: grosse Server-Seite. Sonst: Auswahl klappt direkt unter dem Server auf."""
+        if self.server is None or not hasattr(self, "server_menu"):
+            self.go_page(0)
+            return
+        a = self.top_chip
+        pos = a.mapTo(self.bg, a.rect().topLeft())
+        from PySide6.QtCore import QRect
+        self.server_menu.open_menu(self.all_servers(), self.server["id"], QRect(pos, a.size()))
 
     def _top_open(self):
         if self.server is None:
@@ -2375,6 +2567,16 @@ class Window(QMainWindow):
         self.srv_host = host
         self._sync_left_srv()
         self.render_side_servers()
+
+    def switch_server(self, s):
+        """Server wechseln, ohne die aktuelle Seite zu verlassen."""
+        if self.server and self.server["id"] == s["id"]:
+            return
+        stay = self.stack.cur if self.stack.cur in (1, 2, 3) else 1
+        self.enter_server(s)
+        if self.stack.cur != stay:
+            self.go_page(stay)
+        self.say(f"Server: {s['name']}")
 
     def enter_server(self, s):
         self.server = s
@@ -2989,12 +3191,17 @@ class Window(QMainWindow):
             return t
 
         # Darstellung (gross, links)
-        look = BentoCard("aa", None, "Darstellung", "Hell oder dunkel und die Farbe der ganzen App. "
+        look = BentoCard(None, "palette", "Darstellung", "Hell oder dunkel und die Farbe der ganzen App. "
                          "Server mit eigener Farbe nutzen ihre Farbe.")
-        self.seg_dark = Segmented(["Hell", "Dunkel"], height=34)
+        self.theme_preview = ThemePreview()
+        look.lay.insertWidget(0, self.theme_preview, 1)
+        look.body.addWidget(label("Modus", 9.5, True, MUT))
+        self.seg_dark = Segmented(["Hell", "Dunkel"], height=42)
         self.seg_dark.set_current("Dunkel" if self.st["dark"] else "Hell")
         self.seg_dark.changed.connect(lambda v: self.apply_theme(dark=(v == "Dunkel")))
         look.body.addWidget(self.seg_dark)
+        look.body.addSpacing(4)
+        look.body.addWidget(label("Farbe", 9.5, True, MUT))
         self.theme_dots = ThemeDots()
         self.theme_dots.picked.connect(lambda n: self.apply_theme(**PRESETS[n]))
         look.body.addWidget(self.theme_dots)
@@ -3015,7 +3222,7 @@ class Window(QMainWindow):
 
         exp = BentoCard("folders", "folder", "Export", "Wohin die fertigen Clips gespeichert werden.")
         exp.body.addWidget(self.make_dir_row())
-        keys = BentoCard("keys", None, "Tastenkürzel", "Schneller schneiden mit der Tastatur.")
+        keys = BentoCard(None, None, "Tastenkürzel", "Schneller schneiden mit der Tastatur.")
         kg = QGridLayout()
         kg.setHorizontalSpacing(14)
         kg.setVerticalSpacing(4)
@@ -3064,6 +3271,7 @@ class Window(QMainWindow):
         self.st.update(kw)
         if hasattr(self, "theme_dots"):
             self.theme_dots.update()
+            self.theme_preview.update()
         T.configure(*self.theme_colors())
         self._repaint_theme()
         self.save_settings()
@@ -3083,10 +3291,11 @@ class Window(QMainWindow):
             return self.st["dark"], p["acc"], p["acc2"], p["bg"]
         return self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"]
 
-    def _repaint_theme(self, qss=True):
+    def _repaint_theme(self, qss=True, bg=True):
         if qss:
             QApplication.instance().setStyleSheet(T.qss())
-        self.bg.refresh()
+        if bg:
+            self.bg.refresh()
         self.pill_icon.setPixmap(icon_pixmap("film", T.icon, 20))
         for w in self.findChildren(QWidget):
             w.update()
@@ -3116,7 +3325,7 @@ class Window(QMainWindow):
         def step(v):
             t = float(v)
             T.configure(dark, *(mix(x, y, t).name() for x, y in zip(a0, a1)))
-            self._repaint_theme(qss=False)
+            self._repaint_theme(qss=False, bg=False)      # Hintergrund erst am Ende neu berechnen (spart Rechenzeit)
 
         def done():
             T.configure(dark, acc, acc2, bg)

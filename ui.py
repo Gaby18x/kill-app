@@ -8,8 +8,8 @@ from theme import AMBER, RED, T, ink, white, with_alpha
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
                                QSizePolicy, QSlider, QWidget)
 
-FONT_FAMILIES = ["Manrope", "Segoe UI Variable Display", "Segoe UI", "Inter", "Arial", "DejaVu Sans"]
-DISPLAY_FAMILIES = ["Sora", "Manrope", "Segoe UI Variable Display", "Segoe UI", "Arial"]
+FONT_FAMILIES = ["Montserrat", "Segoe UI", "Arial", "DejaVu Sans"]
+DISPLAY_FAMILIES = ["Montserrat", "Segoe UI", "Arial"]
 
 
 def load_fonts(folder):
@@ -286,34 +286,67 @@ class Background(QWidget):
 
     @staticmethod
     def render(w, h):
-        """Schwarz oben, von unten steigt ein violettes Licht auf (wie das Hintergrundbild)."""
-        from PySide6.QtGui import QTransform
-        pm = QPixmap(max(1, w), max(1, h))
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
+        """Schwarz oben, von unten steigt weiches Licht in der Themenfarbe auf.
+        Wird pixelgenau mit Kommazahlen berechnet und fein gestreut - so entstehen keine sichtbaren Ringe."""
+        import numpy as np
+        from PySide6.QtGui import QImage
+        W, H = max(1, w), max(1, h)
+        f = 3 if W * H > 1_500_000 else 2                # erst kleiner rechnen (weicher Verlauf, viel schneller)
+        w, h = (W + f - 1) // f, (H + f - 1) // f
         gc = T.glow()
-        base = QColor(0, 0, 0) if T.dark else QColor(255, 255, 255)
-        lg = QLinearGradient(0, 0, 0, h)
-        lg.setColorAt(0.0, base)
-        lg.setColorAt(0.45, base)
-        lg.setColorAt(1.0, gc)
-        p.fillRect(0, 0, w, h, lg)
-        # grosse dunkle Ellipse oben in der Mitte: das Licht kommt nur von den Raendern und von unten
-        p.save()
-        p.setTransform(QTransform().translate(w * 0.5, h * 0.18).scale(w * 0.78, h * 0.80))
-        rg = QRadialGradient(0, 0, 1.0)
-        rg.setColorAt(0.0, with_alpha(base, 255))
-        rg.setColorAt(0.62, with_alpha(base, 245))
-        rg.setColorAt(1.0, with_alpha(base, 0))
-        p.fillRect(QRectF(-1.5, -1.5, 3, 3), rg)
-        p.restore()
-        for cx in (0.0, 1.0):                       # hellere Ecken unten
-            cg = QRadialGradient(cx * w, h * 1.02, max(w, h) * 0.42)
-            cg.setColorAt(0, with_alpha(gc.lighter(112), 90))
-            cg.setColorAt(1, with_alpha(gc, 0))
-            p.fillRect(0, 0, w, h, cg)
-        p.end()
-        return pm
+        g = np.array([gc.redF(), gc.greenF(), gc.blueF()], dtype=np.float32)
+        gl = np.array([QColor(gc).lighter(112).redF(), QColor(gc).lighter(112).greenF(), QColor(gc).lighter(112).blueF()],
+                      dtype=np.float32)
+        base = np.zeros(3, np.float32) if T.dark else np.ones(3, np.float32)
+        ys = (np.arange(h, dtype=np.float32) + 0.5) / h
+        xs = (np.arange(w, dtype=np.float32) + 0.5) / w
+
+        def smooth(e0, e1, x):
+            t = np.clip((x - e0) / (e1 - e0), 0, 1)
+            return t * t * (3 - 2 * t)
+        v = smooth(0.40, 1.0, ys)[:, None]                                     # Licht von unten
+        dx = (xs[None, :] - 0.5) * w / (0.78 * w)
+        dy = (ys[:, None] - 0.18) * h / (0.80 * h)
+        s = smooth(0.42, 1.05, np.sqrt(dx * dx + dy * dy))                     # dunkle Ellipse oben in der Mitte
+        a = v * s
+        m = float(max(w, h))
+        corner = np.zeros((h, w), np.float32)
+        for cx in (0.0, 1.0):                                                  # weiche hellere Ecken unten
+            d = np.sqrt(((xs[None, :] - cx) * w) ** 2 + ((ys[:, None] - 1.02) * h) ** 2) / (0.45 * m)
+            c = np.clip(1 - d, 0, 1)
+            corner += c * c * 0.32
+        col = base[None, None, :] + (g - base)[None, None, :] * a[:, :, None]
+        col += (gl - col) * np.clip(corner, 0, 1)[:, :, None] * (1.0 if T.dark else 0.6)
+        col = np.repeat(np.repeat(col * 255.0, f, axis=0), f, axis=1)[:H, :W]
+        tile = np.random.default_rng(5).uniform(-0.75, 0.75, size=(128, 128, 1)).astype(np.float32)
+        col += np.tile(tile, ((H + 127) // 128, (W + 127) // 128, 1))[:H, :W]
+        rgb = np.clip(np.rint(col), 0, 255).astype(np.uint8)
+        h, w = H, W
+        buf = np.empty((h, w, 4), np.uint8)
+        buf[:, :, 0] = rgb[:, :, 2]
+        buf[:, :, 1] = rgb[:, :, 1]
+        buf[:, :, 2] = rgb[:, :, 0]
+        buf[:, :, 3] = 255
+        img = QImage(buf.tobytes(), w, h, w * 4, QImage.Format_RGB32).copy()
+        return QPixmap.fromImage(img)
+
+    @staticmethod
+    def _dither(pm):
+        """Feines Rauschen (+-1,5 Helligkeitsstufen): Farbverlaeufe zeigen dann keine Ringe/Stufen mehr."""
+        try:
+            import numpy as np
+            from PySide6.QtGui import QImage
+            img = pm.toImage().convertToFormat(QImage.Format_RGB32)
+            w, h = img.width(), img.height()
+            ptr = img.bits()
+            arr = np.frombuffer(ptr, dtype=np.uint8, count=img.sizeInBytes()).reshape(h, img.bytesPerLine())[:, :w * 4]
+            arr = arr.reshape(h, w, 4).astype(np.int16)
+            noise = np.random.default_rng(3).integers(-2, 3, size=(h, w, 1), dtype=np.int16)
+            arr[:, :, :3] = np.clip(arr[:, :, :3] + noise, 0, 255)
+            out = QImage(arr.astype(np.uint8).tobytes(), w, h, w * 4, QImage.Format_RGB32).copy()
+            return QPixmap.fromImage(out)
+        except Exception:
+            return pm
 
     @staticmethod
     def login_backdrop(w, h):
@@ -1115,7 +1148,7 @@ class Toast(Glass):
 
     def reposition(self):
         pw, ph = self.parent().width(), self.parent().height()
-        self.move((pw - self.width()) // 2, int(26 - (1 - self.k) * 16))
+        self.move((pw - self.width()) // 2, int(ph - self.height() - 28 + (1 - self.k) * 16))
 
     def paintEvent(self, e):
         super().paintEvent(e)
