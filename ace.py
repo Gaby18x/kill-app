@@ -435,6 +435,7 @@ class Dock(QWidget):
         self.disabled = set()
         self.dots = set()
         self.w = [self.BASE] * len(items)
+        self._exp = False
         self.lab = [0.0] * len(items)
         self.hk = 0.0
         self.hover_i = -1
@@ -493,20 +494,44 @@ class Dock(QWidget):
     def _hit(self, x, y):
         xs, tw = self._layout()
         off = (self.width() - tw) / 2
-        by = self.height() - 10
         for i in range(len(self.items)):
-            r = QRectF(off + xs[i], by - self.w[i], self.w[i], self.w[i])
+            r = QRectF(off + xs[i], 10, self.w[i], self.w[i])
             if r.adjusted(-6, -6, 6, 6).contains(QPointF(x, y)):
                 return i
         return -1
 
+    hovered = Signal(int)
+
+    def enterEvent(self, e):
+        self.expand(True)
+
     def mouseMoveEvent(self, e):
-        self.mx = e.position().x()
-        self.hover_i = self._hit(e.position().x(), e.position().y())
+        x, y = e.position().x(), e.position().y()
+        i = self._hit(x, y)
+        if y > self.PANEL + 6 and i < 0:          # unter dem Dock: wie Verlassen (Inhalt darunter bleibt klickbar)
+            self.leaveEvent(None)
+            return
+        self.mx = x
+        if i != self.hover_i:
+            self.hover_i = i
+            self.hovered.emit(i)
 
     def leaveEvent(self, e):
         self.mx = None
-        self.hover_i = -1
+        if self.hover_i != -1:
+            self.hover_i = -1
+            self.hovered.emit(-1)
+        self.expand(False)
+
+    def expand(self, on):
+        self._exp = on
+        if on:
+            self.on_geom(True)
+        else:
+            QTimer.singleShot(260, lambda: (not self._exp) and self.on_geom(False))
+
+    def on_geom(self, big):
+        pass
 
     def mousePressEvent(self, e):
         i = self._hit(e.position().x(), e.position().y())
@@ -519,19 +544,17 @@ class Dock(QWidget):
         p.setRenderHint(QPainter.TextAntialiasing)
         xs, tw = self._layout()
         off = (self.width() - tw) / 2
-        H = self.height()
-        panel = QRectF(off, H - self.PANEL, tw, self.PANEL)
+        panel = QRectF(off, 0.5, tw, self.PANEL)
         p.setPen(QPen(T.glass_edge(1.0), 1))
         p.setBrush(T.card_fill(200))
         p.drawRoundedRect(panel, 18, 18)
-        by = H - 10
         for i, it in enumerate(self.items):
             if it.get("sep"):
                 p.setPen(QPen(T.glass_edge(1.0), 1))
                 sx = off + xs[i] - 12
-                p.drawLine(QPointF(sx, H - self.PANEL + 14), QPointF(sx, H - 14))
+                p.drawLine(QPointF(sx, 14), QPointF(sx, self.PANEL - 14))
             w = self.w[i]
-            r = QRectF(off + xs[i], by - w, w, w)
+            r = QRectF(off + xs[i], 10, w, w)
             p.setOpacity(0.35 if i in self.disabled else 1.0)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(38, 38, 38) if T.dark else QColor(229, 231, 235))
@@ -548,13 +571,13 @@ class Dock(QWidget):
             p.setOpacity(1.0)
             if i == self.active:
                 p.setBrush(ink(220))
-                p.drawEllipse(QPointF(r.center().x(), by + 5), 2, 2)
+                p.drawEllipse(QPointF(r.center().x(), r.bottom() + 5), 2, 2)
             a = self.lab[i]
-            if a > 0.02:
+            if a > 0.02 and not it.get("nolabel"):
                 p.setFont(app_font(8.5))
                 fm = QFontMetrics(p.font())
                 lw = fm.horizontalAdvance(it["label"]) + 16
-                lr = QRectF(r.center().x() - lw / 2, r.top() - 30 - 8 * a, lw, 22)
+                lr = QRectF(r.center().x() - lw / 2, r.bottom() + 6 + 8 * a, lw, 22)
                 p.setOpacity(a)
                 p.setPen(QPen(QColor(23, 23, 23) if T.dark else QColor(229, 231, 235), 1))
                 p.setBrush(QColor(38, 38, 38) if T.dark else QColor(243, 244, 246))
@@ -562,6 +585,62 @@ class Dock(QWidget):
                 p.setPen(QColor(255, 255, 255) if T.dark else QColor(64, 64, 64))
                 p.drawText(lr, Qt.AlignCenter, it["label"])
                 p.setOpacity(1.0)
+
+
+class ThemePopover(QWidget):
+    """Kleines Fenster unter dem Dock-Symbol: Hell oder Dunkel waehlen (mit dem Origin-Effekt der Knoepfe)."""
+
+    def __init__(self, parent, on_pick):
+        super().__init__(parent)
+        self.on_pick = on_pick
+        self.k = 0.0
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        self.b_light = PopButton("Hell", "sun", "glass", 36)
+        self.b_dark = PopButton("Dunkel", "moon", "glass", 36)
+        self.b_light.clicked.connect(lambda: self.on_pick(False))
+        self.b_dark.clicked.connect(lambda: self.on_pick(True))
+        lay.addWidget(self.b_light)
+        lay.addWidget(self.b_dark)
+        self.setFixedSize(236, 64)
+        self.watch = QTimer(self)
+        self.watch.setInterval(120)
+        self.watch.timeout.connect(self._check)
+
+    def sync(self):
+        self.b_dark.set_kind("accent" if T.dark else "glass")
+        self.b_light.set_kind("glass" if T.dark else "accent")
+
+    def open_at(self, cx, y):
+        self.sync()
+        self.move(cx - self.width() // 2, y)
+        if not self.isVisible():
+            self.k = 0.0
+            self.show()
+            tween(self, "k", 1.0, 220)
+        self.raise_()
+        self.watch.start()
+
+    def _check(self):
+        from PySide6.QtGui import QCursor
+        gp = QCursor.pos()
+        par = self.parent()
+        dock = getattr(par.window(), "dock", None)
+        inside = self.rect().adjusted(-10, -24, 10, 10).contains(self.mapFromGlobal(gp))
+        on_item = dock is not None and dock.hover_i == len(dock.items) - 1
+        if not inside and not on_item:
+            self.watch.stop()
+            self.hide()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setOpacity(max(0.0, min(1.0, self.k)))
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(T.card_fill(230))
+        p.drawRoundedRect(r, 16, 16)
 
 
 class _NavProxy:
@@ -657,6 +736,196 @@ class UnsavedBar(QWidget):
         p.setPen(QPen(T.glass_edge(1.0), 1))
         p.setBrush(T.card_fill(220))
         p.drawRoundedRect(r, 16, 16)
+
+
+def serif_font(size=15.0, weight=QFont.DemiBold):
+    """Serifenschrift fuer die Bento-Titel (wie im Vorbild)."""
+    f = QFont()
+    f.setFamilies(["Source Serif 4", "Georgia", "Times New Roman", "serif"])
+    f.setPointSizeF(size)
+    f.setWeight(weight)
+    return f
+
+
+class BentoVisual(QWidget):
+    """Bild-Motiv oben in einer Bento-Karte (gezeichnet, teils leicht animiert)."""
+
+    def __init__(self, kind, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.ph = 0.0
+        self.setMinimumHeight(64 if kind in ("pills", "load", "folders", "keys", "users") else 96)
+        if kind in ("rings", "load"):
+            self.t = QTimer(self)
+            self.t.setInterval(33)
+            self.t.timeout.connect(self._tick)
+            self.t.start()
+
+    def _tick(self):
+        if not self.isVisible():
+            return
+        self.ph = (self.ph + 0.012) % 1.0
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        W, H = self.width(), self.height()
+        c = QPointF(W / 2, H / 2)
+        soft = ink(70)
+        mid = ink(120)
+        strong = ink(235)
+        k = self.kind
+        if k == "aa":
+            p.setPen(strong)
+            p.setFont(serif_font(min(64, H * 0.55), QFont.DemiBold))
+            p.drawText(QRectF(0, 0, W, H), Qt.AlignCenter, "Aa")
+        elif k == "pills":
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink(55))
+            y = c.y() - 18
+            p.drawRoundedRect(QRectF(c.x() - 52, y, 50, 14), 7, 7)
+            p.drawRoundedRect(QRectF(c.x() + 4, y, 50, 14), 7, 7)
+            p.drawRoundedRect(QRectF(c.x() - 52, y + 22, 50, 14), 7, 7)
+        elif k == "load":
+            p.setPen(mid)
+            p.setFont(app_font(9))
+            p.drawText(QRectF(0, c.y() - 26, W, 18), Qt.AlignCenter, "Suchzeit")
+            bw = min(160, W * 0.5)
+            t = 0.5 - 0.5 * math.cos(self.ph * 2 * math.pi)
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink(40))
+            p.drawRoundedRect(QRectF(c.x() - bw / 2, c.y(), bw, 4), 2, 2)
+            p.setBrush(strong)
+            p.drawRoundedRect(QRectF(c.x() - bw / 2, c.y(), bw * (0.25 + 0.75 * t), 4), 2, 2)
+        elif k == "rings":
+            for i in range(3):
+                ph = (self.ph + i / 3) % 1.0
+                rr = 34 + ph * 52
+                p.setPen(QPen(ink(int(110 * (1 - ph))), 1.4))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(c, rr, rr)
+            p.setPen(QPen(ink(60), 1))
+            p.setBrush(ink(22))
+            p.drawEllipse(c, 30, 30)
+            paint_icon(p, "refresh", QRectF(c.x() - 15, c.y() - 15, 30, 30), strong, 2.0)
+        elif k == "folders":
+            for i, a in enumerate((255, 255, 90)):
+                r = QRectF(c.x() - 66 + i * 46, c.y() - 20, 40, 40)
+                p.setPen(Qt.NoPen)
+                p.setBrush(ink(int(70 * a / 255)))
+                p.drawRoundedRect(r, 9, 9)
+                paint_icon(p, "folder", r.adjusted(11, 11, -11, -11), ink(int(230 * a / 255)), 1.6)
+        elif k == "keys":
+            p.setFont(app_font(10, True))
+            for i, t in enumerate(("I", "O", "F")):
+                r = QRectF(c.x() - 68 + i * 46, c.y() - 20, 40, 40)
+                p.setPen(QPen(ink(120 if i < 2 else 60), 1.4))
+                p.setBrush(ink(20))
+                p.drawRoundedRect(r, 9, 9)
+                p.setPen(strong if i < 2 else mid)
+                p.drawText(r, Qt.AlignCenter, t)
+        elif k == "users":
+            for i in range(3):
+                r = QRectF(c.x() - 50 + i * 30, c.y() - 20, 40, 40)
+                p.setPen(QPen(T.card_fill(255), 2))
+                p.setBrush(ink(60 + 40 * i))
+                p.drawEllipse(r)
+                paint_icon(p, "user", r.adjusted(10, 10, -10, -10), QColor(17, 17, 17) if T.dark else QColor(255, 255, 255), 1.6)
+
+
+class BentoCard(Glass):
+    """Karte im Bento-Raster: Motiv oben, darunter Symbol + Serifen-Titel, graue Beschreibung, Bedienelemente."""
+
+    def __init__(self, visual, icon, title, desc, parent=None):
+        super().__init__(parent, radius=22, alpha=150)
+        self.lay = QVBoxLayout(self)
+        self.lay.setContentsMargins(22, 14, 22, 18)
+        self.lay.setSpacing(6)
+        if visual:
+            self.vis = BentoVisual(visual)
+            self.lay.addWidget(self.vis, 1)
+        tr = QHBoxLayout()
+        tr.setSpacing(8)
+        if icon:
+            ic = QLabel()
+            ic.setPixmap(icon_pixmap(icon, T.text, 16, 1.6))
+            tr.addWidget(ic)
+        t = QLabel(title)
+        t.setFont(serif_font(15.5))
+        tr.addWidget(t)
+        tr.addStretch(1)
+        self.head = tr
+        self.lay.addLayout(tr)
+        if desc:
+            d = label(desc, 9, color=MUT, wrap=True)
+            self.lay.addWidget(d)
+        self.body = QVBoxLayout()
+        self.body.setSpacing(8)
+        self.lay.addSpacing(4)
+        self.lay.addLayout(self.body)
+
+
+class ThemeDots(QWidget):
+    """Farbthemen als runde Punkte (aktuelles Thema mit Ring)."""
+    picked = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.names = list(PRESETS)
+        self.hov = -1
+        self.setFixedHeight(56)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def _r(self, i):
+        n = len(self.names)
+        step = min(42.0, (self.width() - 8) / n)
+        return QRectF(4 + i * step + (step - 30) / 2, 4, 30, 30)
+
+    def mouseMoveEvent(self, e):
+        h = -1
+        for i in range(len(self.names)):
+            if self._r(i).adjusted(-4, -4, 4, 4).contains(e.position()):
+                h = i
+        if h != self.hov:
+            self.hov = h
+            self.update()
+
+    def leaveEvent(self, e):
+        self.hov = -1
+        self.update()
+
+    def mousePressEvent(self, e):
+        for i, n in enumerate(self.names):
+            if self._r(i).adjusted(-4, -4, 4, 4).contains(e.position()):
+                self.picked.emit(n)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        st = getattr(self.window(), "st", {})
+        cur = next((n for n, pr in PRESETS.items() if pr["acc"].lower() == str(st.get("acc", "")).lower()), None)
+        for i, n in enumerate(self.names):
+            pr = PRESETS[n]
+            r = self._r(i)
+            s = 1.08 if i == self.hov else 1.0
+            rr = QRectF(r.center().x() - 15 * s, r.center().y() - 15 * s, 30 * s, 30 * s)
+            g = QLinearGradient(rr.topLeft(), rr.bottomRight())
+            g.setColorAt(0, QColor(pr["acc2"]))
+            g.setColorAt(1, QColor(pr["acc"]))
+            p.setPen(Qt.NoPen)
+            p.setBrush(g)
+            p.drawEllipse(rr)
+            if n == cur:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(ink(230), 2))
+                p.drawEllipse(rr.adjusted(-4, -4, 4, 4))
+        lab = self.names[self.hov] if self.hov >= 0 else (cur or "")
+        p.setPen(ink(150))
+        p.setFont(app_font(9))
+        p.drawText(QRectF(4, 40, self.width(), 16), Qt.AlignLeft | Qt.AlignVCenter, lab)
 
 
 class LoginCard(QWidget):
@@ -1636,7 +1905,7 @@ class Window(QMainWindow):
         self.bg = Background()
         self.setCentralWidget(self.bg)
         root = QVBoxLayout(self.bg)
-        root.setContentsMargins(20, 12, 20, 84)
+        root.setContentsMargins(20, 12, 20, 20)
         root.setSpacing(10)
         fl = root
         self.sidebar = self.build_sidebar()
@@ -1655,9 +1924,12 @@ class Window(QMainWindow):
             {"icon": "folder", "label": "Bibliothek", "fn": lambda: self.nav_clicked(2)},
             {"icon": "gear", "label": "Einstellungen", "fn": lambda: self.nav_clicked(3)},
             {"icon": "upload", "label": "Video öffnen", "fn": self._top_open, "sep": True},
-            {"icon": "refresh", "label": "Updates", "fn": self._top_update},
-            {"icon": "moon", "label": "Hell / Dunkel", "fn": self._toggle_dark},
+            {"icon": "moon", "label": "Hell / Dunkel", "fn": self._toggle_dark, "nolabel": True},
         ], self.bg)
+        self.dock.on_geom = lambda big: self.place_dock(big)
+        self.dock.hovered.connect(self._dock_hover)
+        self.theme_pop = ThemePopover(self.bg, self.set_mode)
+        self.theme_pop.hide()
         self.nav = [_NavProxy(self.dock, i) for i in range(4)]
         self.nav[1].set_nav_enabled(False)
         self.navbar = self.dock
@@ -1753,12 +2025,17 @@ class Window(QMainWindow):
         self.toast.show_text(text, color)
 
     # ---- rahmenloses Fenster: Verschieben, Groesse aendern, Maximieren
-    def place_dock(self):
+    def place_dock(self, big=None):
+        """Dock oben in der Mitte; nur waehrend die Maus darauf ist, reicht es nach unten (fuer Groesse und Namen)."""
         d = self.dock
+        if big is None:
+            big = d._exp
         w = d.total_width() + 160
-        h = Dock.PANEL + Dock.HEAD + 14
-        d.setGeometry(int((self.bg.width() - w) / 2), self.bg.height() - h - 12, w, h)
+        h = Dock.PANEL + (Dock.HEAD + 14 if big else 2)
+        d.setGeometry(int((self.bg.width() - w) / 2), 12, w, h)
         d.raise_()
+        if hasattr(self, "theme_pop") and self.theme_pop.isVisible():
+            self.theme_pop.raise_()
         if hasattr(self, "overlay") and self.overlay.isVisible():
             self.overlay.raise_()
 
@@ -1775,7 +2052,7 @@ class Window(QMainWindow):
             self.showMaximized() if self._was_max else self.showNormal()
         for w in (self.sidebar, self.right_col, self.pill, self.left_panel):
             w.setVisible(not on)
-        self.bg.layout().setContentsMargins(*((12, 12, 12, 12) if on else (20, 12, 20, 84)))
+        self.bg.layout().setContentsMargins(*((12, 12, 12, 12) if on else (20, 12, 20, 20)))
         self.dock.setVisible(not on)
         self.place_dock()
         self.page_editor.place()
@@ -1905,7 +2182,7 @@ class Window(QMainWindow):
     def build_sidebar(self):
         """Obere Leiste wie im Vorbild: Logo, Text-Reiter, rechts Server-Auswahl und runde Icon-Knoepfe."""
         sb = QWidget()
-        sb.setFixedHeight(52)
+        sb.setFixedHeight(64)
         lay = QHBoxLayout(sb)
         lay.setContentsMargins(4, 0, 150, 0)
         lay.setSpacing(6)
@@ -1949,6 +2226,21 @@ class Window(QMainWindow):
             return
         self.go_page(1)
         self.open_video()
+
+    def set_mode(self, dark):
+        self.apply_theme(dark=dark)
+        if hasattr(self, "seg_dark"):
+            self.seg_dark.set_current("Dunkel" if dark else "Hell")
+        self.theme_pop.sync()
+
+    def _dock_hover(self, i):
+        """Ueber Hell/Dunkel im Dock: kleines Fenster mit beiden Moeglichkeiten aufklappen."""
+        ti = len(self.dock.items) - 1
+        if i == ti:
+            xs, tw = self.dock._layout()
+            off = (self.dock.width() - tw) / 2
+            cx = self.dock.x() + off + xs[ti] + self.dock.w[ti] / 2
+            self.theme_pop.open_at(int(cx), self.dock.y() + Dock.PANEL + 20)
 
     def _toggle_dark(self):
         self.apply_theme(dark=not self.st["dark"])
@@ -2665,104 +2957,96 @@ class Window(QMainWindow):
 
     # ------------------------------------------------------------ Seite: Einstellungen
     def build_settings_page(self):
+        """Einstellungen als Bento-Raster (Karten mit Motiv, Serifen-Titel und Bedienung)."""
         main = Glass(radius=32, alpha=0)
         main.ghost = True
         lay = QVBoxLayout(main)
-        lay.setContentsMargins(30, 26, 22, 22)
-        lay.addWidget(self.page_header("Einstellungen", "Verhalten der App und Updates."))
-        lay.addSpacing(10)
+        lay.setContentsMargins(30, 18, 22, 22)
+        cap = label("EINSTELLUNGEN", 8.5, True, MUT)
+        lay.addWidget(cap)
+        lay.addSpacing(8)
         sc = QScrollArea()
         sc.setWidgetResizable(True)
         sc.setFrameShape(QScrollArea.NoFrame)
         sc.viewport().setAutoFillBackground(False)
         host = QWidget()
         host.setAttribute(Qt.WA_TranslucentBackground)
-        cards = {}
-
-        class _Collect:                      # sammelt die Karten, danach werden sie als Bento-Raster angeordnet
-            order = []
-
-            def addWidget(self, w):
-                self.order.append(w)
-
-            def addStretch(self, *a):
-                pass
-        v = _Collect()
-        cards["look"] = self.build_appearance_panel()
-        if core.ACCOUNT_URL:
-            cards["acct"] = self.build_account_panel()
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 0, 10, 0)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
 
         def toggle_row(parent_lay, title, sub, checked):
             r = QHBoxLayout()
             col = QVBoxLayout()
-            col.setSpacing(1)
-            col.addWidget(label(title, 10.5, True))
-            col.addWidget(label(sub, 9, color=MUT))
+            col.setSpacing(0)
+            col.addWidget(label(title, 10, True))
+            col.addWidget(ElidedLabel(sub, 8.5, False, MUT))
             r.addLayout(col, 1)
             t = Toggle(checked)
             r.addWidget(t)
             parent_lay.addLayout(r)
             return t
 
-        g, gl = panel("Allgemein", alpha=150)
-        self.tg_loop = toggle_row(gl, "Clip in der Vorschau wiederholen", "Spielt den gewählten Clip in Schleife.",
-                                  self.st["loop"])
-        self.tg_open = toggle_row(gl, "Ordner nach dem Export öffnen", "Zeigt die fertigen Clips im Explorer.",
-                                  self.st["open"])
-        v.addWidget(g)
-        g, gl = panel("Kill-Suche", alpha=150)
-        self.tg_gpu = toggle_row(gl, "GPU-Beschleunigung nutzen", "Beschleunigt das Dekodieren beim Suchen, wenn "
-                                 "möglich.", self.st["gpu"])
-        self.tg_thorough = toggle_row(gl, "Gründliche Suche (langsamer)", "Sucht Bild für Bild. Nur nötig, wenn "
-                                      "eine sehr kurze Meldung übersehen wurde.", self.st["thorough"])
-        v.addWidget(g)
-        g, gl = panel("Export", "Wohin die Clips gespeichert werden", alpha=150)
-        gl.addWidget(self.make_dir_row())
-        v.addWidget(g)
-        g, gl = panel("Updates", alpha=150)
-        r = QHBoxLayout()
-        r.addWidget(label(f"Installierte Version: {core.APP_VERSION}", 10.5, color=MUT), 1)
-        b = PopButton("Nach Updates suchen", "refresh", "glass", 40)
+        # Darstellung (gross, links)
+        look = BentoCard("aa", None, "Darstellung", "Hell oder dunkel und die Farbe der ganzen App. "
+                         "Server mit eigener Farbe nutzen ihre Farbe.")
+        self.seg_dark = Segmented(["Hell", "Dunkel"], height=34)
+        self.seg_dark.set_current("Dunkel" if self.st["dark"] else "Hell")
+        self.seg_dark.changed.connect(lambda v: self.apply_theme(dark=(v == "Dunkel")))
+        look.body.addWidget(self.seg_dark)
+        self.theme_dots = ThemeDots()
+        self.theme_dots.picked.connect(lambda n: self.apply_theme(**PRESETS[n]))
+        look.body.addWidget(self.theme_dots)
+
+        allg = BentoCard("pills", None, "Allgemein", "Vorschau und Export-Ordner.")
+        self.tg_loop = toggle_row(allg.body, "Clip wiederholen", "Spielt den Clip in Schleife.", self.st["loop"])
+        self.tg_open = toggle_row(allg.body, "Ordner öffnen", "Nach dem Export im Explorer.", self.st["open"])
+        kill = BentoCard("load", None, "Kill-Suche", "Schnell oder gründlich suchen.")
+        self.tg_gpu = toggle_row(kill.body, "GPU nutzen", "Beschleunigt das Dekodieren.", self.st["gpu"])
+        self.tg_thorough = toggle_row(kill.body, "Gründlich", "Bild für Bild, langsamer.", self.st["thorough"])
+
+        upd = BentoCard("rings", None, "Updates", f"Installierte Version {core.APP_VERSION}. Neue Versionen "
+                        "kommen automatisch beim Start.")
+        b = PopButton("Nach Updates suchen", "refresh", "glass", 38)
         b.clicked.connect(lambda: self.start_update_check(True))
-        r.addWidget(b)
-        gl.addLayout(r)
-        v.addWidget(g)
-        g, gl = panel("Tastenkürzel", alpha=150)
-        for k, t in (("Leertaste", "Play / Pause"), ("← →", "±1 Sekunde (Shift: 1 Bild)"),
-                     ("↑ ↓", "Vorheriger / nächster Clip"), ("F", "Vollbild"), ("I / O", "Start / Ende setzen"), ("Entf", "Clip löschen")):
-            rr = QHBoxLayout()
-            kl = label(k, 10.5, True, ACC_TEXT)
-            kl.setFixedWidth(110)
-            rr.addWidget(kl)
-            rr.addWidget(label(t, 10.5))
-            rr.addStretch(1)
-            gl.addLayout(rr)
-        v.addWidget(g)
-        # Bento-Raster: Karten unterschiedlicher Groesse in drei Spalten
-        allg, kill, exp, upd, keys = v.order
-        grid = QGridLayout(host)
-        grid.setContentsMargins(0, 0, 10, 0)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(14)
-        grid.addWidget(cards["look"], 0, 0, 1, 2)
-        grid.addWidget(upd, 0, 2)
-        grid.addWidget(allg, 1, 0)
-        grid.addWidget(kill, 1, 1)
-        if "acct" in cards:
-            grid.addWidget(cards["acct"], 1, 2, 2, 1)
-            grid.addWidget(exp, 2, 0, 1, 2)
-            grid.addWidget(keys, 3, 0, 1, 3)
-            grid.setRowStretch(4, 1)
-        else:
-            grid.addWidget(keys, 1, 2, 2, 1)
-            grid.addWidget(exp, 2, 0, 1, 2)
-            grid.setRowStretch(3, 1)
-        for c_ in range(3):
+        upd.body.addWidget(b)
+        upd.body.addWidget(self.btn_update)
+
+        exp = BentoCard("folders", "folder", "Export", "Wohin die fertigen Clips gespeichert werden.")
+        exp.body.addWidget(self.make_dir_row())
+        keys = BentoCard("keys", None, "Tastenkürzel", "Schneller schneiden mit der Tastatur.")
+        kg = QGridLayout()
+        kg.setHorizontalSpacing(14)
+        kg.setVerticalSpacing(4)
+        for i, (kk, tt) in enumerate((("Leertaste", "Play / Pause"), ("\u2190 \u2192", "\u00b11 s (Shift: 1 Bild)"),
+                                      ("\u2191 \u2193", "Clip wechseln"), ("I / O", "Start / Ende"),
+                                      ("F", "Vollbild"), ("Entf", "Clip löschen"))):
+            kl = label(kk, 9, True)
+            kg.addWidget(kl, i // 2, (i % 2) * 2)
+            kg.addWidget(label(tt, 9, color=MUT), i // 2, (i % 2) * 2 + 1)
+        keys.body.addLayout(kg)
+
+        grid.addWidget(look, 0, 0, 2, 2)
+        grid.addWidget(allg, 0, 2, 1, 2)
+        grid.addWidget(kill, 1, 2, 1, 2)
+        grid.addWidget(upd, 0, 4, 2, 2)
+        grid.addWidget(exp, 2, 0, 1, 3)
+        grid.addWidget(keys, 2, 3, 1, 3)
+        row = 3
+        if core.ACCOUNT_URL:
+            acct = BentoCard("users", "user", "Konto", "Anmeldung, Passwort und – für den Admin – Einladungen.")
+            self.acct_g = acct
+            self.acct_lay = QVBoxLayout()
+            self.acct_lay.setSpacing(8)
+            acct.body.addLayout(self.acct_lay)
+            acct.vis.setMinimumHeight(80)
+            self.refresh_account_panel()
+            grid.addWidget(acct, 3, 0, 1, 6)
+            row = 4
+        grid.setRowStretch(row, 1)
+        for c_ in range(6):
             grid.setColumnStretch(c_, 1)
-        for w_ in (cards["look"], upd, allg, kill, exp, keys) + ((cards["acct"],) if "acct" in cards else ()):
-            w_.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            if w_.layout() is not None:
-                w_.layout().addStretch(1)            # Inhalt oben halten, auch wenn die Karte hoeher ist
         sc.setWidget(host)
         lay.addWidget(sc, 1)
         # Schleifen-Schalter in der Player-Leiste mit dem Einstellungs-Schalter koppeln
@@ -2778,6 +3062,8 @@ class Window(QMainWindow):
     def apply_theme(self, **kw):
         """Aendert Modus/Farben sofort in der ganzen App und merkt sie sich."""
         self.st.update(kw)
+        if hasattr(self, "theme_dots"):
+            self.theme_dots.update()
         T.configure(*self.theme_colors())
         self._repaint_theme()
         self.save_settings()
@@ -3364,8 +3650,7 @@ class Window(QMainWindow):
         self.btn_update.setText(f"Update v{version} installieren")
         self.btn_update.show()
         self.upd_dot.set_dot(True)
-        self.dock.dots.add(5)
-        self.dock.update()
+        self.say(f"Update v{version} verfügbar – unter Einstellungen installieren")
         self.say(f"Neue Version v{version} verfügbar")
 
     def do_update(self):

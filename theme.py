@@ -179,11 +179,11 @@ class Theme:
         return QColor(227, 231, 236, int(max(0, min(255, 255 * min(1.0, 0.6 + 0.4 * k)))))
 
     def glow(self):
-        """Farbe des Lichts am unteren Rand des Hintergrunds (Standard: Violett wie im Vorbild)."""
+        """Farbe des Lichts am unteren Rand: folgt dem Farbthema, bewusst gedaempft (angenehm fuer die Augen)."""
         h, s, l = _hsl(self.acc)
-        if s < 0.25:
-            return QColor(74, 37, 168) if self.dark else QColor(196, 182, 255)
-        return hsl(h, min(0.8, s + 0.1), 0.42) if self.dark else hsl(h, 0.7, 0.85)
+        if s < 0.25:                                    # Grau: neutrales, ruhiges Licht
+            return hsl(h, 0.10, 0.20) if self.dark else hsl(h, 0.10, 0.86)
+        return hsl(h, min(s, 0.6) * 0.62, 0.24) if self.dark else hsl(h, min(s, 0.6) * 0.55, 0.88)
 
     # ---- Globales Stylesheet
     def qss(self):

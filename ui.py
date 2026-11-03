@@ -179,6 +179,11 @@ def paint_icon(p, name, rect, color, lw=1.9):
     elif name == "ticket":
         p.drawRoundedRect(QRectF(4.5, 7, 15, 10), 2, 2)
         p.drawLine(P(14, 7.5), P(14, 16.5))
+    elif name == "sun":
+        p.drawEllipse(P(12, 12), 3.8, 3.8)
+        for i in range(8):
+            ang = i * math.pi / 4
+            p.drawLine(P(12 + 6.3 * math.cos(ang), 12 + 6.3 * math.sin(ang)), P(12 + 8.6 * math.cos(ang), 12 + 8.6 * math.sin(ang)))
     elif name == "moon":
         path = QPainterPath()
         path.addEllipse(QRectF(5, 5, 14, 14))
@@ -304,7 +309,7 @@ class Background(QWidget):
         p.restore()
         for cx in (0.0, 1.0):                       # hellere Ecken unten
             cg = QRadialGradient(cx * w, h * 1.02, max(w, h) * 0.42)
-            cg.setColorAt(0, with_alpha(gc.lighter(115), 150))
+            cg.setColorAt(0, with_alpha(gc.lighter(112), 90))
             cg.setColorAt(1, with_alpha(gc, 0))
             p.fillRect(0, 0, w, h, cg)
         p.end()
@@ -533,73 +538,63 @@ class PopButton(QAbstractButton):
         p.scale(s, s)
         p.translate(-c)
         p.setOpacity(1.0 if self.isEnabled() else 0.4)
-        rad = r.height() / 2
         hv = max(0.0, min(1.0, self.pop))
         k = self.kind
+        # Form: Text-Knoepfe abgerundet (12 px), reine Symbol-Knoepfe rund
+        rad = r.height() / 2 if self.icon_only else min(12.0, r.height() / 2)
+        path = QPainterPath()
+        path.addRoundedRect(r, rad, rad)
+        dark = T.dark
+        # je Art: Grundflaeche, Rand, Schrift, Farbe des wachsenden Kreises, Schrift wenn gefuellt
         if k == "accent":
-            pf, fg = T.pill()
-            g = QLinearGradient(r.topLeft(), r.bottomLeft())
-            g.setColorAt(0, pf.lighter(118 + int(8 * hv)))
-            g.setColorAt(1, pf.darker(104))
-            p.setBrush(g)
-            p.setPen(Qt.NoPen)
-            p.drawRoundedRect(r, rad, rad)
-            hl = QLinearGradient(r.left(), 0, r.right(), 0)
-            hl.setColorAt(0, QColor(255, 255, 255, 0))
-            hl.setColorAt(0.5, QColor(255, 255, 255, 150))
-            hl.setColorAt(1, QColor(255, 255, 255, 0))
-            p.setPen(QPen(hl, 1))
-            p.drawLine(QPointF(r.left() + rad, r.top() + 1), QPointF(r.right() - rad, r.top() + 1))
-        elif k == "blue":                                 # kraeftiger blauer Knopf (Anmeldung)
-            rad = min(rad, 12)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(20, 99, 255).lighter(100 + int(10 * hv)))
-            p.drawRoundedRect(r, rad, rad)
-            fg = QColor("#ffffff")
-        elif k == "white":                                # heller Knopf (zweite Wahl)
-            rad = min(rad, 12)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(240, 241, 246) if hv < 0.5 else QColor(255, 255, 255))
-            p.drawRoundedRect(r, rad, rad)
-            fg = QColor("#1f2430")
+            base, fg = T.pill()
+            edge = None
+            fillc = QColor(T.acc_text) if dark else QColor(T.acc)
+            if abs(fillc.lightness() - base.lightness()) < 40:
+                fillc = base.darker(150)
+            fg2 = QColor("#ffffff") if fillc.lightness() < 150 else QColor("#111111")
+        elif k == "blue":
+            base, fg, edge = QColor(20, 99, 255), QColor("#ffffff"), None
+            fillc, fg2 = QColor("#ffffff"), QColor(20, 99, 255)
+        elif k == "white":
+            base, fg, edge = QColor(240, 241, 246), QColor("#1f2430"), None
+            fillc, fg2 = QColor("#111111"), QColor("#ffffff")
         elif k == "danger":
-            p.setBrush(with_alpha(RED, 50))
-            p.setPen(QPen(with_alpha(RED, 140), 1))
-            p.drawRoundedRect(r, rad, rad)
-            fg = QColor(T.err)
+            base, fg, edge = with_alpha(RED, 46), QColor(T.err), with_alpha(RED, 130)
+            fillc, fg2 = QColor(RED), QColor("#ffffff")
         elif k == "flat":
-            if hv > 0.01:
-                p.setBrush(QColor(255, 255, 255, int(22 * hv)))
-                p.setPen(Qt.NoPen)
-                p.drawRoundedRect(r, rad, rad)
-            fg = QColor(255, 255, 255, int(170 + 85 * hv)) if self.on_dark else ink(150 + 90 * hv)
-        elif k == "dark":                                # auf dem Video: dunkle Pille, immer lesbar
-            p.setBrush(QColor(8, 9, 10, int(205 + 30 * hv)))
-            p.setPen(QPen(QColor(255, 255, 255, int(40 + 30 * hv)), 1))
-            p.drawRoundedRect(r, rad, rad)
-            fg = QColor(255, 255, 255, 235)
-        else:                                            # Origin-Knopf: Kreis fuellt sich vom Mauspunkt aus
-            rad = min(rad, 12)
-            path = QPainterPath()
-            path.addRoundedRect(r, rad, rad)
-            p.setPen(Qt.NoPen)
-            p.setBrush(T.card_fill(150))
-            p.drawPath(path)
-            f = max(0.0, min(1.0, self.fill)) if self.isEnabled() else 0.0
-            if f > 0.002:
-                ox, oy = self.ox, self.oy
-                cover = 2 * max(math.hypot(ox - r.left(), oy - r.top()), math.hypot(r.right() - ox, oy - r.top()),
-                                math.hypot(ox - r.left(), r.bottom() - oy), math.hypot(r.right() - ox, r.bottom() - oy))
-                p.save()
-                p.setClipPath(path)
-                p.setBrush(ink(255))
-                rr = cover / 2 * f
-                p.drawEllipse(QPointF(ox, oy), rr, rr)
-                p.restore()
+            base, edge = QColor(0, 0, 0, 0), None
+            fg = QColor(255, 255, 255, int(190 + 65 * hv)) if self.on_dark else ink(170 + 70 * hv)
+            fillc = QColor(255, 255, 255, 235) if (self.on_dark or dark) else QColor(17, 17, 17)
+            fg2 = QColor("#111111") if (self.on_dark or dark) else QColor("#ffffff")
+        elif k == "dark":
+            base, fg, edge = QColor(8, 9, 10, 215), QColor(255, 255, 255, 235), QColor(255, 255, 255, 50)
+            fillc, fg2 = QColor(255, 255, 255, 240), QColor("#111111")
+        else:                                              # glass / Standard
+            base, fg, edge = T.card_fill(150), ink(235), T.glass_edge(1.0)
+            fillc = ink(255)
+            fg2 = QColor("#111111") if dark else QColor("#ffffff")
+        p.setPen(Qt.NoPen)
+        p.setBrush(base)
+        p.drawPath(path)
+        # Origin-Effekt: Kreis waechst vom Punkt, an dem die Maus hereinkommt
+        f = max(0.0, min(1.0, self.fill)) if self.isEnabled() else 0.0
+        if f > 0.002:
+            ox, oy = self.ox, self.oy
+            cover = 2 * max(math.hypot(ox - r.left(), oy - r.top()), math.hypot(r.right() - ox, oy - r.top()),
+                            math.hypot(ox - r.left(), r.bottom() - oy), math.hypot(r.right() - ox, r.bottom() - oy))
+            p.save()
+            p.setClipPath(path)
+            p.setBrush(fillc)
+            rr = cover / 2 * f
+            p.drawEllipse(QPointF(ox, oy), rr, rr)
+            p.restore()
+        if edge is not None:
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(T.glass_edge(1.0), 0.8))
+            p.setPen(QPen(edge, 0.8))
             p.drawPath(path)
-            fg = (QColor("#111111") if T.dark else QColor("#ffffff")) if f > 0.45 else ink(235)
+        if f > 0.45:
+            fg = fg2
         if self._kfocus and self.hasFocus():            # sichtbarer Tastatur-Fokus
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(T.acc, 2))
