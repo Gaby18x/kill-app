@@ -271,7 +271,11 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             ow = 1280
             d = os.path.join(DATA_DIR, "servers", server["id"])
             anchor = read_image(os.path.join(d, "anchor.png"))
-            words = {"word": read_image(os.path.join(d, "word.png"), cv2.IMREAD_GRAYSCALE)}
+            words = {f: read_image(os.path.join(d, f), cv2.IMREAD_GRAYSCALE)        # alle Kill-Woerter muessen da sein
+                     for f in sorted(os.listdir(d)) if f.startswith("word") and f.endswith(".png")}
+            words = {n: w_ for n, w_ in words.items() if w_ is not None}
+            if not words:
+                raise RuntimeError("Für diesen Server fehlt das Kill-Wort. Bitte die Vorlage neu markieren.")
             ks = h / float(server.get("ref_h", 1080))
             k = ks * ow / w
             tpl = cv2.resize(anchor, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)

@@ -1893,30 +1893,62 @@ class PickCanvas(QWidget):
     """Zeigt einen Screenshot; man zieht Rahmen mit der Maus."""
     released = Signal(tuple)
 
+    MAXW, MAXH = 960, 470
+
     def __init__(self, pix, parent=None):
         super().__init__(parent)
         self.pix = pix
         W, H = pix.width(), pix.height()
-        self.s = min(1.0, 960 / W, 470 / H)
+        self.s = min(1.0, self.MAXW / W, self.MAXH / H)
         self.dw, self.dh = int(W * self.s), int(H * self.s)
         self.setFixedSize(self.dw, self.dh)
+        self.view = QRectF(0, 0, W, H)              # sichtbarer Ausschnitt (Bild-Koordinaten)
+        self.full_s = self.s
         self.setCursor(Qt.CrossCursor)
-        self.boxes = [None, None, None]
+        self.boxes = [None, None, []]          # 1 ganze Meldung, 2 ganzer Text, 3 Woerter (mehrere)
         self.step = 0
         self.start = None
         self.live = None
         self.colors = [T.acc, QColor("#2f8fe8"), AMBER]
 
+    def zoom_to(self, box, margin=24):
+        """Auf einen Bereich heranzoomen (z. B. die markierte Meldung), damit man genau markieren kann."""
+        W, H = self.pix.width(), self.pix.height()
+        if box is None:
+            self.view = QRectF(0, 0, W, H)
+        else:
+            x0, y0, x1, y1 = box
+            self.view = QRectF(max(0, x0 - margin), max(0, y0 - margin), 0, 0)
+            self.view.setRight(min(W, x1 + margin))
+            self.view.setBottom(min(H, y1 + margin))
+        self.s = min(self.MAXW / self.view.width(), self.MAXH / self.view.height(), 6.0)
+        self.dw, self.dh = int(self.view.width() * self.s), int(self.view.height() * self.s)
+        self.setFixedSize(self.dw, self.dh)
+        self.update()
+
+    def _to_img(self, x, y):
+        return self.view.left() + x / self.s, self.view.top() + y / self.s
+
+    def _to_scr(self, x, y):
+        return (x - self.view.left()) * self.s, (y - self.view.top()) * self.s
+
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.drawPixmap(self.rect(), self.pix)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.drawPixmap(QRectF(self.rect()), self.pix, self.view)
         for i, b in enumerate(self.boxes):
-            if b and i <= self.step:
-                x0, y0, x1, y1 = [v * self.s for v in b]
+            if not b or i > self.step:
+                continue
+            for j, bb in enumerate(b if i == 2 else [b]):
+                x0, y0 = self._to_scr(bb[0], bb[1])
+                x1, y1 = self._to_scr(bb[2], bb[3])
                 p.setPen(QPen(self.colors[i], 2))
                 p.setBrush(with_alpha(self.colors[i], 40))
                 p.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+                if i == 2:
+                    p.setFont(app_font(8.5, True))
+                    p.drawText(QRectF(x0, y0 - 16, 40, 14), Qt.AlignLeft | Qt.AlignVCenter, f"Wort {j + 1}")
         if self.live:
             x0, y0, x1, y1 = self.live
             p.setPen(QPen(self.colors[self.step], 2))
@@ -1944,8 +1976,14 @@ class PickCanvas(QWidget):
         y0, y1 = sorted((self.start[1], y))
         self.start = self.live = None
         if x1 - x0 >= 6 and y1 - y0 >= 4:
-            self.boxes[self.step] = tuple(int(v / self.s) for v in (x0, y0, x1, y1))
-            self.released.emit(self.boxes[self.step])
+            ix0, iy0 = self._to_img(x0, y0)
+            ix1, iy1 = self._to_img(x1, y1)
+            box = (int(ix0), int(iy0), int(round(ix1)), int(round(iy1)))
+            if self.step == 2:
+                self.boxes[2].append(box)
+            else:
+                self.boxes[self.step] = box
+            self.released.emit(box)
         self.update()
 
 
@@ -3056,10 +3094,15 @@ class Window(QMainWindow):
         ax0, ay0, ax1, ay1 = r["anchor"]
         wx0, wy0, wx1, wy1 = r["word"]
         rx0, ry0, rx1, ry1 = r["region"]
-        for fname, crop in (("anchor.png", im[ay0:ay1, ax0:ax1]), ("word.png", im[wy0:wy1, wx0:wx1])):
-            cv2.imencode(".png", crop)[1].tofile(os.path.join(d, fname))
-        ex0, ey0 = max(0, min(ax0, wx0, rx0) - 8), max(0, min(ay0, wy0, ry0) - 8)
-        ex1, ey1 = min(im.shape[1], max(ax1, wx1, rx1) + 8), min(im.shape[0], max(ay1, wy1, ry1) + 8)
+        for old in os.listdir(d):
+            if old.startswith("word") and old.endswith(".png"):
+                os.remove(os.path.join(d, old))
+        cv2.imencode(".png", im[ay0:ay1, ax0:ax1])[1].tofile(os.path.join(d, "anchor.png"))
+        for n_, (a0, b0, a1, b1) in enumerate(r.get("words") or [r["word"]]):
+            cv2.imencode(".png", im[b0:b1, a0:a1])[1].tofile(os.path.join(d, "word.png" if n_ == 0 else f"word{n_ + 1}.png"))
+        bx = r.get("box") or (min(ax0, wx0, rx0), min(ay0, wy0, ry0), max(ax1, wx1, rx1), max(ay1, wy1, ry1))
+        ex0, ey0 = max(0, bx[0] - 4), max(0, bx[1] - 4)
+        ex1, ey1 = min(im.shape[1], bx[2] + 4), min(im.shape[0], bx[3] + 4)
         cv2.imencode(".png", im[ey0:ey1, ex0:ex1])[1].tofile(os.path.join(d, "example.png"))
         return {"id": sid, "name": name, "kind": "notify", "ref_h": r["ref_h"],
                 "region": [rx0 - ax0, ry0 - ay0, rx1 - ax0, ry1 - ay0]}
@@ -3139,8 +3182,9 @@ class Window(QMainWindow):
             d = os.path.join(core.DATA_DIR, "servers", s["id"])
             if os.path.exists(os.path.join(d, "example.png")):
                 items.append(("Beispiel-Meldung", os.path.join(d, "example.png")))
-            items += [("Fester Teil (Erkennung)", os.path.join(d, "anchor.png")),
-                      ("Kill-Wort (Prüfung)", os.path.join(d, "word.png"))]
+            items.append(("Fester Teil (Erkennung)", os.path.join(d, "anchor.png")))
+            for n_ in sorted(f for f in os.listdir(d) if f.startswith("word") and f.endswith(".png")) if os.path.isdir(d) else []:
+                items.append(("Kill-Wort (Prüfung)", os.path.join(d, n_)))
         else:
             return label("Roter Kill-X in der Bildmitte – keine Vorlage nötig.", 9.5, color=MUT)
         box = QWidget()
@@ -3254,50 +3298,93 @@ class Window(QMainWindow):
         if pm.isNull():
             self.say("Bild konnte nicht geladen werden", RED)
             return
-        steps = [("1 / 3  Fester Teil der Meldung",
-                  "Ziehe einen Rahmen um etwas, das in JEDER Kill-Meldung gleich aussieht (z. B. Überschrift "
-                  "oder Symbol)."),
-                 ("2 / 3  Ganze Meldung", "Ziehe einen Rahmen um die komplette Meldungsbox mit dem Text."),
-                 ("3 / 3  Kill-Wort", "Ziehe einen Rahmen um ein Wort, das NUR bei Kills vorkommt "
-                                      "(z. B. „getötet“).")]
+        steps = [("1 / 3  Ganze Meldung", "Ziehe einen Rahmen um die komplette Meldung (die ganze Box mit "
+                                           "Überschrift, Symbol und Text)."),
+                 ("2 / 3  Ganzer Text", "Ziehe einen Rahmen um den ganzen Text der Meldung – auch um lange Namen, die "
+                                        "in die nächste Zeile umbrechen."),
+                 ("3 / 3  Kill-Wörter", "Ziehe einen Rahmen um jedes Wort, das bei JEDEM Kill vorkommt, z. B. „Du hast“ "
+                                        "und „getötet“. Mehrere Wörter möglich – alle müssen später da sein.")]
         canvas = PickCanvas(pm)
-        card = DialogCard(steps[0][0], steps[0][1], max(600, canvas.dw + 64))
+        card = DialogCard(steps[0][0], steps[0][1], max(600, PickCanvas.MAXW + 64))
         title = card.lay.itemAt(0).widget()
         helpl = card.lay.itemAt(1).widget()
         card.body.addWidget(canvas, 0, Qt.AlignHCenter)
         back_b = PopButton("Zurück", None, "glass", 40)
         next_b = PopButton("Weiter", None, "accent", 40)
         next_b.setEnabled(False)
+        clear_b = PopButton("Wörter löschen", None, "flat", 40)
         cancel = PopButton("Abbrechen", None, "flat", 40)
         cancel.clicked.connect(back)
         card.btns.insertWidget(0, cancel)
+        card.btns.insertWidget(1, clear_b)
         card.btns.addWidget(back_b)
         card.btns.addWidget(next_b)
 
+        def ready():
+            b_ = canvas.boxes[canvas.step]
+            return bool(b_) if canvas.step == 2 else b_ is not None
+
         def show():
+            canvas.zoom_to(canvas.boxes[0] if canvas.step > 0 else None)
             title.setText(steps[canvas.step][0])
             helpl.setText(steps[canvas.step][1])
             next_b.setText("Fertig" if canvas.step == 2 else "Weiter")
-            next_b.setEnabled(canvas.boxes[canvas.step] is not None)
+            next_b.setEnabled(ready())
             back_b.setEnabled(canvas.step > 0)
+            clear_b.setVisible(canvas.step == 2 and bool(canvas.boxes[2]))
             card.err.setText("")
+            card.fit()
+            self.overlay._center()
             canvas.update()
-        canvas.released.connect(lambda b: (next_b.setEnabled(True), card.err.setText("")))
+        canvas.released.connect(lambda b: show())
+
+        def clear_words():
+            canvas.boxes[2] = []
+            show()
+        clear_b.clicked.connect(clear_words)
+
+        def fail(msg):
+            card.err.setText(msg)
+            card.fit()
+            self.overlay._center()
+
+        def inside(inner, outer, tol=6):
+            return (outer[0] - tol <= inner[0] and outer[1] - tol <= inner[1] and inner[2] <= outer[2] + tol and
+                    inner[3] <= outer[3] + tol)
 
         def nxt():
+            if canvas.step == 1 and not inside(canvas.boxes[1], canvas.boxes[0], 20):
+                fail("Der Text muss innerhalb der ganzen Meldung liegen.")
+                return
             if canvas.step < 2:
                 canvas.step += 1
                 show()
                 return
-            a, rg, wd = canvas.boxes
-            if not (rg[0] <= wd[0] and rg[1] <= wd[1] and wd[2] <= rg[2] and wd[3] <= rg[3]):
-                card.err.setText("Das Kill-Wort muss innerhalb der ganzen Meldung liegen.")
+            box, txt, words = canvas.boxes
+            for wd in words:
+                if not inside(wd, txt, 10):
+                    fail("Jedes Wort muss innerhalb des Text-Rahmens liegen.")
+                    return
+            # fester Teil (fuer die Suche) = Teil der Meldung OBERHALB des Textes, sonst links davon
+            if txt[1] - box[1] >= 10:
+                anchor = (box[0], box[1], box[2], max(box[1] + 8, txt[1] - 2))
+            elif txt[0] - box[0] >= 10:
+                anchor = (box[0], box[1], max(box[0] + 8, txt[0] - 2), box[3])
+            else:
+                fail("Die ganze Meldung muss oben oder links etwas mehr als nur den Text enthalten "
+                     "(z. B. Überschrift oder Symbol). Ziehe den ersten Rahmen etwas größer.")
                 return
             img = pm.toImage().convertToFormat(QImage.Format_RGB888)
             arr = np.frombuffer(img.constBits(), np.uint8).reshape(img.height(), img.bytesPerLine())[:, :img.width() * 3]
             bgr = cv2.cvtColor(arr.reshape(img.height(), img.width(), 3).copy(), cv2.COLOR_RGB2BGR)
             H = img.height()
-            done({"anchor": a, "region": rg, "word": wd, "bgr": bgr, "ref_h": H if H >= 700 else 1080})
+            # Text-Bereich bis zum Rand der Meldung erweitern: lange Namen brechen in mehr Zeilen um
+            region = (txt[0], txt[1], max(txt[2], box[2]), max(txt[3], box[3]))
+            try:
+                done({"anchor": anchor, "region": region, "word": words[0], "words": list(words), "box": box,
+                      "bgr": bgr, "ref_h": H if H >= 700 else 1080})
+            except Exception as ex:
+                fail(f"Speichern fehlgeschlagen: {ex}")
 
         def prv():
             if canvas.step:
