@@ -882,6 +882,45 @@ class BellNotify(QWidget):
                        fm.elidedText(self.text, Qt.ElideRight, avail))
 
 
+class PreviewPop(QWidget):
+    """Kleines Vorschaufenster neben der Clip-Liste: spielt den Clip stumm in Schleife ab."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.pm = None
+        self.k = 0.0
+        self.label = ""
+        self.setFixedSize(288, 186)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setOpacity(max(0.0, min(1.0, self.k)))
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(T.card_fill(240))
+        p.drawRoundedRect(r, 16, 16)
+        img = QRectF(8, 8, r.width() - 16, (r.width() - 16) * 9 / 16)
+        path = QPainterPath()
+        path.addRoundedRect(img, 11, 11)
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(img, QColor(0, 0, 0))
+        if self.pm is not None and not self.pm.isNull():
+            pw, ph = self.pm.width(), self.pm.height()
+            s = min(img.width() / pw, img.height() / ph)
+            dw, dh = pw * s, ph * s
+            p.drawPixmap(QRectF(img.center().x() - dw / 2, img.center().y() - dh / 2, dw, dh), self.pm,
+                         QRectF(0, 0, pw, ph))
+        p.restore()
+        p.setPen(ink(220))
+        p.setFont(app_font(9, True))
+        p.drawText(QRectF(14, img.bottom() + 4, r.width() - 28, r.height() - img.bottom() - 8),
+                   Qt.AlignVCenter | Qt.AlignLeft, self.label)
+
+
 class _NavProxy:
     """Damit der alte Code (self.nav[i].set_selected / set_nav_enabled) weiter funktioniert."""
 
@@ -1329,13 +1368,19 @@ class ClipRow(QWidget):
     def _er(self):
         return QRectF(self.width() - 15 - 64, 17, 30, 30)
 
+    on_hover = None
+
     def enterEvent(self, e):
         tween(self, "hov", 1.0, 130)
+        if self.on_hover:
+            self.on_hover(True)
 
     def leaveEvent(self, e):
         tween(self, "hov", 0.0, 130)
         tween(self, "xhov", 0.0, 100)
         tween(self, "ehov", 0.0, 100)
+        if self.on_hover:
+            self.on_hover(False)
 
     def mouseMoveEvent(self, e):
         self.mx, self.my = e.position().x(), e.position().y()
@@ -2234,6 +2279,7 @@ class Window(QMainWindow):
         self.navbar = self.dock
         self.dock.select = lambda i, animate=True: self.nav[i].set_selected(True)
         self.server_menu = ServerMenu(self.bg, self.switch_server, lambda: self.go_page(0))
+        self.preview_pop = PreviewPop(self.bg)
         self.overlay = Overlay(self.bg)
         self.toast = BellNotify(self.bg, self)
         self.drop_hint = DropHint(self.bg)
@@ -2252,6 +2298,7 @@ class Window(QMainWindow):
         self.timer.timeout.connect(self.poll_player)
         self.timer.start(8)
         QTimer.singleShot(250, self.check_ffmpeg)
+        QTimer.singleShot(1200, self.setup_watch)
         QTimer.singleShot(150, self.startup)
         QTimer.singleShot(500, self.stack.warm)
 
@@ -2856,6 +2903,8 @@ class Window(QMainWindow):
             if st.get("avatar"):
                 save_avatar(sid, st["avatar"])
             self.st["servers"].append(srv)
+            if st.get("request_id"):
+                self.user_action("/requests/delete", {"id": st["request_id"]})
             self.set_server_theme(sid, st.get("theme", ""))
             self.save_settings()
             self.sync_catalog()
@@ -3232,6 +3281,7 @@ class Window(QMainWindow):
         self.timeline.seek.connect(self.seek)
         self.timeline.pick.connect(lambda i: self.select(i, seek=False))
         self.timeline.edited.connect(self.clip_changed)
+        self.timeline.begin_edit.connect(self.snapshot)
         tlv.addWidget(self.timeline, 1)
 
         # ---- rechte Spalte: Suche + Export
@@ -3335,9 +3385,24 @@ class Window(QMainWindow):
         self.theme_dots.picked.connect(lambda n: self.apply_theme(**PRESETS[n]))
         look.body.addWidget(self.theme_dots)
 
-        allg = BentoCard("pills", None, "Allgemein", "Vorschau und Export-Ordner.")
+        allg = BentoCard("pills", None, "Allgemein", "Vorschau, Export und Aufnahmen von OBS / NVIDIA.")
         self.tg_loop = toggle_row(allg.body, "Clip wiederholen", "Spielt den Clip in Schleife.", self.st["loop"])
         self.tg_open = toggle_row(allg.body, "Ordner öffnen", "Nach dem Export im Explorer.", self.st["open"])
+        self.tg_watch = toggle_row(allg.body, "Neue Aufnahmen melden", "Schaut im Aufnahme-Ordner nach neuen Videos.",
+                                   self.st.get("watch_on", True))
+        self.tg_watch.toggled.connect(lambda on: (self.st.__setitem__("watch_on", on), self.setup_watch()))
+        wr = QHBoxLayout()
+        wc = QVBoxLayout()
+        wc.setSpacing(0)
+        wc.addWidget(label("Aufnahme-Ordner", 10, True))
+        self.watch_lbl = ElidedLabel("", 8.5, False, MUT)
+        wc.addWidget(self.watch_lbl)
+        wr.addLayout(wc, 1)
+        self.watch_btn = PopButton("Wählen", "folder", "glass", 32)
+        self.watch_btn.clicked.connect(self.choose_watch_dir)
+        wr.addWidget(self.watch_btn)
+        allg.body.addLayout(wr)
+        self.refresh_watch_label()
         kill = BentoCard("load", None, "Kill-Suche", "Schnell oder gründlich suchen.")
         self.tg_gpu = toggle_row(kill.body, "GPU nutzen", "Beschleunigt das Dekodieren.", self.st["gpu"])
         self.tg_thorough = toggle_row(kill.body, "Gründlich", "Bild für Bild, langsamer.", self.st["thorough"])
@@ -3357,7 +3422,8 @@ class Window(QMainWindow):
         kg.setVerticalSpacing(4)
         for i, (kk, tt) in enumerate((("Leertaste", "Play / Pause"), ("\u2190 \u2192", "\u00b11 s (Shift: 1 Bild)"),
                                       ("\u2191 \u2193", "Clip wechseln"), ("I / O", "Start / Ende"),
-                                      ("F", "Vollbild"), ("Entf", "Clip löschen"))):
+                                      ("F", "Vollbild"), ("Entf", "Clip löschen"),
+                                      ("Strg+Z", "Rückgängig"), ("Strg+Y", "Wiederholen"))):
             kl = label(kk, 9, True)
             kg.addWidget(kl, i // 2, (i % 2) * 2)
             kg.addWidget(label(tt, 9, color=MUT), i // 2, (i % 2) * 2 + 1)
@@ -3671,6 +3737,13 @@ class Window(QMainWindow):
     def on_login_ok(self, name, role, token, offline, dismiss=False):
         self.st.update(acct_token=token, acct_role=role, acct_name=name)
         self.role = role
+        if role == "admin" and not offline:
+            QTimer.singleShot(2500, self.poll_requests)
+            if not hasattr(self, "req_timer"):
+                self.req_timer = QTimer(self)
+                self.req_timer.setInterval(5 * 60 * 1000)
+                self.req_timer.timeout.connect(self.poll_requests)
+            self.req_timer.start()
         self.pending_invite = ""
         if self.login_open or dismiss:
             self.login_open = False
@@ -3809,7 +3882,8 @@ class Window(QMainWindow):
         self.style_edit(note)
         card.body.addWidget(note)
         st = {"img": None}
-        pick = PopButton("Screenshot der Kill-Meldung anhängen …", "folder", "glass", 38)
+        card.body.addWidget(label("Screenshot einer Kill-Meldung (Pflicht)", 10.5, True, MUT))
+        pick = PopButton("Screenshot auswählen …", "folder", "glass", 38)
         info = label("", 9, color=MUT)
 
         def do_pick():
@@ -3817,12 +3891,13 @@ class Window(QMainWindow):
             if p:
                 im = QImage(p)
                 if not im.isNull():
-                    im = im.scaled(1600, 900, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    if im.height() > 1440:
+                        im = im.scaled(2560, 1440, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     from PySide6.QtCore import QBuffer, QByteArray
                     ba = QByteArray()
                     buf = QBuffer(ba)
                     buf.open(QBuffer.WriteOnly)
-                    im.save(buf, "JPG", 80)
+                    im.save(buf, "PNG")
                     import base64
                     st["img"] = base64.b64encode(bytes(ba)).decode()
                     info.setText(f"Angehängt: {os.path.basename(p)}")
@@ -3839,6 +3914,9 @@ class Window(QMainWindow):
         def send():
             if not nm.text().strip():
                 card.err.setText("Bitte den Namen des Servers eingeben.")
+                return
+            if not st["img"]:
+                card.err.setText("Bitte einen Screenshot anhängen, auf dem eine Kill-Meldung zu sehen ist.")
                 return
             go.setEnabled(False)
 
@@ -3872,11 +3950,18 @@ class Window(QMainWindow):
 
             def show_img(b64):
                 import base64
+                raw = base64.b64decode(b64 or "")
                 pm = QPixmap()
-                pm.loadFromData(base64.b64decode(b64 or ""))
+                pm.loadFromData(raw)
                 if pm.isNull():
                     img_lbl.setText("Screenshot konnte nicht geladen werden.")
                     return
+                import tempfile
+                tmp = os.path.join(tempfile.gettempdir(), f"ace_anfrage_{rq.get('id', 'x')}.png")
+                pm.save(tmp, "PNG")
+                mk = PopButton("Server daraus erstellen", "plus", "accent", 40)
+                mk.clicked.connect(lambda: self.server_from_request(rq, tmp))
+                card.btns.addWidget(mk)
                 img_lbl.setPixmap(pm.scaled(576, 330, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 card.fit()
                 self.overlay._center()
@@ -3885,6 +3970,37 @@ class Window(QMainWindow):
         ok.clicked.connect(self.overlay.dismiss)
         card.btns.addWidget(ok)
         self.overlay.present(card)
+
+    def server_from_request(self, rq, img_path):
+        """Admin: Kill-Meldung direkt im Screenshot der Anfrage markieren und den Server anlegen."""
+        st = {"name": rq.get("name", ""), "kind": "Kill-Meldung", "result": None, "avatar": None,
+              "request_id": rq.get("id")}
+        self.open_region_picker(img_path, lambda res: self.open_add_server({**st, "result": res}),
+                                lambda: self.open_add_server(st))
+
+    # ---- Admin: neue Server-Anfragen melden
+    def poll_requests(self):
+        if self.role != "admin" or not core.ACCOUNT_URL:
+            return
+        tok = self.st.get("acct_token")
+
+        def work():
+            try:
+                rq = auth.call("GET", "/requests", token=tok)["requests"]
+            except auth.ApiError:
+                return
+            self.ui(self._requests_seen, rq)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _requests_seen(self, rq):
+        seen = set(self.st.get("seen_requests", []))
+        new = [r for r in rq if r.get("id") not in seen]
+        if new:
+            r = new[0]
+            more = f" (+{len(new) - 1} weitere)" if len(new) > 1 else ""
+            self.say(f"Neue Server-Anfrage: {r.get('name')} von {r.get('by')}{more}", AMBER)
+        self.st["seen_requests"] = [r.get("id") for r in rq]
+        self.save_settings()
 
     def open_password(self):
         card = DialogCard("Passwort ändern", "Gib dein altes und ein neues Passwort ein (mindestens 6 Zeichen).", 480)
@@ -4034,7 +4150,24 @@ class Window(QMainWindow):
         for u in users:
             row = QHBoxLayout()
             txt = u["name"] + (f"  ·  {u['label']}" if u.get("label") else "") + ("  ·  gesperrt" if u["disabled"] else "")
-            row.addWidget(label(txt + ("  (Admin)" if u["role"] == "admin" else ""), 10.5, color=MUT), 1)
+            col = QVBoxLayout()
+            col.setSpacing(0)
+            col.addWidget(label(txt + ("  (Admin)" if u["role"] == "admin" else ""), 10.5, True))
+            s = u.get("stats") or {}
+            if s:
+                import datetime as _dt
+                last = _dt.datetime.fromtimestamp(s.get("last", 0) / 1000).strftime("%d.%m. %H:%M") if s.get("last") else "–"
+                warn = ""
+                if s.get("scans", 0) >= 2 and s.get("zero", 0) >= max(2, s.get("scans", 0) * 0.6):
+                    warn = "  ·  ⚠ findet oft nichts"
+                col.addWidget(label(f"{s.get('scans', 0)} Suchen · {s.get('kills', 0)} Kills · {s.get('exports', 0)} "
+                                    f"exportiert · zuletzt {last}{warn}", 8.5, color=MUT))
+            else:
+                col.addWidget(label("noch nicht benutzt", 8.5, color=MUT))
+            row.addLayout(col, 1)
+            pb = PopButton("Passwort", "lock", "glass", 36)
+            pb.clicked.connect(lambda _=False, n=u["name"]: self.open_set_password(n))
+            row.addWidget(pb)
             if u["role"] != "admin":
                 b1 = PopButton("Entsperren" if u["disabled"] else "Sperren", None, "glass", 36)
                 b1.clicked.connect(lambda _=False, n=u["name"], d=not u["disabled"]: self.user_action("/users/disable", {"name": n, "disabled": d}))
@@ -4043,6 +4176,39 @@ class Window(QMainWindow):
                 row.addWidget(b1)
                 row.addWidget(b2)
             self.users_box.addLayout(row)
+
+    def open_set_password(self, name):
+        """Admin: neues Passwort fuer einen Benutzer setzen."""
+        card = DialogCard(f"Passwort für {name}", "Lege ein neues Passwort fest (mindestens 6 Zeichen). "
+                          "Sag es der Person danach.", 480)
+        pw = QLineEdit()
+        pw.setEchoMode(QLineEdit.Password)
+        pw.setPlaceholderText("Neues Passwort")
+        self.style_edit(pw)
+        card.body.addWidget(pw)
+        cancel = PopButton("Abbrechen", None, "glass", 40)
+        cancel.clicked.connect(self.overlay.dismiss)
+        go = PopButton("Speichern", "check", "accent", 40)
+        card.btns.addWidget(cancel)
+        card.btns.addWidget(go)
+        tok = self.st.get("acct_token")
+
+        def save():
+            if len(pw.text()) < 6:
+                card.err.setText("Mindestens 6 Zeichen.")
+                return
+            go.setEnabled(False)
+
+            def work():
+                try:
+                    auth.call("POST", "/users/password", {"name": name, "password": pw.text()}, token=tok)
+                    self.ui(lambda: (self.overlay.dismiss(), self.say(f"Passwort für {name} geändert")))
+                except auth.ApiError as e:
+                    self.ui(lambda m: (card.err.setText(m), go.setEnabled(True)), str(e))
+            threading.Thread(target=work, daemon=True).start()
+        go.clicked.connect(save)
+        pw.returnPressed.connect(save)
+        self.overlay.present(card)
 
     def user_action(self, path, data):
         tok = self.st.get("acct_token")
@@ -4138,8 +4304,94 @@ class Window(QMainWindow):
         self.close()
 
     # ------------------------------------------------------------ Video
+    # ------------------------------------------------------------ Aufnahme-Ordner (OBS / NVIDIA)
+    def refresh_watch_label(self):
+        d = self.st.get("watch_dir", "")
+        if hasattr(self, "watch_lbl"):
+            self.watch_lbl.setText(d or "Noch nicht gewählt – z. B. der OBS- oder NVIDIA-Ordner")
+            self.watch_btn.setText("Ändern" if d else "Wählen")
+
+    def choose_watch_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Ordner, in dem OBS / NVIDIA die Aufnahmen speichert",
+                                             self.st.get("watch_dir", ""))
+        if d:
+            self.st["watch_dir"] = d
+            self.st["watch_on"] = True
+            if hasattr(self, "tg_watch"):
+                self.tg_watch.setChecked(True)
+            self.save_settings()
+            self.refresh_watch_label()
+            self.setup_watch()
+            self.say("Aufnahme-Ordner gespeichert")
+
+    def setup_watch(self):
+        from PySide6.QtCore import QFileSystemWatcher
+        w = getattr(self, "watcher", None)
+        if w is None:
+            w = self.watcher = QFileSystemWatcher(self)
+            w.directoryChanged.connect(lambda _: QTimer.singleShot(1500, self.check_new_recordings))
+            self.watch_timer = QTimer(self)                 # zur Sicherheit auch regelmaessig nachsehen
+            self.watch_timer.setInterval(20000)
+            self.watch_timer.timeout.connect(self.check_new_recordings)
+        if w.directories():
+            w.removePaths(w.directories())
+        d = self.st.get("watch_dir", "")
+        if d and self.st.get("watch_on", True) and os.path.isdir(d):
+            w.addPath(d)
+            self.watch_known = {f: os.path.getsize(os.path.join(d, f)) for f in list_videos(d)}
+            self.watch_pending = {}
+            self.watch_timer.start()
+        else:
+            self.watch_timer.stop()
+
+    def check_new_recordings(self):
+        d = self.st.get("watch_dir", "")
+        if not d or not self.st.get("watch_on", True) or not os.path.isdir(d):
+            return
+        for f in list_videos(d):
+            if f in self.watch_known:
+                continue
+            try:
+                size = os.path.getsize(os.path.join(d, f))
+            except OSError:
+                continue
+            if size > 0 and self.watch_pending.get(f) == size:      # Groesse stabil: Aufnahme ist fertig
+                self.watch_known[f] = size
+                self.watch_pending.pop(f, None)
+                self.new_recording(os.path.join(d, f))
+            else:
+                self.watch_pending[f] = size
+                QTimer.singleShot(2500, self.check_new_recordings)
+
+    def new_recording(self, path):
+        name = os.path.basename(path)
+        self.say(f"Neue Aufnahme: {name}")
+        if self.overlay.isVisible() or self.scanning:
+            return
+        card = DialogCard("Neue Aufnahme gefunden", f"„{name}“ ist gerade fertig geworden. Sollen die Kills "
+                          "gesucht werden?", 500)
+        later = PopButton("Später", None, "glass", 40)
+        later.clicked.connect(self.overlay.dismiss)
+        go = PopButton("Kills suchen", "crosshair", "accent", 40)
+
+        def run():
+            self.overlay.dismiss()
+            if self.server is None:
+                self.pending_video = path
+                self.go_page(0)
+                self.say("Wähle den Server – danach wird die Aufnahme geöffnet", AMBER)
+                return
+            self.go_page(1)
+            self.load_video(path)
+            QTimer.singleShot(400, lambda: self.path == path and not self.scanning and self.start_scan())
+        go.clicked.connect(run)
+        card.btns.addWidget(later)
+        card.btns.addWidget(go)
+        self.overlay.present(card)
+
     def open_video(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Video wählen", "", "Video (*.mp4 *.mkv *.mov *.flv *.ts *.avi);;Alle (*)")
+        p, _ = QFileDialog.getOpenFileName(self, "Video wählen", self.st.get("watch_dir", ""),
+                                           "Video (*.mp4 *.mkv *.mov *.flv *.ts *.avi);;Alle (*)")
         if p:
             self.load_video(p)
 
@@ -4185,6 +4437,104 @@ class Window(QMainWindow):
         self.timeline.set_view(0, 60)
         self.seek(0)
 
+    # ------------------------------------------------------------ Vorschau beim Darueberfahren
+    def preview_clip(self, row, on):
+        self._pv_gen = getattr(self, "_pv_gen", 0) + 1
+        gen = self._pv_gen
+        pop = self.preview_pop
+        if not on or not self.path:
+            QTimer.singleShot(60, lambda: gen == self._pv_gen and self._pv_hide())
+            return
+        c = row.c
+        pop.label = f"{row.title_text or ('Clip ' + str(row.i + 1))}  ·  {fmt_short(c.start)} – {fmt_short(c.end)}"
+        pop.pm = c.thumb
+        y = row.mapTo(self.bg, row.rect().topLeft()).y() + row.height() / 2 - pop.height() / 2
+        x = self.left_panel.mapTo(self.bg, self.left_panel.rect().topRight()).x() + 10
+        y = int(max(70, min(self.bg.height() - pop.height() - 20, y)))
+        pop.move(int(x), y)
+        if not pop.isVisible():
+            pop.k = 0.0
+            pop.show()
+            tween(pop, "k", 1.0, 180)
+        pop.raise_()
+        pop.update()
+        path, start, end = self.path, c.start, c.end
+
+        def work():
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                return
+            fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
+            step = max(1, int(round(fps / 15)))
+            cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+            t_next = time.perf_counter()
+            while gen == self._pv_gen:
+                for _ in range(step - 1):
+                    cap.grab()
+                ok, fr = cap.read()
+                pos = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                if not ok or pos >= end:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+                    continue
+                small = cv2.resize(fr, (272, int(272 * fr.shape[0] / fr.shape[1])), interpolation=cv2.INTER_AREA)
+                rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                h, w = rgb.shape[:2]
+                img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+                self.ui(self._pv_frame, gen, img)
+                t_next += step / fps
+                time.sleep(max(0.0, t_next - time.perf_counter()))
+            cap.release()
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pv_frame(self, gen, img):
+        if gen == self._pv_gen:
+            self.preview_pop.pm = QPixmap.fromImage(img)
+            self.preview_pop.update()
+
+    def _pv_hide(self):
+        pop = self.preview_pop
+        tween(pop, "k", 0.0, 140)
+        QTimer.singleShot(150, lambda: pop.k < 0.05 and pop.hide())
+
+    # ------------------------------------------------------------ Rueckgaengig (Strg+Z) / Wiederholen (Strg+Y)
+    def _clip_state(self):
+        out = []
+        for c in self.clips:
+            n = Clip(c.start, c.end, c.kill, c.thumb)
+            n.name, n.last_name = c.name, c.last_name
+            out.append(n)
+        return out, self.sel
+
+    def snapshot(self):
+        st = self.__dict__.setdefault("undo_stack", [])
+        st.append(self._clip_state())
+        del st[:-60]
+        self.__dict__["redo_stack"] = []
+
+    def _restore(self, state):
+        self.clips, self.sel = state
+        self.rebuild_cards()
+        if self.sel is not None and 0 <= self.sel < len(self.clips):
+            self.select(self.sel, seek=False)
+        self.timeline.update()
+
+    def undo(self):
+        st = self.__dict__.get("undo_stack") or []
+        if not st:
+            self.say("Nichts zum Rückgängigmachen")
+            return
+        self.__dict__.setdefault("redo_stack", []).append(self._clip_state())
+        self._restore(st.pop())
+        self.say("Rückgängig gemacht")
+
+    def redo(self):
+        st = self.__dict__.get("redo_stack") or []
+        if not st:
+            return
+        self.__dict__.setdefault("undo_stack", []).append(self._clip_state())
+        self._restore(st.pop())
+        self.say("Wiederhergestellt")
+
     def ask_unload(self):
         if not self.has_video:
             return
@@ -4225,6 +4575,7 @@ class Window(QMainWindow):
         self.fps, self.duration, self.pos = 60.0, 0.0, 0.0
         self.clips, self.sel, self.play_clip = [], None, None
         self.mark_in = self.mark_out = None
+        self.undo_stack, self.redo_stack = [], []
         self.file_lbl.setText("Noch kein Video")
         self.meta_lbl.setText("Wähle eine Aufnahme aus · OBS oder NVIDIA")
         self.open_btn.setText("Video öffnen")
@@ -4432,10 +4783,23 @@ class Window(QMainWindow):
         self.set_status("Fehler: " + msg[:140], "bad")
         self.say("Suche fehlgeschlagen", RED)
 
+    def send_stats(self, data):
+        if not core.ACCOUNT_URL or not self.st.get("acct_token"):
+            return
+        tok = self.st.get("acct_token")
+        threading.Thread(target=lambda: _quiet(lambda: auth.call("POST", "/stats", data, token=tok, timeout=10)),
+                         daemon=True).start()
+
     def scan_done(self, res, info):
         cancelled = self.cancel.is_set()
+        if not cancelled:
+            self.send_stats({"type": "scan", "kills": len(res), "server": (self.server or {}).get("name", ""),
+                             "sens": int(round(self.s_sens.value())), "size": info.get("groesse", 1.0),
+                             "notices": info.get("notices", 0)})
         self.scan_reset()
         self.scan_bar.set_value(1.0)
+        if self.clips:
+            self.snapshot()
         self.clips = [Clip(a, b, k, bgr_to_pixmap(th) if th is not None else None) for a, b, k, th in res]
         self.sel = None
         self.rebuild_cards(animate=True)
@@ -4494,6 +4858,7 @@ class Window(QMainWindow):
             row.clicked.connect(lambda i=i: self.select(i))
             row.delete.connect(lambda i=i: self.delete(i))
             row.rename.connect(lambda i=i: self.open_rename_clip(i))
+            row.on_hover = lambda on, r=row: self.preview_clip(r, on)
             if animate:                                   # Liste erscheint nacheinander (kurze Staffelung)
                 row.appear = 0.0
                 QTimer.singleShot(min(i, 8) * 45, lambda r=row: self._appear(r))
@@ -4549,6 +4914,7 @@ class Window(QMainWindow):
         i = self.sel if i is None else i
         if i is None or not (0 <= i < len(self.clips)):
             return
+        self.snapshot()
         del self.clips[i]
         self.sel = None
         self.rebuild_cards()
@@ -4564,6 +4930,7 @@ class Window(QMainWindow):
         return QPixmap.fromImage(QImage(small.data, w, h, 3 * w, QImage.Format_RGB888).copy())
 
     def create_clip(self, start, end, kill=None):
+        self.snapshot()
         c = Clip(max(0.0, start), min(self.duration, end), kill if kill is not None else start)
         c.thumb = self.make_thumb()
         self.clips.append(c)
@@ -4587,6 +4954,7 @@ class Window(QMainWindow):
             return
         c = self.clips[self.sel] if self.sel is not None and 0 <= self.sel < len(self.clips) else None
         if c is not None and c.start - 1.0 <= self.pos <= c.end + 1.0:
+            self.snapshot()
             if which == 0:
                 c.start = min(self.pos, c.end - 0.5)
             else:
@@ -4712,6 +5080,7 @@ class Window(QMainWindow):
         card.body.addWidget(le)
 
         def save():
+            self.snapshot()
             c.name = sanitize_name(le.text()) or None
             c.last_name = None
             self.refresh_names()
@@ -4934,6 +5303,7 @@ class Window(QMainWindow):
     def export_done(self, out, items):
         self.exp_all.setEnabled(True)
         n = len(items)
+        self.send_stats({"type": "export", "n": n})
         for c, nm in items:
             c.last_name = nm
         self.set_status(f"{n} Clips exportiert", "ok")
@@ -4956,6 +5326,13 @@ class Window(QMainWindow):
             return super().keyPressEvent(e)
         k = e.key()
         shift = bool(e.modifiers() & Qt.ShiftModifier)
+        ctrl = bool(e.modifiers() & Qt.ControlModifier)
+        if ctrl and k == Qt.Key_Z:
+            self.redo() if shift else self.undo()
+            return
+        if ctrl and k == Qt.Key_Y:
+            self.redo()
+            return
         if k == Qt.Key_Space:
             self.toggle_play()
         elif k == Qt.Key_Left:

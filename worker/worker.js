@@ -145,6 +145,23 @@ export default {
         return J({ ok: true });
       }
 
+      if (m === "POST" && path === "/stats") {
+        const b = await body(req);
+        const s = (await env.KV.get("stats:" + me.name, "json")) || { scans: 0, kills: 0, zero: 0, exports: 0 };
+        if (b.type === "scan") {
+          s.scans += 1;
+          s.kills += Math.max(0, parseInt(b.kills || 0, 10));
+          if (!b.kills) s.zero += 1;
+          s.last_scan = { kills: b.kills || 0, server: String(b.server || "").slice(0, 40), sens: b.sens, size: b.size,
+            notices: b.notices, at: Date.now() };
+        } else if (b.type === "export") {
+          s.exports += Math.max(0, parseInt(b.n || 0, 10));
+        }
+        s.last = Date.now();
+        await env.KV.put("stats:" + me.name, JSON.stringify(s));
+        return J({ ok: true });
+      }
+
       if (m === "POST" && path === "/requests") {
         const b = await body(req);
         const name = String(b.name || "").trim().slice(0, 60);
@@ -219,7 +236,8 @@ export default {
         const out = [];
         for (const k of l.keys) {
           const u = await env.KV.get(k.name, "json");
-          if (u) out.push({ name: k.name.slice(5), role: u.role, label: u.label, created: u.created, disabled: !!u.disabled });
+          if (u) out.push({ name: k.name.slice(5), role: u.role, label: u.label, created: u.created, disabled: !!u.disabled,
+            stats: await env.KV.get("stats:" + k.name.slice(5), "json") });
         }
         return J({ users: out });
       }
@@ -229,6 +247,17 @@ export default {
         const u = await env.KV.get("user:" + name, "json");
         if (!u || u.role === "admin") return J({ error: "Nicht möglich." }, 400);
         u.disabled = !!b.disabled;
+        await env.KV.put("user:" + name, JSON.stringify(u));
+        return J({ ok: true });
+      }
+      if (m === "POST" && path === "/users/password") {
+        const b = await body(req);
+        const name = String(b.name || "").toLowerCase();
+        const u = await env.KV.get("user:" + name, "json");
+        if (!u) return J({ error: "Diesen Benutzer gibt es nicht." }, 404);
+        if (!b.password || String(b.password).length < 6) return J({ error: "Mindestens 6 Zeichen." }, 400);
+        u.salt = rnd(16);
+        u.hash = await hash(String(b.password), u.salt);
         await env.KV.put("user:" + name, JSON.stringify(u));
         return J({ ok: true });
       }

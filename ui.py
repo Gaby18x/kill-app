@@ -1258,6 +1258,7 @@ class Timeline(QWidget):
     seek = Signal(float)
     pick = Signal(int)
     edited = Signal(int)
+    begin_edit = Signal()
     PAD, H_OV = 14, 34
 
     def __init__(self, model, parent=None):
@@ -1423,6 +1424,7 @@ class Timeline(QWidget):
             return
         self.mode = self.near_handle(x)
         if self.mode:
+            self.begin_edit.emit()                   # fuer Strg+Z: Zustand vor dem Ziehen merken
             return
         t = self.t_of(x)
         for i, c in enumerate(m.clips):
