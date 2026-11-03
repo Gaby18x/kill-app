@@ -305,10 +305,13 @@ class Glass(QFrame):
     def __init__(self, parent=None, radius=22, alpha=110, border=True, dialog=False):
         super().__init__(parent)
         self.radius, self.alpha, self.border, self.dialog = radius, alpha, border, dialog
+        self.tint = False
         self.setAttribute(Qt.WA_StyledBackground, False)
 
     def paintEvent(self, e):
-        """Flache Karte im Bento-Stil: ruhige Flaeche, 1-px-Rand, kein Glanz."""
+        """Schwebende Glas-Karte: weicher Verlauf, feiner Rand."""
+        if getattr(self, "ghost", False):
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
@@ -316,12 +319,27 @@ class Glass(QFrame):
         p.setPen(Qt.NoPen)
         if self.dialog:
             p.setBrush(T.dialog_fill)
+            p.drawRoundedRect(r, rad, rad)
         else:
-            p.setBrush(T.card_fill(self.alpha))
-        p.drawRoundedRect(r, rad, rad)
+            base = T.card_fill(self.alpha)
+            g = QLinearGradient(r.topLeft(), r.bottomRight())
+            g.setColorAt(0, QColor(base.red(), base.green(), base.blue(), min(255, int(base.alpha() * 1.55))))
+            g.setColorAt(1, QColor(base.red(), base.green(), base.blue(), int(base.alpha() * 0.7)))
+            p.setBrush(g)
+            p.drawRoundedRect(r, rad, rad)
+            if self.tint:                                   # hervorgehobene Karte: Akzentfarbe laeuft sanft ein
+                tg = QLinearGradient(r.topLeft(), r.bottomRight())
+                tg.setColorAt(0, with_alpha(T.acc, 78 if T.dark else 50))
+                tg.setColorAt(0.75, with_alpha(T.acc, 10))
+                tg.setColorAt(1, with_alpha(T.acc, 0))
+                p.setBrush(tg)
+                p.drawRoundedRect(r, rad, rad)
         if self.border:
+            lg = QLinearGradient(r.topLeft(), r.bottomRight())
+            lg.setColorAt(0, T.line(1.9 if not self.dialog else 1.8))
+            lg.setColorAt(1, T.line(0.7))
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(T.line(1.6 if self.dialog else 1.0), 1.0))
+            p.setPen(QPen(lg, 1.0))
             p.drawRoundedRect(r, rad, rad)
 
 
@@ -392,17 +410,14 @@ class PopButton(QAbstractButton):
         p.scale(s, s)
         p.translate(-c)
         p.setOpacity(1.0 if self.isEnabled() else 0.4)
-        rad = min(r.height() / 2, 13)
+        rad = r.height() / 2
         hv = max(0.0, min(1.0, self.pop))
         k = self.kind
         if k == "accent":
-            g = QLinearGradient(r.topLeft(), r.bottomLeft())
-            g.setColorAt(0, T.acc.lighter(112))
-            g.setColorAt(1, T.acc)
-            p.setBrush(g)
-            p.setPen(QPen(with_alpha(QColor(255, 255, 255), 34), 1))
+            pf, fg = T.pill()
+            p.setBrush(pf.lighter(106) if hv > 0.5 else pf)
+            p.setPen(Qt.NoPen)
             p.drawRoundedRect(r, rad, rad)
-            fg = QColor(T.on_acc)
         elif k == "danger":
             p.setBrush(with_alpha(RED, 50))
             p.setPen(QPen(with_alpha(RED, 140), 1))
@@ -472,11 +487,12 @@ class Segmented(QWidget):
         n = len(self.items)
         w = (self.width() - 8) / n
         hr = QRectF(4 + self.pos * w, 4, w, self.height() - 8)
-        p.setPen(QPen(with_alpha(T.acc, 90), 1))
-        p.setBrush(T.sel_fill())
+        pf, pfg = T.pill()
+        p.setPen(Qt.NoPen)
+        p.setBrush(pf)
         p.drawRoundedRect(hr, hr.height() / 2, hr.height() / 2)
         p.setFont(self.font())
-        base, hi = ink(150), T.acc_text
+        base, hi = ink(150), pfg
         for i, t in enumerate(self.items):
             sel = max(0.0, 1 - abs(self.pos - i))
             c = QColor(int(base.red() + (hi.red() - base.red()) * sel), int(base.green() + (hi.green() - base.green()) * sel),
@@ -989,7 +1005,7 @@ class Timeline(QWidget):
         self.m = model
         self.v0, self.v1 = 0.0, 60.0
         self.mode = None
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(128)
         self.setMouseTracking(True)
         self.setFont(app_font(8.5))
 

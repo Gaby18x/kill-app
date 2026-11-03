@@ -6,6 +6,7 @@ AMBER = QColor("#e8a23a")
 
 PRESETS = {
     "Grau": {"acc": "#5f6575", "acc2": "#8b91a3", "bg": "#8b909c"},
+    "Lime": {"acc": "#c5e15a", "acc2": "#e6f7a0", "bg": "#8a9a4a"},
     "Flieder": {"acc": "#8c79ee", "acc2": "#b49cf8", "bg": "#8c79ee"},
     "Ozean": {"acc": "#3b8df0", "acc2": "#6fd0f5", "bg": "#3b8df0"},
     "Mint": {"acc": "#1fb98c", "acc2": "#6fe3c0", "bg": "#2fb98a"},
@@ -89,7 +90,7 @@ class Theme:
         """Fuellfarbe einer Karte; a ist die alte Glas-Staerke (110..170) und steuert nur die Helligkeit leicht."""
         k = max(0.0, min(1.0, (a - 90) / 120.0))
         if self.dark:
-            return QColor(255, 255, 255, int(9 + 11 * k))
+            return QColor(30, 31, 37, int(150 + 55 * k))        # rauchiges Dunkelglas: bleibt lesbar, auch ueber dem Video
         return QColor(255, 255, 255, int(150 + 85 * k))
 
     def line(self, k=1.0):
@@ -97,6 +98,13 @@ class Theme:
         if self.dark:
             return QColor(255, 255, 255, int(min(255, 24 * k)))
         return QColor(30, 30, 50, int(min(255, 22 * k)))
+
+    def pill(self):
+        """(Fuellung, Schriftfarbe) fuer die hervorgehobene Pille (aktiver Reiter, Haupt-Knopf)."""
+        h, s, l = _hsl(self.acc)
+        if self.dark:
+            return hsl(h, min(s, 0.75) * 0.95, 0.77), QColor("#14161a")
+        return hsl(h, min(s, 0.45), 0.20), QColor("#ffffff")
 
     def acc_bar(self):
         return QColor(self.acc_text) if self.dark else QColor(self.acc)
@@ -128,7 +136,7 @@ class Theme:
         h, s, l = _hsl(self.bg)
         k = self.sk_bg
         if self.dark:
-            return (hsl(h, 0.16 * k, 0.062), hsl(h, 0.16 * k, 0.07), hsl(h, 0.14 * k, 0.058))
+            return (hsl(h, 0.14 * k, 0.040), hsl(h, 0.14 * k, 0.050), hsl(h, 0.12 * k, 0.036))
         return (hsl(h, 0.10 * k, 0.935), hsl(h, 0.10 * k, 0.95), hsl(h, 0.10 * k, 0.93))
 
     def bg_blobs(self):
