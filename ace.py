@@ -2346,6 +2346,9 @@ class Window(QMainWindow):
         who = self.st.get("acct_name", "")
         r = QHBoxLayout()
         r.addWidget(label(f"Angemeldet als {who} ({'Admin' if self.role == 'admin' else 'Benutzer'})", 11, True), 1)
+        pwb = PopButton("Passwort ändern", None, "glass", 40)
+        pwb.clicked.connect(self.open_password)
+        r.addWidget(pwb)
         out = PopButton("Abmelden", None, "glass", 40)
         out.clicked.connect(self.force_logout)
         r.addWidget(out)
@@ -2368,6 +2371,45 @@ class Window(QMainWindow):
                 it.widget().deleteLater()
             elif it.layout():
                 self._clear_layout(it.layout())
+
+    def open_password(self):
+        card = DialogCard("Passwort ändern", "Gib dein altes und ein neues Passwort ein (mindestens 6 Zeichen).", 480)
+        fields = []
+        for t in ("Altes Passwort", "Neues Passwort", "Neues Passwort wiederholen"):
+            card.body.addWidget(label(t, 10.5, True, MUT))
+            e = QLineEdit()
+            e.setEchoMode(QLineEdit.Password)
+            self.style_edit(e)
+            card.body.addWidget(e)
+            fields.append(e)
+        cancel = PopButton("Abbrechen", None, "glass", 40)
+        cancel.clicked.connect(self.overlay.dismiss)
+        go = PopButton("Speichern", "check", "accent", 40)
+        card.btns.addWidget(cancel)
+        card.btns.addWidget(go)
+        tok = self.st.get("acct_token")
+
+        def submit():
+            old, new, rep = (f.text() for f in fields)
+            if len(new) < 6:
+                card.err.setText("Das neue Passwort braucht mindestens 6 Zeichen.")
+                return
+            if new != rep:
+                card.err.setText("Die beiden neuen Passwörter sind nicht gleich.")
+                return
+            go.setEnabled(False)
+            card.err.setText("")
+
+            def work():
+                try:
+                    auth.call("POST", "/password", {"old": old, "password": new}, token=tok)
+                    self.ui(lambda: (self.overlay.dismiss(), self.say("Passwort geändert")))
+                except auth.ApiError as e:
+                    self.ui(lambda m: (card.err.setText(m), go.setEnabled(True)), str(e))
+            threading.Thread(target=work, daemon=True).start()
+        go.clicked.connect(submit)
+        fields[2].returnPressed.connect(submit)
+        self.overlay.present(card)
 
     def open_invite(self):
         card = DialogCard("Einladung erstellen", "Für wen ist der Zugang? Du bekommst einen Download-Link, den du verschicken kannst.", 520)

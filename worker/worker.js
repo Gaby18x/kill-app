@@ -128,6 +128,21 @@ export default {
       if (m === "GET" && path === "/me") return J({ name: me.name, role: me.role });
       if (m === "POST" && path === "/logout") { await env.KV.delete("tok:" + me.token); return J({ ok: true }); }
 
+      if (m === "POST" && path === "/password") {
+        const b = await body(req);
+        if (await throttled(env, "pw:" + me.name)) return J({ error: "Zu viele Versuche. Bitte in 15 Minuten erneut probieren." }, 429);
+        const u = await env.KV.get("user:" + me.name, "json");
+        if (!u || !same(await hash(String(b.old || ""), u.salt), u.hash)) {
+          await fail(env, "pw:" + me.name);
+          return J({ error: "Das alte Passwort stimmt nicht." }, 401);
+        }
+        if (!b.password || String(b.password).length < 6) return J({ error: "Das neue Passwort braucht mindestens 6 Zeichen." }, 400);
+        u.salt = rnd(16);
+        u.hash = await hash(String(b.password), u.salt);
+        await env.KV.put("user:" + me.name, JSON.stringify(u));
+        return J({ ok: true });
+      }
+
       if (m === "GET" && path === "/catalog") {
         const c = await env.KV.get("catalog", "json");
         return J(c || { ver: 0, data: null });
