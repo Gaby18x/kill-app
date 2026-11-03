@@ -73,7 +73,7 @@ BUILTIN_SERVERS = [
     {"id": "bruder", "name": "Bruder", "kind": "bruder", "builtin": True},
     {"id": "standard", "name": "Standard", "kind": "xhit", "builtin": True},
 ]
-KIND_TEXT = {"bruder": "Kill-Meldung mit Text-Prüfung", "notify": "Kill-Meldung (eigene Vorlage)",
+KIND_TEXT = {"bruder": "Info-Meldung „Du hast … getötet“", "notify": "Kill-Meldung (eigene Vorlage)",
              "xhit": "Roter Kill-X in der Bildmitte"}
 AVATARS = [("#8c79ee", "#c9a6f8"), ("#f08fb8", "#f7b6a0"), ("#6fb7f2", "#8c9cf2"), ("#5fcfae", "#7fd0e8"),
            ("#f2b36f", "#f08f8f")]
@@ -3004,7 +3004,7 @@ class Window(QMainWindow):
         le.setMinimumHeight(44)
 
     def open_add_server(self, state=None):
-        st = state or {"name": "", "kind": "Roter Kill-X", "result": None, "avatar": None}
+        st = state or {"name": "", "kind": "Info-Meldung", "result": None, "avatar": None}
         card = DialogCard("Neuer Server", "Lege fest, woran ACE auf diesem Server einen Kill erkennt.")
         card.body.addWidget(label("Name", 10.5, True, MUT))
         name = QLineEdit(st["name"])
@@ -3019,7 +3019,7 @@ class Window(QMainWindow):
         cc.changed.connect(lambda n: st.__setitem__("theme", n))
         card.body.addWidget(cc)
         card.body.addWidget(label("Erkennung", 10.5, True, MUT))
-        seg = Segmented(["Roter Kill-X", "Kill-Meldung"])
+        seg = Segmented(["Info-Meldung", "Kill-Meldung", "Roter Kill-X"])
         seg.set_current(st["kind"])
         card.body.addWidget(seg)
         info = label("", 10, color=MUT, wrap=True)
@@ -3031,13 +3031,17 @@ class Window(QMainWindow):
 
         def kind_changed(_=None):
             st["kind"] = seg.current()
-            x = seg.current() == "Roter Kill-X"
+            cur = seg.current()
+            x = cur != "Kill-Meldung"
             pick.setVisible(not x)
             ok.setVisible(not x)
-            info.setText("Der rote X-Treffer in der Bildmitte (Hitmarker) zählt als Kill. Keine weitere Einrichtung "
-                         "nötig." if x else
-                         "Der Server zeigt bei einem Kill eine Meldung auf dem Bildschirm. Wähle einen Screenshot, auf "
-                         "dem sie zu sehen ist (am besten ein Vollbild), und markiere drei Bereiche.")
+            info.setText({
+                "Info-Meldung": "Empfohlen: lila „Information“-Meldung mit „Du hast … getötet“ (wie bei Bruder). "
+                                "Schnell und zuverlässig – nichts zu markieren.",
+                "Roter Kill-X": "Der rote X-Treffer in der Bildmitte (Hitmarker) zählt als Kill. Keine weitere "
+                                "Einrichtung nötig.",
+            }.get(cur, "Für eine andere Meldung: Wähle einen Screenshot (am besten ein Vollbild) und markiere die "
+                       "ganze Meldung, den ganzen Text und die Kill-Wörter."))
             card.fit()
             self.overlay._center()
         seg.changed.connect(kind_changed)
@@ -3063,6 +3067,8 @@ class Window(QMainWindow):
             sid = uuid.uuid4().hex[:8]
             if seg.current() == "Roter Kill-X":
                 srv = {"id": sid, "name": nm, "kind": "xhit"}
+            elif seg.current() == "Info-Meldung":
+                srv = {"id": sid, "name": nm, "kind": "bruder"}
             else:
                 if not st["result"]:
                     card.err.setText("Bitte zuerst die Kill-Meldung markieren.")
@@ -3303,8 +3309,8 @@ class Window(QMainWindow):
                                            "Überschrift, Symbol und Text)."),
                  ("2 / 3  Ganzer Text", "Ziehe einen Rahmen um den ganzen Text der Meldung – auch um lange Namen, die "
                                         "in die nächste Zeile umbrechen."),
-                 ("3 / 3  Kill-Wörter", "Ziehe einen Rahmen um jedes Wort, das bei JEDEM Kill vorkommt, z. B. „Du hast“ "
-                                        "und „getötet“. Mehrere Wörter möglich – alle müssen später da sein.")]
+                 ("3 / 3  Kill-Wörter", "Ziehe EINZELNE Rahmen – einen eng um „Du hast“ und einen eng um „getötet“. "
+                                        "Keine Namen oder Waffen markieren, nur Wörter, die bei jedem Kill gleich sind.")]
         canvas = PickCanvas(pm)
         card = DialogCard(steps[0][0], steps[0][1], max(600, PickCanvas.MAXW + 64))
         title = card.lay.itemAt(0).widget()
@@ -3367,10 +3373,12 @@ class Window(QMainWindow):
                     fail("Jedes Wort muss innerhalb des Text-Rahmens liegen.")
                     return
             # fester Teil (fuer die Suche) = Teil der Meldung OBERHALB des Textes, sonst links davon
-            if txt[1] - box[1] >= 10:
-                anchor = (box[0], box[1], box[2], max(box[1] + 8, txt[1] - 2))
-            elif txt[0] - box[0] >= 10:
-                anchor = (box[0], box[1], max(box[0] + 8, txt[0] - 2), box[3])
+            top_h, left_w = txt[1] - box[1], txt[0] - box[0]
+            if max(top_h, left_w) >= 20:
+                if top_h >= left_w:
+                    anchor = (box[0], box[1], box[2], txt[1] - 2)
+                else:
+                    anchor = (box[0], box[1], txt[0] - 2, box[3])
             else:
                 fail("Die ganze Meldung muss oben oder links etwas mehr als nur den Text enthalten "
                      "(z. B. Überschrift oder Symbol). Ziehe den ersten Rahmen etwas größer.")

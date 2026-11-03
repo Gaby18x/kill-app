@@ -139,6 +139,8 @@ def verify_text(frame, anchor_xy, ks, words, thr, region=TEXT_REGION):
     H, W = frame.shape[:2]
     y0, y1 = int(max(0, ay + region[0] * ks)), int(min(H, ay + region[1] * ks))
     x0, x1 = int(max(0, ax + region[2] * ks)), int(min(W, ax + region[3] * ks))
+    if y1 - y0 < 4 or x1 - x0 < 4:                       # Bereich liegt (fast) ausserhalb des Bildes
+        return False, {n: -1.0 for n in words}
     reg = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     scores = {}
     for name, t in words.items():
@@ -268,9 +270,12 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             thr = min(0.85, max(0.5, 0.95 - 0.05 * sens))
             ks, region = h / 1080.0, TEXT_REGION_WIDE
         else:
-            ow = 1280
+            ow = 960
             d = os.path.join(DATA_DIR, "servers", server["id"])
             anchor = read_image(os.path.join(d, "anchor.png"))
+            if anchor is None:
+                raise RuntimeError("Für diesen Server fehlt die Vorlage. Bitte die Kill-Meldung neu markieren.")
+            anchor = cv2.cvtColor(anchor, cv2.COLOR_BGR2GRAY)          # Graustufen: schneller und robuster
             words = {f: read_image(os.path.join(d, f), cv2.IMREAD_GRAYSCALE)        # alle Kill-Woerter muessen da sein
                      for f in sorted(os.listdir(d)) if f.startswith("word") and f.endswith(".png")}
             words = {n: w_ for n, w_ in words.items() if w_ is not None}
@@ -342,7 +347,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
 
         def x_near(cap_, t):
             """Zusatz-Sicherheit: war kurz vor der Meldung das rote Kill-X in der Bildmitte zu sehen?"""
-            for dt in np.arange(-1.5, 0.35, 0.15):
+            for dt in (-1.2, -0.9, -0.6, -0.3, 0.0):
                 tt = t + float(dt)
                 if tt < 0 or tt > duration - 0.05:
                     continue
@@ -391,9 +396,12 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     if mx >= thr:
                         return True, ((ml[0] + pad) * w / ow, (ml[1] + pad) * w / ow)
                 return False, None
-            _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(fr, tpl, cv2.TM_CCOEFF_NORMED))
+            g_ = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+            if g_.shape[0] < tpl.shape[0] or g_.shape[1] < tpl.shape[1]:
+                return False, None
+            _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(g_, tpl, cv2.TM_CCOEFF_NORMED))
             if mx >= 0.35:
-                collect(fr.copy())
+                collect(g_)
             return (True, (ml[0] * w / ow, ml[1] * w / ow)) if mx >= thr else (False, None)
 
         # --- Schnellsuche: nur Keyframes ansehen (die Meldung steht mehrere Sekunden, also wird sie getroffen)
