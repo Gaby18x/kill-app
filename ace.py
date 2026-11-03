@@ -641,6 +641,11 @@ class SkeletonRow(QWidget):
 
 class VideoWidget(QWidget):
     """Vorschau-Flaeche mit Zeit- und Kill-Anzeige."""
+    double = Signal()
+
+    def mouseDoubleClickEvent(self, e):
+        if self.has_video:
+            self.double.emit()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1116,6 +1121,8 @@ class Window(QMainWindow):
         self.server = None
         self.path = None
         self.theme_override = None
+        self.fs = False
+        self._was_max = True
         self.role = None                       # None = ohne Konto-Server (alles erlaubt), "admin" oder "user"
         self.login_open = False
         self.pending_invite = ""
@@ -1236,6 +1243,25 @@ class Window(QMainWindow):
         self.toast.show_text(text, color)
 
     # ---- rahmenloses Fenster: Verschieben, Groesse aendern, Maximieren
+    def toggle_fullscreen(self):
+        """Vollbild-Bearbeitung: nur Video, Clips, Zeitleiste und Player-Leiste."""
+        if not self.has_video or self.stack.cur != 1:
+            return
+        on = not self.fs
+        self.fs = on
+        if on:
+            self._was_max = self.isMaximized()
+            self.showFullScreen()
+        else:
+            self.showMaximized() if self._was_max else self.showNormal()
+        for w in (self.sidebar, self.right_col, self.pill, self.ed_chip, self.ed_title, self.count_lbl, self.total_lbl):
+            w.setVisible(not on)
+        self.bg.layout().setContentsMargins(*((20, 46, 20, 20) if on else (34, 46, 34, 34)))
+        self.fs_btn.icon_name = "shrink" if on else "expand"
+        self.fs_btn.setToolTip("Vollbild beenden (Esc)" if on else "Vollbild (F)")
+        self.fs_btn.update()
+        QTimer.singleShot(60, lambda: self.player and self.player.request_seek(self.pos))
+
     def toggle_max(self):
         if self.isMaximized():
             self.showNormal()
@@ -1424,6 +1450,8 @@ class Window(QMainWindow):
 
     def go_page(self, i, animate=True):
         cur = self.stack.cur
+        if self.fs and i != 1:
+            self.toggle_fullscreen()
         if i == 0 and self.theme_override:
             self.set_override(None)
         if cur == 1 and i != 1 and self.playing:
@@ -1875,7 +1903,7 @@ class Window(QMainWindow):
         ml.setSpacing(12)
         hdr = QHBoxLayout()
         hdr.setSpacing(12)
-        pill = Glass(radius=24, alpha=170)
+        pill = self.pill = Glass(radius=24, alpha=170)
         pill.setFixedHeight(48)
         pl = QHBoxLayout(pill)
         pl.setContentsMargins(16, 0, 8, 0)
@@ -1898,7 +1926,8 @@ class Window(QMainWindow):
         ml.addLayout(hdr)
 
         tr = QHBoxLayout()
-        tr.addWidget(label("Deine Clips", 22, True))
+        self.ed_title = label("Deine Clips", 22, True)
+        tr.addWidget(self.ed_title)
         self.count_lbl = label("0", 9.5, True, "badge")
         tr.addWidget(self.count_lbl)
         tr.addStretch(1)
@@ -1911,6 +1940,7 @@ class Window(QMainWindow):
         ml.addLayout(mid, 1)
         self.video = VideoWidget()
         self.video.setMinimumSize(320, 220)
+        self.video.double.connect(self.toggle_fullscreen)
         self.video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         mid.addWidget(self.video, 1)
         cta = QWidget(self.video)
@@ -1966,6 +1996,7 @@ class Window(QMainWindow):
         # ---- rechte Spalte
         rw = QWidget()
         rw.setFixedWidth(304)
+        self.right_col = rw
         rl = QVBoxLayout(rw)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(14)
@@ -2062,6 +2093,10 @@ class Window(QMainWindow):
         rr.setSpacing(10)
         rr.setContentsMargins(0, 0, 0, 0)
         rr.addStretch(1)
+        self.fs_btn = PopButton("", "expand", "glass", 38, icon_only=True)
+        self.fs_btn.setToolTip("Vollbild (F)")
+        self.fs_btn.clicked.connect(self.toggle_fullscreen)
+        rr.addWidget(self.fs_btn)
         self.loop_btn = PopButton("", "refresh", "glass", 38, icon_only=True)
         self.loop_btn.setToolTip("Clip in der Vorschau wiederholen")
         rr.addWidget(self.loop_btn)
@@ -2135,7 +2170,7 @@ class Window(QMainWindow):
         v.addWidget(g)
         g, gl = panel("Tastenkürzel", alpha=150)
         for k, t in (("Leertaste", "Play / Pause"), ("← →", "±1 Sekunde (Shift: 1 Bild)"),
-                     ("↑ ↓", "Vorheriger / nächster Clip"), ("I / O", "Start / Ende setzen"), ("Entf", "Clip löschen")):
+                     ("↑ ↓", "Vorheriger / nächster Clip"), ("F", "Vollbild"), ("I / O", "Start / Ende setzen"), ("Entf", "Clip löschen")):
             rr = QHBoxLayout()
             kl = label(k, 10.5, True, ACC_TEXT)
             kl.setFixedWidth(110)
@@ -3417,6 +3452,9 @@ class Window(QMainWindow):
 
     # ------------------------------------------------------------ Tasten
     def keyPressEvent(self, e):
+        if self.fs and e.key() == Qt.Key_Escape and not self.overlay.isVisible():
+            self.toggle_fullscreen()
+            return
         if self.overlay.isVisible():
             if e.key() == Qt.Key_Escape and not self.login_open:
                 self.overlay.dismiss()
@@ -3435,6 +3473,8 @@ class Window(QMainWindow):
             self.step_clip(-1)
         elif k == Qt.Key_Down:
             self.step_clip(1)
+        elif k == Qt.Key_F:
+            self.toggle_fullscreen()
         elif k == Qt.Key_I:
             self.set_edge(0)
         elif k == Qt.Key_O:

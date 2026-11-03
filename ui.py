@@ -146,6 +146,12 @@ def paint_icon(p, name, rect, color, lw=1.9):
         p.drawLine(P(6, 12), P(18, 12))
     elif name == "square":
         p.drawRoundedRect(QRectF(6.5, 6.5, 11, 11), 2.4, 2.4)
+    elif name == "expand":
+        for (x, y, dx, dy) in ((6, 6, 1, 1), (18, 6, -1, 1), (6, 18, 1, -1), (18, 18, -1, -1)):
+            p.drawPolyline(QPolygonF([P(x + 5 * dx, y), P(x, y), P(x, y + 5 * dy)]))
+    elif name == "shrink":
+        for (x, y, dx, dy) in ((10, 10, -1, -1), (14, 10, 1, -1), (10, 14, -1, 1), (14, 14, 1, 1)):
+            p.drawPolyline(QPolygonF([P(x + 4.5 * dx, y), P(x, y), P(x, y + 4.5 * dy)]))
     elif name == "restore":
         p.drawRoundedRect(QRectF(5.5, 8.5, 10, 10), 2.2, 2.2)
         p.drawPolyline(QPolygonF([P(9, 8.5), P(9, 5.5), P(18.5, 5.5), P(18.5, 15), P(15.5, 15)]))
