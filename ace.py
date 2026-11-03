@@ -2115,6 +2115,18 @@ class Window(QMainWindow):
             w.update()
         self.save_settings()
 
+    def gate_theme(self, on):
+        """Anmelde- und Update-Fenster immer im Standard-Grau zeigen; danach wieder das gewaehlte Thema."""
+        if on:
+            T.configure(False, DEFAULT["acc"], DEFAULT["acc2"], DEFAULT["bg"])
+        else:
+            T.configure(self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"])
+        QApplication.instance().setStyleSheet(T.qss())
+        self.bg.refresh()
+        self.pill_icon.setPixmap(icon_pixmap("film", T.icon, 20))
+        for w in self.findChildren(QWidget):
+            w.update()
+
     def pick_color(self, key, title):
         c = QColorDialog.getColor(QColor(self.st[key]), self, title)
         if c.isValid():
@@ -2173,6 +2185,7 @@ class Window(QMainWindow):
 
     def show_login(self, invite="", note=""):
         self.login_open = True
+        self.gate_theme(True)
         card = DialogCard("Willkommen bei ACE", "Melde dich an, um die App zu nutzen.", 470)
         seg = Segmented(["Anmelden", "Neues Konto"])
         card.body.addWidget(seg)
@@ -2232,7 +2245,7 @@ class Window(QMainWindow):
         go.clicked.connect(submit)
         for w_ in (inv, user, pw):
             w_.returnPressed.connect(submit)
-        self.overlay.present(card)
+        self.overlay.present(card, opaque=True)
         self.controls.raise_()
 
     def on_login_ok(self, name, role, token, offline, dismiss=False):
@@ -2242,6 +2255,7 @@ class Window(QMainWindow):
         if self.login_open or dismiss:
             self.login_open = False
             self.overlay.dismiss()
+            self.gate_theme(False)
         self.save_settings()
         self.refresh_account_panel()
         self.render_servers()
@@ -2450,6 +2464,7 @@ class Window(QMainWindow):
 
     def show_forced_update(self, version, url):
         self.update_url = url
+        self.gate_theme(True)
         self.login_open = True                       # sperrt Esc und Schliessen des Fensters per Klick daneben
         card = DialogCard("Neues Update verfügbar", f"ACE v{version} ist da. Du kannst die App erst wieder "
                           "benutzen, wenn du das Update installiert hast. Es dauert nur einen Moment, danach "

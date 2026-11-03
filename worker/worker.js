@@ -88,12 +88,10 @@ export default {
 
       if (m === "POST" && path === "/setup") {
         const b = await body(req);
-        if (await env.KV.get("admin_exists")) return J({ error: "Es gibt schon einen Admin." }, 403);
         if (!env.ADMIN_KEY || !same(String(b.key || ""), env.ADMIN_KEY)) return J({ error: "Falscher Admin-Schlüssel." }, 403);
         const e = checkCreds(b.username, b.password);
         if (e) return J({ error: e }, 400);
         await createUser(env, b.username.toLowerCase(), b.password, "admin", "Admin");
-        await env.KV.put("admin_exists", "1");
         return J({ ok: true });
       }
 
