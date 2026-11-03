@@ -1693,10 +1693,17 @@ class VideoWidget(QWidget):
         if self.img is not None and self.has_video:
             dpr = self.devicePixelRatioF()
             iw, ih = self.img.width() / dpr, self.img.height() / dpr
+            sc = min(1.0, a.width() / max(1.0, iw), a.height() / max(1.0, ih))   # nie ueber den Rand hinaus
+            iw, ih = iw * sc, ih * sc
             ir = QRectF(a.x() + (a.width() - iw) / 2, a.y() + (a.height() - ih) / 2, iw, ih)
+            p.setClipRect(a)
             if iw < a.width() - 1 or ih < a.height() - 1:       # schwarze Raender (Letterbox)
                 p.fillRect(a, QColor(0, 0, 0))
-            p.drawImage(ir.topLeft(), self.img)
+            if sc < 0.999:
+                p.drawImage(ir, self.img)
+            else:
+                p.drawImage(ir.topLeft(), self.img)
+            p.setClipping(False)
         else:
             g = QLinearGradient(a.topLeft(), a.bottomRight())
             c0, c1 = T.video_stops()
@@ -2024,6 +2031,42 @@ class PickCanvas(QWidget):
         self.update()
 
 
+class ClipStrip(QWidget):
+    """Im Vollbild: schmale Leiste oben mit allen Clips zum schnellen Springen."""
+
+    def __init__(self, win, parent=None):
+        super().__init__(parent)
+        self.win = win
+        self.lay = QHBoxLayout(self)
+        self.lay.setContentsMargins(6, 0, 6, 0)
+        self.lay.setSpacing(4)
+        self.hide()
+
+    def rebuild(self):
+        while self.lay.count():
+            it = self.lay.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        for i, c in enumerate(self.win.clips[:14]):
+            b = PopButton(f"{i + 1:02d}  {fmt_short(c.kill)}", None,
+                          "accent" if i == self.win.sel else "dark", 30)
+            b.on_dark = True
+            b.setFont(app_font(8.5, True))
+            b.clicked.connect(lambda _=False, i=i: (self.win.select(i), self.rebuild()))
+            self.lay.addWidget(b)
+        if len(self.win.clips) > 14:
+            self.lay.addWidget(label(f"+{len(self.win.clips) - 14}", 9, True, "onvideo2"))
+        self.adjustSize()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 2.5, -0.5, -2.5)
+        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
+        p.setBrush(QColor(8, 9, 10, 175))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+
+
 class EditorCanvas(QWidget):
     """Editor-Seite: links Clip-Spalte, Mitte grosse Video-Buehne mit Titel und Bedienung darauf,
     unten die Zeitleiste, rechts Suche und Export (Aufbau wie im Vorbild)."""
@@ -2061,6 +2104,11 @@ class EditorCanvas(QWidget):
         hx, hy, hw, hh = int(hero.x()), int(hero.y()), int(hero.width()), int(hero.height())
         if vis("title"):
             p["title"].setGeometry(hx + 26, hy + 22, min(620, hw - 200), 112)
+        cs = p.get("strip")
+        if cs is not None and vis("strip"):
+            cs.adjustSize()
+            sw = min(cs.sizeHint().width(), hw - 200)
+            cs.setGeometry(hx + 20, hy + 18, sw, 46)
         cl, cr = p["ctrl_l"], p["ctrl_r"]
         cl.adjustSize()
         cr.adjustSize()
@@ -2073,7 +2121,7 @@ class EditorCanvas(QWidget):
             uw = min(520, hw - 40)
             k_ = max(0.0, min(1.2, ub.k))
             ub.setGeometry(int(hx + (hw - uw) / 2 + ub.shake), int(by - 26 - 14 - 52 + 18 * (1 - k_)), uw, 52)
-        for n in ("left", "right", "tl", "title", "ctrl_l", "ctrl_r", "seek", "unsaved"):
+        for n in ("left", "right", "tl", "title", "ctrl_l", "ctrl_r", "seek", "unsaved", "strip"):
             if n in p and vis(n):
                 p[n].raise_()
 
@@ -2608,7 +2656,20 @@ class Window(QMainWindow):
         self.fs_btn.icon_name = "shrink" if on else "expand"
         self.fs_btn.setToolTip("Vollbild beenden (Esc)" if on else "Vollbild (F)")
         self.fs_btn.update()
-        QTimer.singleShot(60, lambda: self.player and self.player.request_seek(self.pos))
+        self.clip_strip.setVisible(on and bool(self.clips))
+        self.clip_strip.rebuild()
+        self.page_editor.place()
+        QTimer.singleShot(150, self._fs_refresh)
+        QTimer.singleShot(450, self._fs_refresh)          # nach dem Umschalten des Fensters noch einmal
+
+    def _fs_refresh(self):
+        """Nach Vollbild an/aus: Bild in der neuen Groesse holen (sonst bleibt ein altes, zu grosses Bild stehen)."""
+        self.page_editor.place()
+        if self.player:
+            self.player.size = self.video_size()
+            if not self.playing:
+                self.player.request_seek(self.pos)
+        self.video.update()
 
     def toggle_max(self):
         if self.isMaximized():
@@ -3667,8 +3728,10 @@ class Window(QMainWindow):
         rl.addStretch(1)
 
         self.unsaved = UnsavedBar(cv, lambda: self.export(False))
+        self.clip_strip = ClipStrip(self, cv)
         cv.parts = {"video": self.video, "title": tb, "left": left, "right": rw, "tl": tlc,
-                    "ctrl_l": ctl, "ctrl_r": ctr, "seek": self.seekbar, "unsaved": self.unsaved}
+                    "ctrl_l": ctl, "ctrl_r": ctr, "seek": self.seekbar, "unsaved": self.unsaved,
+                    "strip": self.clip_strip}
         self.rebuild_cards()
         return cv
 
@@ -5208,6 +5271,10 @@ class Window(QMainWindow):
         self.total_lbl.setText(fmt_short(total) if self.clips else "0:00")
         self.exp_all.setText(f"Alle exportieren ({len(self.clips)})" if self.clips else "Alle exportieren")
         self.update_unsaved()
+        if self.fs and hasattr(self, "clip_strip"):
+            self.clip_strip.setVisible(bool(self.clips))
+            self.clip_strip.rebuild()
+            self.page_editor.place()
         self.timeline.update()
 
     @staticmethod
