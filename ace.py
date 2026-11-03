@@ -1715,54 +1715,125 @@ def icon_pixmap(name, color, size=20, lw=1.8):
     return pm
 
 
+def theme_from(value):
+    """Server-Farbe -> (acc, acc2, bg). Erlaubt Namen der Farbthemen und freie Farben (#rrggbb)."""
+    if not value:
+        return None
+    if value in PRESETS:
+        p = PRESETS[value]
+        return p["acc"], p["acc2"], p["bg"]
+    c = QColor(value)
+    if not c.isValid():
+        return None
+    h, s, l = c.hslHueF(), c.hslSaturationF(), c.lightnessF()
+    h = 0.0 if h < 0 else h
+    acc2 = QColor.fromHslF(h, max(0.0, s * 0.85), min(0.92, l + 0.14))
+    return c.name(), acc2.name(), c.name()
+
+
 class ColorChoice(QWidget):
-    """Reihe runder Farben zum Anklicken (leer = Standard). Nur der Admin sieht sie im Server-Dialog."""
+    """Freie Farbpalette fuer Server (nur fuer den Admin): Farbfeld + Helligkeit, dazu "Keine Farbe"."""
     changed = Signal(str)
+    H = 132
 
     def __init__(self, current="", parent=None):
         super().__init__(parent)
-        self.cur = current if current in PRESETS else ""
-        self.names = [""] + list(PRESETS)
-        self.setFixedHeight(66)
-        self.setCursor(Qt.PointingHandCursor)
+        tf = theme_from(current)
+        self.cur = QColor(tf[0]).name() if tf else ""
+        self.setFixedHeight(self.H + 40)
+        self.setCursor(Qt.CrossCursor)
+        self._drag = False
+        self._field = None
 
-    def _rect(self, i):
-        return QRectF(2 + i * 40, 4, 30, 30)
+    def _none_rect(self):
+        return QRectF(0, self.H + 10, 118, 26)
+
+    def _area(self):
+        return QRectF(0, 0, self.width(), self.H)
+
+    def _pick(self, pos):
+        a = self._area()
+        x = max(0.0, min(1.0, (pos.x() - a.left()) / a.width()))
+        y = max(0.0, min(1.0, (pos.y() - a.top()) / a.height()))
+        # oben: kraeftig & hell, unten: dunkler
+        c = QColor.fromHslF(x * 0.999, 0.78 - 0.18 * y, 0.70 - 0.38 * y)
+        self.cur = c.name()
+        self.changed.emit(self.cur)
+        self.update()
 
     def mousePressEvent(self, e):
-        for i, n in enumerate(self.names):
-            if self._rect(i).adjusted(-5, -5, 5, 5).contains(e.position()):
-                self.cur = n
-                self.changed.emit(n)
-                self.update()
-                return
+        if self._none_rect().contains(e.position()):
+            self.cur = ""
+            self.changed.emit("")
+            self.update()
+            return
+        if self._area().contains(e.position()):
+            self._drag = True
+            self._pick(e.position())
+
+    def mouseMoveEvent(self, e):
+        if self._drag:
+            self._pick(e.position())
+
+    def mouseReleaseEvent(self, e):
+        self._drag = False
+
+    def _render_field(self, w, h):
+        from PySide6.QtGui import QImage
+        img = QImage(max(1, w), max(1, h), QImage.Format_RGB32)
+        for yy in range(h):
+            y = yy / max(1, h - 1)
+            for xx in range(w):
+                c = QColor.fromHslF(xx / max(1, w) * 0.999, 0.78 - 0.18 * y, 0.70 - 0.38 * y)
+                img.setPixel(xx, yy, c.rgb())
+        return QPixmap.fromImage(img)
 
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        for i, n in enumerate(self.names):
-            r = self._rect(i)
-            if n:
-                pr = PRESETS[n]
-                g = QLinearGradient(r.topLeft(), r.bottomRight())
-                g.setColorAt(0, QColor(pr["acc2"]))
-                g.setColorAt(1, QColor(pr["acc"]))
-                p.setPen(Qt.NoPen)
-                p.setBrush(g)
-                p.drawEllipse(r)
-            else:
-                p.setPen(QPen(ink(110), 1.6))
-                p.setBrush(Qt.NoBrush)
-                p.drawEllipse(r.adjusted(1, 1, -1, -1))
-                p.drawLine(r.bottomLeft() + QPointF(7, -7), r.topRight() + QPointF(-7, 7))
-            if n == self.cur:
-                p.setBrush(Qt.NoBrush)
-                p.setPen(QPen(ink(230), 2))
-                p.drawEllipse(r.adjusted(-4, -4, 4, 4))
-        p.setPen(ink(150))
-        p.setFont(app_font(9.5))
-        p.drawText(QRectF(0, 40, self.width(), 22), Qt.AlignLeft | Qt.AlignVCenter,
-                   self.cur or "Standard – wie in den Einstellungen")
+        a = self._area()
+        size = (int(a.width() / 3), int(a.height() / 3))
+        if self._field is None or self._field.size().width() != size[0]:
+            self._field = self._render_field(*size)
+        path = QPainterPath()
+        path.addRoundedRect(a, 12, 12)
+        p.save()
+        p.setClipPath(path)
+        p.drawPixmap(a, self._field, QRectF(0, 0, self._field.width(), self._field.height()))
+        p.restore()
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(a.adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
+        if self.cur:                                   # Markierung der gewaehlten Farbe
+            c = QColor(self.cur)
+            hh = c.hslHueF() if c.hslHueF() >= 0 else 0.0
+            y = max(0.0, min(1.0, (0.70 - c.lightnessF()) / 0.38))
+            pt = QPointF(a.left() + hh * a.width(), a.top() + y * a.height())
+            p.setPen(QPen(QColor(255, 255, 255), 2.2))
+            p.setBrush(c)
+            p.drawEllipse(pt, 8, 8)
+        # "Keine Farbe" als schlanke Pille
+        nr = self._none_rect()
+        sel = not self.cur
+        p.setPen(QPen(ink(200 if sel else 70), 1))
+        p.setBrush(ink(18) if sel else Qt.NoBrush)
+        p.drawRoundedRect(nr, 13, 13)
+        cr = QRectF(nr.left() + 9, nr.center().y() - 6, 12, 12)
+        p.setPen(QPen(ink(150), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(cr)
+        p.drawLine(QPointF(cr.left() + 2.6, cr.bottom() - 2.6), QPointF(cr.right() - 2.6, cr.top() + 2.6))
+        p.setPen(ink(220 if sel else 160))
+        p.setFont(app_font(9))
+        p.drawText(QRectF(nr.left() + 28, nr.top(), nr.width() - 30, nr.height()), Qt.AlignVCenter, "Keine Farbe")
+        # Vorschau der gewaehlten Farbe
+        if self.cur:
+            sw = QRectF(nr.right() + 12, nr.top() + 3, 20, 20)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(self.cur))
+            p.drawEllipse(sw)
+            p.setPen(ink(160))
+            p.drawText(QRectF(sw.right() + 8, nr.top(), 120, nr.height()), Qt.AlignVCenter, QColor(self.cur).name().upper())
 
 
 class DialogCard(Glass):
@@ -2977,6 +3048,10 @@ class Window(QMainWindow):
         cc = ColorChoice(self.st.get("themes", {}).get(s["id"], ""))
         cc.changed.connect(lambda n: ast.__setitem__("theme", n))
         card.body.addWidget(cc)
+        tv = self.template_view(s)
+        if tv is not None:
+            card.body.addWidget(label("Erkennungs-Vorlage (danach wird gesucht)", 10.5, True, MUT))
+            card.body.addWidget(tv)
         if s["kind"] == "notify":
             pick = PopButton("Kill-Meldung neu markieren …", "crosshair", "glass", 42)
 
@@ -3015,6 +3090,38 @@ class Window(QMainWindow):
         card.btns.addWidget(cancel)
         card.btns.addWidget(sv)
         self.overlay.present(card)
+
+    def template_view(self, s):
+        """Zeigt die Bilder, an denen die Kill-Meldung dieses Servers erkannt wird."""
+        items = []
+        if s["kind"] == "bruder":
+            items.append(("Beispiel-Meldung", resource("profiles", "bruder_notify.png")))
+        elif s["kind"] == "notify":
+            d = os.path.join(core.DATA_DIR, "servers", s["id"])
+            items += [("Fester Teil (Erkennung)", os.path.join(d, "anchor.png")),
+                      ("Kill-Wort (Prüfung)", os.path.join(d, "word.png"))]
+        else:
+            return label("Roter Kill-X in der Bildmitte – keine Vorlage nötig.", 9.5, color=MUT)
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+        for cap, path in items:
+            col = QVBoxLayout()
+            col.setSpacing(4)
+            im = QLabel()
+            pm = QPixmap(path)
+            if pm.isNull():
+                im.setText("fehlt")
+                im.setProperty("role", "muted")
+            else:
+                im.setPixmap(pm.scaled(220, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            im.setStyleSheet(f"background: {T.ink(18).name(QColor.HexArgb)}; border-radius: 8px; padding: 6px;")
+            col.addWidget(im)
+            col.addWidget(label(cap, 8.5, color=MUT))
+            row.addLayout(col)
+        row.addStretch(1)
+        return box
 
     def _edit_after_pick(self, s, name, res):
         srv = self.write_notify_server(s["id"], name or s["name"], res)
@@ -3504,7 +3611,7 @@ class Window(QMainWindow):
 
     def set_server_theme(self, sid, name):
         d = self.st.setdefault("themes", {})
-        if name in PRESETS:
+        if theme_from(name):
             d[sid] = name
         else:
             d.pop(sid, None)
@@ -3512,9 +3619,9 @@ class Window(QMainWindow):
             self.set_override(d.get(sid))
 
     def theme_colors(self):
-        if self.theme_override in PRESETS:
-            p = PRESETS[self.theme_override]
-            return self.st["dark"], p["acc"], p["acc2"], p["bg"]
+        tf = theme_from(self.theme_override)
+        if tf:
+            return (self.st["dark"],) + tf
         return self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"]
 
     def _repaint_theme(self, qss=True, bg=True):
@@ -3528,7 +3635,7 @@ class Window(QMainWindow):
 
     def set_override(self, name):
         """Serverfarbe weich einblenden (name leer = Farbe aus den Einstellungen)."""
-        name = name if name in PRESETS else None
+        name = name if theme_from(name) else None
         if name == self.theme_override:
             return
         self.theme_override = name

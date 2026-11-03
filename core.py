@@ -334,14 +334,44 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             return 1.0
 
         good_scale = [1.0]
+        x_half = max(20, int(60 * h / 1080))
+
+        def x_near(cap_, t):
+            """Zusatz-Sicherheit: war kurz vor der Meldung das rote Kill-X in der Bildmitte zu sehen?"""
+            for dt in np.arange(-1.5, 0.35, 0.15):
+                tt = t + float(dt)
+                if tt < 0 or tt > duration - 0.05:
+                    continue
+                cap_.set(cv2.CAP_PROP_POS_FRAMES, int(round(tt * fps)))
+                ok_, f_ = cap_.read()
+                if not ok_:
+                    continue
+                cy, cx = f_.shape[0] // 2, f_.shape[1] // 2
+                roi = cv2.resize(f_[cy - x_half:cy + x_half, cx - x_half:cx + x_half], (120, 120),
+                                 interpolation=cv2.INTER_AREA)
+                if is_hitmarker(roi, 40):
+                    return True
+            return False
+
+        def verify_or_x(cap_, fr, loc, t):
+            """Text muss passen. Ist der Text nur knapp zu unsicher, entscheidet das rote X mit."""
+            if verify(fr, loc):
+                return True
+            return best_text[0] >= text_thr - 0.08 and x_near(cap_, t)
+
+        best_text = [0.0]
 
         def verify(fr, loc):
             """Text-Pruefung ("Du hast" UND "getoetet" muessen da sein). Probiert mehrere Groessen, damit auch
             Aufnahmen mit anderer Aufloesung / HUD-Groesse sicher erkannt werden; die passende Groesse wird gemerkt."""
             order = [good_scale[0]] + [s for s in (1.0, 0.95, 1.05, 0.9, 1.1, 0.85, 1.15, 0.8, 1.2, 0.75, 1.27)
                                        if abs(s - good_scale[0]) > 1e-6]
+            best_text[0] = 0.0
             for s_ in order:
-                if verify_text(fr, loc, ks * s_, words, text_thr, region)[0]:
+                ok_, sc_ = verify_text(fr, loc, ks * s_, words, text_thr, region)
+                if sc_:
+                    best_text[0] = max(best_text[0], min(sc_.values()))
+                if ok_:
                     good_scale[0] = s_
                     return True
             return False
@@ -448,7 +478,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     caps_open.append(c)
                 c.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
                 ok, fr = c.read()
-                return item if ok and verify(fr, loc) else None
+                return item if ok and verify_or_x(c, fr, loc, t) else None
             with ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 2))) as ex:
                 hits = [r for r in ex.map(check, khits) if r is not None]
             for c in caps_open:
@@ -529,7 +559,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     continue
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
                 ok, fr = cap.read()
-                if ok and verify(fr, near):
+                if ok and verify_or_x(cap, fr, near, t):
                     ok_any = True
                     break
             if ok_any:
