@@ -1638,37 +1638,74 @@ class VideoWidget(QWidget):
         self.arr = rgb
         self.img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         self.img.setDevicePixelRatio(self.devicePixelRatioF())
-        self.update()
+        a = self.area().toAlignedRect()
+        self.update(a)                                  # nur den Videobereich neu zeichnen
 
-    def paintEvent(self, e):
-        p = QPainter(self)
+    _ov = None
+    _ov_key = None
+
+    def _overlay(self, a):
+        """Alles ausser dem Bild selbst (Ecken, Abdunklung, Rand) einmal vorbereiten - spart viel Zeit pro Bild."""
+        bg = getattr(Background, "instance", None)
+        key = (int(a.width()), int(a.height()), int(a.x()), int(a.y()), T.dark, T.acc.name(),
+               id(getattr(bg, "_pm", None)), self.devicePixelRatioF())
+        if self._ov is not None and self._ov_key == key:
+            return self._ov
+        dpr = self.devicePixelRatioF()
+        pm = QPixmap(int(a.width() * dpr), int(a.height() * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
-        a = self.area()
-        r = a.adjusted(0.5, 0.5, -0.5, -0.5)
-        path = QPainterPath()
-        path.addRoundedRect(r, 28, 28)
-        p.setClipPath(path)
-        g = QLinearGradient(r.topLeft(), r.bottomRight())
-        c0, c1 = T.video_stops()
-        g.setColorAt(0, c0)
-        g.setColorAt(1, c1)
-        p.fillRect(a, g)
-        if self.img is not None and self.has_video:
-            dpr = self.devicePixelRatioF()
-            iw, ih = self.img.width() / dpr, self.img.height() / dpr
-            p.drawImage(QPointF(a.x() + (a.width() - iw) / 2, a.y() + (a.height() - ih) / 2), self.img)
-        # weiche Abdunklung oben (Titel) und unten (Bedienung), damit alles auf jedem Bild lesbar bleibt
-        sh = QLinearGradient(0, r.top(), 0, r.bottom())
+        r = QRectF(0, 0, a.width(), a.height())
+        rr = r.adjusted(0.5, 0.5, -0.5, -0.5)
+        # Ecken: Fensterhintergrund ausserhalb der Rundung
+        outer = QPainterPath()
+        outer.addRect(r)
+        inner = QPainterPath()
+        inner.addRoundedRect(rr, 28, 28)
+        corners = outer.subtracted(inner)
+        if bg is not None and getattr(bg, "_pm", None) is not None:
+            off = self.mapTo(bg, a.topLeft().toPoint())
+            d = bg._pm.devicePixelRatio()
+            p.save()
+            p.setClipPath(corners)
+            p.drawPixmap(r, bg._pm, QRectF(off.x() * d, off.y() * d, a.width() * d, a.height() * d))
+            p.restore()
+        sh = QLinearGradient(0, 0, 0, r.height())
         sh.setColorAt(0, QColor(0, 0, 0, 150))
         sh.setColorAt(0.28, QColor(0, 0, 0, 0))
         sh.setColorAt(0.72, QColor(0, 0, 0, 0))
         sh.setColorAt(1, QColor(0, 0, 0, 160))
+        p.setClipPath(inner)
         p.fillRect(r, sh)
         p.setClipping(False)
         p.setPen(QPen(T.line(1.6), 1.0))
         p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(r, 28, 28)
+        p.drawRoundedRect(rr, 28, 28)
+        p.end()
+        self._ov, self._ov_key = pm, key
+        return pm
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        a = self.area()
+        if self.img is not None and self.has_video:
+            dpr = self.devicePixelRatioF()
+            iw, ih = self.img.width() / dpr, self.img.height() / dpr
+            ir = QRectF(a.x() + (a.width() - iw) / 2, a.y() + (a.height() - ih) / 2, iw, ih)
+            if iw < a.width() - 1 or ih < a.height() - 1:       # schwarze Raender (Letterbox)
+                p.fillRect(a, QColor(0, 0, 0))
+            p.drawImage(ir.topLeft(), self.img)
+        else:
+            g = QLinearGradient(a.topLeft(), a.bottomRight())
+            c0, c1 = T.video_stops()
+            g.setColorAt(0, c0)
+            g.setColorAt(1, c1)
+            p.fillRect(a, g)
+        p.drawPixmap(a.topLeft(), self._overlay(a))
         if self.has_video:
+            p.setRenderHint(QPainter.Antialiasing)
             p.setFont(app_font(10, True))
             tw = QFontMetrics(p.font()).horizontalAdvance(self.time_text) + 24
             tr = QRectF(a.right() - 22 - tw, a.y() + 24, tw, 28)
