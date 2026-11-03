@@ -1449,12 +1449,7 @@ class Window(QMainWindow):
             add.clicked.connect(lambda: self.open_add_server())
             grid.addWidget(add, len(items) // cols, len(items) % cols)
         grid.setColumnStretch(cols, 1)
-        hidden = self.st.get("hidden", [])
-        if hidden and self.is_admin:
-            rb = PopButton(f"Gelöschte Standard-Server wiederherstellen ({len(hidden)})", "refresh", "glass", 38)
-            rb.clicked.connect(self.restore_builtin)
-            grid.addWidget(rb, len(items) // cols + 1, 0, 1, cols, Qt.AlignLeft)
-        grid.setRowStretch(len(items) // cols + 2, 1)
+        grid.setRowStretch(len(items) // cols + 1, 1)
         self.srv_scroll.setWidget(host)
         self.srv_host = host
         self.render_side_servers()
@@ -1707,7 +1702,7 @@ class Window(QMainWindow):
         self.say("Gespeichert")
 
     def open_confirm_delete(self, s):
-        card = DialogCard("Server löschen?", f"„{s['name']}“ wird entfernt." + (" Du kannst ihn später wiederherstellen." if s.get("builtin") else " Das kann nicht rückgängig gemacht werden."), 460)
+        card = DialogCard("Server löschen?", f"„{s['name']}“ wird entfernt. Das kann nicht rückgängig gemacht werden.", 460)
         cancel = PopButton("Abbrechen", None, "glass", 40)
         cancel.clicked.connect(self.overlay.dismiss)
         yes = PopButton("Löschen", "trash", "danger", 40)
@@ -1737,13 +1732,6 @@ class Window(QMainWindow):
         self.render_servers()
         self.overlay.dismiss()
         self.say("Server gelöscht")
-
-    def restore_builtin(self):
-        self.st["hidden"] = []
-        self.save_settings()
-        self.sync_catalog()
-        self.render_servers()
-        self.say("Standard-Server wiederhergestellt")
 
     def open_region_picker(self, path, done, back):
         pm = QPixmap(path)
