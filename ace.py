@@ -3134,7 +3134,8 @@ class Window(QMainWindow):
             p, _ = QFileDialog.getOpenFileName(self, "Screenshot mit einer Kill-Meldung wählen", "",
                                                "Bilder (*.png *.jpg *.jpeg *.webp *.bmp)")
             if p:
-                self.open_region_picker(p, lambda res: self._edit_after_pick(s, name.text(), res),
+                nm_ = name.text()                     # Name jetzt merken: das Eingabefeld wird gleich geschlossen
+                self.open_region_picker(p, lambda res: self._edit_after_pick(s, nm_, res),
                                         lambda: self.open_edit_server(s))
         pick.clicked.connect(do_pick)
         tr.addWidget(pick)
@@ -4558,7 +4559,7 @@ class Window(QMainWindow):
                 res = check_update()
             except Exception:
                 if manual:
-                    self.ui(self.say, "Update-Suche fehlgeschlagen (Internet?)", RED)
+                    self.ui(self.say, "Update-Suche fehlgeschlagen", RED)
                 return
             if res:
                 self.ui(self.show_update, *res)
