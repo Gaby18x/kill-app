@@ -1919,6 +1919,11 @@ class Window(QMainWindow):
         self.open_btn = PopButton("Video öffnen", "folder", "accent", 34)
         self.open_btn.clicked.connect(self.open_video)
         pl.addWidget(self.open_btn)
+        self.close_btn = PopButton("", "close", "flat", 34, icon_only=True)
+        self.close_btn.setToolTip("Video entfernen")
+        self.close_btn.clicked.connect(self.ask_unload)
+        self.close_btn.hide()
+        pl.addWidget(self.close_btn)
         hdr.addWidget(pill, 1)
         self.ed_chip = ServerChip()
         self.ed_chip.clicked.connect(lambda: self.go_page(0))
@@ -2745,6 +2750,7 @@ class Window(QMainWindow):
         self.bar_sub.setText(f"{pl.w}×{pl.h} · {pl.fps:.0f} fps")
         self._thumb_pending = True
         self.open_btn.setText("Wechseln")
+        self.close_btn.show()
         self.open_btn.set_kind("glass")
         self.clips, self.sel = [], None
         self.mark_in = self.mark_out = None
@@ -2753,6 +2759,61 @@ class Window(QMainWindow):
         self.set_status("Bereit – jetzt „Kills suchen“")
         self.timeline.set_view(0, 60)
         self.seek(0)
+
+    def ask_unload(self):
+        if not self.has_video:
+            return
+        if self.scanning:
+            self.say("Die Suche läuft noch – bitte erst abbrechen", RED)
+            return
+        if not self.clips:
+            self.unload_video()
+            return
+        n = len(self.clips)
+        card = DialogCard("Video entfernen?", f"Die {n} {'Clip' if n == 1 else 'Clips'} in der Liste "
+                          "gehen dabei verloren, wenn du sie noch nicht exportiert hast.", 480)
+        cancel = PopButton("Abbrechen", None, "glass", 40)
+        cancel.clicked.connect(self.overlay.dismiss)
+        yes = PopButton("Entfernen", "trash", "danger", 40)
+        yes.clicked.connect(lambda: (self.overlay.dismiss(), self.unload_video()))
+        card.btns.addWidget(cancel)
+        card.btns.addWidget(yes)
+        self.overlay.present(card)
+
+    def unload_video(self):
+        """Video wieder entfernen: zurueck zum leeren Zustand, dann kann ein neues geoeffnet werden."""
+        if self.fs:
+            self.toggle_fullscreen()
+        if self.playing:
+            self.toggle_play()
+        if self.player:
+            self.player.stop()
+        if self.audio:
+            self.audio.stop()
+            self.audio.setSource(QUrl())
+        self.player = self.path = None
+        self.has_video = False
+        self.video.has_video = False
+        self.video.img = None
+        self.video.update()
+        self.cta.show()
+        self.fps, self.duration, self.pos = 60.0, 0.0, 0.0
+        self.clips, self.sel, self.play_clip = [], None, None
+        self.mark_in = self.mark_out = None
+        self.file_lbl.setText("Noch kein Video geladen")
+        self.open_btn.setText("Video öffnen")
+        self.open_btn.set_kind("accent")
+        self.close_btn.hide()
+        self.bar_title.setText("Kein Video")
+        self.bar_sub.setText("")
+        self.bar_thumb.clear()
+        self._thumb_pending = False
+        self.scan_bar.set_value(0, False)
+        self.set_status("Bereit")
+        self.rebuild_cards()
+        self.timeline.set_view(0, 60)
+        self.timeline.update()
+        self.seekbar.update()
 
     def poll_player(self):
         pl = self.player
