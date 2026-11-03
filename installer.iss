@@ -23,6 +23,11 @@ Name: "desktopicon"; Description: "Desktop-Verknüpfung erstellen"; GroupDescrip
 [Files]
 Source: "dist\KillApp\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\killapp"; ValueType: string; ValueData: "URL:Kill App"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\killapp"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\killapp\shell\open\command"; ValueType: string; ValueData: """{app}\KillApp.exe"" ""%1"""
+
 [Icons]
 Name: "{group}\Kill App"; Filename: "{app}\KillApp.exe"
 Name: "{autodesktop}\Kill App"; Filename: "{app}\KillApp.exe"; Tasks: desktopicon

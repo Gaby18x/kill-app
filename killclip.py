@@ -21,6 +21,7 @@ try:
 except Exception:          # Ton ist optional - ohne Multimedia laeuft die App trotzdem
     QAudioOutput = QMediaPlayer = None
 
+import auth
 import core
 from core import Player, check_update, download_file, export_clip, find_ffmpeg, resource, scan_video
 from theme import AMBER, DEFAULT, PRESETS, RED, T, ink, white, with_alpha
@@ -100,6 +101,13 @@ class Clip:
         self.thumb = thumb          # QPixmap
         self.name = None            # eigener Dateiname (None = automatische Nummer)
         self.last_name = None       # Name, unter dem der Clip zuletzt exportiert wurde
+
+
+def _quiet(fn):
+    try:
+        fn()
+    except Exception:
+        pass
 
 
 class Bridge(QObject):
@@ -197,6 +205,7 @@ class ServerCard(QWidget):
         self.pop = 0.0
         self.ehov = 0.0
         self.dhov = 0.0
+        self.locked = False
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(self.W + 2 * self.M, self.H + 2 * self.M)
@@ -216,16 +225,16 @@ class ServerCard(QWidget):
         tween(self, "dhov", 0.0, 120)
 
     def mouseMoveEvent(self, e):
-        if not self.add:
+        if not self.add and not self.locked:
             tween(self, "ehov", 1.0 if self._edit_rect().contains(e.position()) else 0.0, 110)
             tween(self, "dhov", 1.0 if self._del_rect().contains(e.position()) else 0.0, 110)
 
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
-        if not self.add and self._edit_rect().contains(e.position()):
+        if not self.add and not self.locked and self._edit_rect().contains(e.position()):
             self.edit.emit()
-        elif not self.add and self._del_rect().contains(e.position()):
+        elif not self.add and not self.locked and self._del_rect().contains(e.position()):
             self.delete.emit()
         else:
             self.clicked.emit()
@@ -277,17 +286,18 @@ class ServerCard(QWidget):
         p.setFont(app_font(9.5))
         p.drawText(QRectF(r.left() + 90, r.top() + 50, r.width() - 110, 40),
                    int(Qt.AlignTop.value) | int(Qt.TextWordWrap.value), self.sub)
-        dr = self._del_rect()
-        p.setPen(Qt.NoPen)
-        p.setBrush(with_alpha(RED, 40 + 50 * self.dhov) if self.dhov > 0.05 else white(150))
-        p.drawEllipse(dr)
-        paint_icon(p, "trash", dr.adjusted(8 - 2 * self.dhov, 8 - 2 * self.dhov, -8 + 2 * self.dhov, -8 + 2 * self.dhov),
-                   QColor(T.err) if self.dhov > 0.3 else T.icon)
-        er = self._edit_rect()
-        p.setPen(Qt.NoPen)
-        p.setBrush(white(150))
-        p.drawEllipse(er)
-        paint_icon(p, "edit", er.adjusted(8 - 2 * self.ehov, 8 - 2 * self.ehov, -8 + 2 * self.ehov, -8 + 2 * self.ehov), T.icon)
+        if not self.locked:
+            dr = self._del_rect()
+            p.setPen(Qt.NoPen)
+            p.setBrush(with_alpha(RED, 40 + 50 * self.dhov) if self.dhov > 0.05 else white(150))
+            p.drawEllipse(dr)
+            paint_icon(p, "trash", dr.adjusted(8 - 2 * self.dhov, 8 - 2 * self.dhov, -8 + 2 * self.dhov, -8 + 2 * self.dhov),
+                       QColor(T.err) if self.dhov > 0.3 else T.icon)
+            er = self._edit_rect()
+            p.setPen(Qt.NoPen)
+            p.setBrush(white(150))
+            p.drawEllipse(er)
+            paint_icon(p, "edit", er.adjusted(8 - 2 * self.ehov, 8 - 2 * self.ehov, -8 + 2 * self.ehov, -8 + 2 * self.ehov), T.icon)
         p.setPen(T.acc_text)
         p.setFont(app_font(10.5, True))
         p.drawText(QRectF(r.left() + 22, r.bottom() - 46, 120, 26), Qt.AlignVCenter, "Auswählen")
@@ -1055,6 +1065,9 @@ class Window(QMainWindow):
         self.ffmpeg = find_ffmpeg()
         self.server = None
         self.path = None
+        self.role = None                       # None = ohne Konto-Server (alles erlaubt), "admin" oder "user"
+        self.login_open = False
+        self.pending_invite = ""
         self.player = None
         self.audio = self.aout = None
         if QMediaPlayer is not None:
@@ -1120,6 +1133,7 @@ class Window(QMainWindow):
         self.timer.timeout.connect(self.poll_player)
         self.timer.start(8)
         QTimer.singleShot(250, self.check_ffmpeg)
+        QTimer.singleShot(150, self.start_account)
         QTimer.singleShot(500, self.stack.warm)
         if self.st["autoupd"]:
             QTimer.singleShot(1500, lambda: self.start_update_check(False))
@@ -1426,17 +1440,19 @@ class Window(QMainWindow):
             tag = "Aktiv" if self.server and self.server["id"] == s["id"] else (
                 "Zuletzt genutzt" if s["id"] == self.st.get("last_server") else "")
             card = ServerCard(s["name"], KIND_TEXT.get(s["kind"], ""), tag, sid=s["id"])
+            card.locked = not self.is_admin
             card.clicked.connect(lambda s=s: self.enter_server(s))
             card.edit.connect(lambda s=s: self.open_edit_server(s))
             card.delete.connect(lambda s=s: self.open_confirm_delete(s))
             grid.addWidget(card, i // cols, i % cols)
             self.tags[s["id"]] = card
-        add = ServerCard(add=True)
-        add.clicked.connect(lambda: self.open_add_server())
-        grid.addWidget(add, len(items) // cols, len(items) % cols)
+        if self.is_admin:
+            add = ServerCard(add=True)
+            add.clicked.connect(lambda: self.open_add_server())
+            grid.addWidget(add, len(items) // cols, len(items) % cols)
         grid.setColumnStretch(cols, 1)
         hidden = self.st.get("hidden", [])
-        if hidden:
+        if hidden and self.is_admin:
             rb = PopButton(f"Gelöschte Standard-Server wiederherstellen ({len(hidden)})", "refresh", "glass", 38)
             rb.clicked.connect(self.restore_builtin)
             grid.addWidget(rb, len(items) // cols + 1, 0, 1, cols, Qt.AlignLeft)
@@ -1591,6 +1607,7 @@ class Window(QMainWindow):
                 save_avatar(sid, st["avatar"])
             self.st["servers"].append(srv)
             self.save_settings()
+            self.sync_catalog()
             self.render_servers()
             self.overlay.dismiss()
             self.say(f"Server „{nm}“ hinzugefügt")
@@ -1669,6 +1686,7 @@ class Window(QMainWindow):
             if x["id"] == s["id"]:
                 self.st["servers"][i] = srv
         self.save_settings()
+        self.sync_catalog()
         if self.server and self.server["id"] == s["id"]:
             self.server = srv
         self.render_servers()
@@ -1686,6 +1704,7 @@ class Window(QMainWindow):
             self.server["name"] = nm
             self.ed_chip.set_server(nm, s["id"])
         self.save_settings()
+        self.sync_catalog()
         self.render_servers()
         self.say("Gespeichert")
 
@@ -1716,6 +1735,7 @@ class Window(QMainWindow):
             if self.stack.cur == 1:
                 self.go_page(0)
         self.save_settings()
+        self.sync_catalog()
         self.render_servers()
         self.overlay.dismiss()
         self.say("Server gelöscht")
@@ -1723,6 +1743,7 @@ class Window(QMainWindow):
     def restore_builtin(self):
         self.st["hidden"] = []
         self.save_settings()
+        self.sync_catalog()
         self.render_servers()
         self.say("Standard-Server wiederhergestellt")
 
@@ -2023,6 +2044,8 @@ class Window(QMainWindow):
         v.setSpacing(14)
         v.setContentsMargins(0, 0, 10, 0)
         v.addWidget(self.build_appearance_panel())
+        if core.ACCOUNT_URL:
+            v.addWidget(self.build_account_panel())
 
         def toggle_row(parent_lay, title, sub, checked):
             r = QHBoxLayout()
@@ -2122,6 +2145,297 @@ class Window(QMainWindow):
         pr.addStretch(1)
         lay.addLayout(pr)
         return g
+
+    # ------------------------------------------------------------ Konten
+    @property
+    def is_admin(self):
+        return self.role in (None, "admin")
+
+    def builtin_ids(self):
+        return [s["id"] for s in BUILTIN_SERVERS]
+
+    def start_account(self):
+        if not core.ACCOUNT_URL:
+            return
+        tok = self.st.get("acct_token")
+        if not tok:
+            self.show_login(self.pending_invite)
+            return
+
+        def work():
+            try:
+                me = auth.call("GET", "/me", token=tok)
+                self.ui(self.on_login_ok, me["name"], me["role"], tok, False)
+            except auth.Offline:
+                if self.st.get("acct_role"):
+                    self.ui(self.on_login_ok, self.st.get("acct_name", ""), self.st["acct_role"], tok, True)
+                else:
+                    self.ui(self.show_login, self.pending_invite, "Keine Verbindung zum Konto-Server.")
+            except auth.ApiError:
+                self.ui(self.show_login, self.pending_invite)
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_login(self, invite="", note=""):
+        self.login_open = True
+        card = DialogCard("Willkommen bei Kill App", "Melde dich an, um die App zu nutzen.", 470)
+        seg = Segmented(["Anmelden", "Neues Konto"])
+        card.body.addWidget(seg)
+        l_inv = label("Einladungscode (steht im Link, den du bekommen hast)", 10.5, True, MUT)
+        inv = QLineEdit(invite)
+        l_user = label("Benutzername", 10.5, True, MUT)
+        user = QLineEdit()
+        l_pw = label("Passwort", 10.5, True, MUT)
+        pw = QLineEdit()
+        pw.setEchoMode(QLineEdit.Password)
+        for w_ in (inv, user, pw):
+            self.style_edit(w_)
+        for w_ in (l_inv, inv, l_user, user, l_pw, pw):
+            card.body.addWidget(w_)
+        if note:
+            card.err.setText(note)
+        go = PopButton("Anmelden", "check", "accent", 44)
+        card.btns.addWidget(go)
+        mode = {"new": bool(invite)}
+
+        def apply_mode(first=False):
+            new = mode["new"]
+            for w_ in (l_inv, inv):
+                w_.setVisible(new)
+            go.setText("Konto erstellen" if new else "Anmelden")
+            card.err.setText("" if first and not note else card.err.text() if first else "")
+            card.fit()
+            self.overlay._center()
+
+        def on_seg(name):
+            mode["new"] = name == "Neues Konto"
+            apply_mode()
+        seg.changed.connect(on_seg)
+        if invite:
+            seg.set_current("Neues Konto")
+        apply_mode(True)
+
+        def submit():
+            u, p = user.text().strip(), pw.text()
+            if not u or not p:
+                card.err.setText("Bitte Benutzername und Passwort eingeben.")
+                return
+            go.setEnabled(False)
+            card.err.setText("")
+            new = mode["new"]
+
+            def work():
+                try:
+                    if new:
+                        r = auth.call("POST", "/redeem", {"invite": inv.text().strip(), "username": u, "password": p})
+                    else:
+                        r = auth.call("POST", "/login", {"username": u, "password": p})
+                    self.ui(self.on_login_ok, r["name"], r["role"], r["token"], False, True)
+                except auth.ApiError as e:
+                    self.ui(lambda m: (card.err.setText(m), go.setEnabled(True)), str(e))
+            threading.Thread(target=work, daemon=True).start()
+        go.clicked.connect(submit)
+        for w_ in (inv, user, pw):
+            w_.returnPressed.connect(submit)
+        self.overlay.present(card)
+
+    def on_login_ok(self, name, role, token, offline, dismiss=False):
+        self.st.update(acct_token=token, acct_role=role, acct_name=name)
+        self.role = role
+        self.pending_invite = ""
+        if self.login_open or dismiss:
+            self.login_open = False
+            self.overlay.dismiss()
+        self.save_settings()
+        self.refresh_account_panel()
+        self.render_servers()
+        if offline:
+            self.say("Offline – gespeicherte Server werden benutzt")
+            return
+        self.say(f"Angemeldet als {name}")
+
+        def work():
+            try:
+                c = auth.call("GET", "/catalog", token=token)
+                self.ui(self.apply_remote_catalog, c)
+            except auth.ApiError as e:
+                if e.status == 401:
+                    self.ui(self.force_logout)
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_remote_catalog(self, c):
+        if not c.get("data"):
+            if self.is_admin and self.role:
+                self.sync_catalog()
+            return
+        if self.role == "admin" and (self.st.get("cat_dirty") or c["ver"] == self.st.get("cat_ver")):
+            if self.st.get("cat_dirty"):
+                self.sync_catalog()
+            return
+        if c["ver"] == self.st.get("cat_ver") and self.role != "user":
+            return
+        auth.unpack_catalog(c["data"], self.st, avatar_path, self.builtin_ids())
+        self.st["cat_ver"] = c["ver"]
+        _AVATAR_CACHE.clear()
+        self.save_settings()
+        if self.server and self.server["id"] not in [s["id"] for s in self.all_servers()]:
+            self.server = None
+            self.nav[1].set_nav_enabled(False)
+            self.ed_chip.set_server("")
+        self.render_servers()
+
+    def sync_catalog(self):
+        """Admin: aktuelle Server-Liste zum Konto-Server schicken (alle anderen bekommen sie beim Start)."""
+        if not core.ACCOUNT_URL or self.role != "admin":
+            return
+        data = auth.pack_catalog(self.st, avatar_path, self.builtin_ids())
+        tok = self.st.get("acct_token")
+        self.st["cat_dirty"] = True
+
+        def work():
+            try:
+                r = auth.call("PUT", "/catalog", {"data": data}, token=tok, timeout=30)
+                self.ui(self._synced, r.get("ver", 0))
+            except auth.ApiError:
+                self.ui(self.say, "Server-Liste konnte nicht hochgeladen werden (wird später erneut versucht)", RED)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _synced(self, ver):
+        self.st["cat_ver"], self.st["cat_dirty"] = ver, False
+        self.save_settings()
+
+    def force_logout(self):
+        tok = self.st.pop("acct_token", None)
+        if tok:
+            threading.Thread(target=lambda: _quiet(lambda: auth.call("POST", "/logout", token=tok)), daemon=True).start()
+        self.st.pop("acct_role", None)
+        self.st.pop("acct_name", None)
+        self.save_settings()
+        self.role = "user"
+        self.render_servers()
+        self.show_login()
+
+    def build_account_panel(self):
+        self.acct_g, self.acct_lay = panel("Konto", alpha=150)
+        self.refresh_account_panel()
+        return self.acct_g
+
+    def refresh_account_panel(self):
+        if not hasattr(self, "acct_lay"):
+            return
+        lay = self.acct_lay
+        while lay.count():
+            it = lay.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+            elif it.layout():
+                self._clear_layout(it.layout())
+        if not self.role:
+            lay.addWidget(label("Nicht angemeldet.", 10.5, color=MUT))
+            return
+        who = self.st.get("acct_name", "")
+        r = QHBoxLayout()
+        r.addWidget(label(f"Angemeldet als {who} ({'Admin' if self.role == 'admin' else 'Benutzer'})", 11, True), 1)
+        out = PopButton("Abmelden", None, "glass", 40)
+        out.clicked.connect(self.force_logout)
+        r.addWidget(out)
+        lay.addLayout(r)
+        if self.role == "admin":
+            inv = PopButton("Einladung für eine Person erstellen", "plus", "accent", 42)
+            inv.clicked.connect(self.open_invite)
+            lay.addWidget(inv)
+            ub = PopButton("Konten anzeigen", "refresh", "glass", 40)
+            ub.clicked.connect(self.load_users)
+            lay.addWidget(ub)
+            self.users_box = QVBoxLayout()
+            self.users_box.setSpacing(6)
+            lay.addLayout(self.users_box)
+
+    def _clear_layout(self, l):
+        while l.count():
+            it = l.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+            elif it.layout():
+                self._clear_layout(it.layout())
+
+    def open_invite(self):
+        card = DialogCard("Einladung erstellen", "Für wen ist der Zugang? Du bekommst einen Download-Link, den du verschicken kannst.", 520)
+        card.body.addWidget(label("Name der Person (nur für dich zur Übersicht)", 10.5, True, MUT))
+        nm = QLineEdit()
+        self.style_edit(nm)
+        card.body.addWidget(nm)
+        cancel = PopButton("Schließen", None, "glass", 40)
+        cancel.clicked.connect(self.overlay.dismiss)
+        go = PopButton("Link erstellen", "check", "accent", 40)
+        card.btns.addWidget(cancel)
+        card.btns.addWidget(go)
+        tok = self.st.get("acct_token")
+
+        def make():
+            go.setEnabled(False)
+
+            def work():
+                try:
+                    r = auth.call("POST", "/invite", {"label": nm.text().strip()}, token=tok)
+                    self.ui(shown, r)
+                except auth.ApiError as e:
+                    self.ui(lambda m: (card.err.setText(m), go.setEnabled(True)), str(e))
+            threading.Thread(target=work, daemon=True).start()
+
+        def shown(r):
+            nm.setReadOnly(True)
+            link = QLineEdit(r["link"])
+            self.style_edit(link)
+            link.setReadOnly(True)
+            card.body.addWidget(label("Diesen Link schickst du weiter (14 Tage gültig, einmal benutzbar):", 10.5, True, MUT))
+            card.body.addWidget(link)
+            go.setText("Link kopieren")
+            go.setEnabled(True)
+            go.clicked.disconnect()
+            go.clicked.connect(lambda: (QApplication.clipboard().setText(r["link"]), self.say("Link kopiert")))
+            QApplication.clipboard().setText(r["link"])
+            card.fit()
+            self.overlay._center()
+        go.clicked.connect(make)
+        nm.returnPressed.connect(make)
+        self.overlay.present(card)
+
+    def load_users(self):
+        tok = self.st.get("acct_token")
+
+        def work():
+            try:
+                r = auth.call("GET", "/users", token=tok)
+                self.ui(self.show_users, r["users"])
+            except auth.ApiError as e:
+                self.ui(self.say, str(e), RED)
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_users(self, users):
+        self._clear_layout(self.users_box)
+        for u in users:
+            row = QHBoxLayout()
+            txt = u["name"] + (f"  ·  {u['label']}" if u.get("label") else "") + ("  ·  gesperrt" if u["disabled"] else "")
+            row.addWidget(label(txt + ("  (Admin)" if u["role"] == "admin" else ""), 10.5, color=MUT), 1)
+            if u["role"] != "admin":
+                b1 = PopButton("Entsperren" if u["disabled"] else "Sperren", None, "glass", 36)
+                b1.clicked.connect(lambda _=False, n=u["name"], d=not u["disabled"]: self.user_action("/users/disable", {"name": n, "disabled": d}))
+                b2 = PopButton("Löschen", "trash", "danger", 36)
+                b2.clicked.connect(lambda _=False, n=u["name"]: self.user_action("/users/delete", {"name": n}))
+                row.addWidget(b1)
+                row.addWidget(b2)
+            self.users_box.addLayout(row)
+
+    def user_action(self, path, data):
+        tok = self.st.get("acct_token")
+
+        def work():
+            try:
+                auth.call("POST", path, data, token=tok)
+                self.ui(self.load_users)
+            except auth.ApiError as e:
+                self.ui(self.say, str(e), RED)
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ Updates
     def start_update_check(self, manual):
@@ -2908,7 +3222,7 @@ class Window(QMainWindow):
     # ------------------------------------------------------------ Tasten
     def keyPressEvent(self, e):
         if self.overlay.isVisible():
-            if e.key() == Qt.Key_Escape:
+            if e.key() == Qt.Key_Escape and not self.login_open:
                 self.overlay.dismiss()
             return
         if self.stack.cur != 1:
@@ -2944,6 +3258,10 @@ def main():
     except Exception:
         pass
     w = Window()
+    for a in sys.argv[1:]:
+        m = re.match(r"killapp:(?://)?invite/([A-Za-z0-9]+)", a)
+        if m:
+            w.pending_invite = m.group(1)
     if sys.platform.startswith("win"):
         w.showMaximized()
     else:
