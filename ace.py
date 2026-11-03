@@ -1744,6 +1744,28 @@ class ColorChoice(QWidget):
         self.setCursor(Qt.CrossCursor)
         self._drag = False
         self._field = None
+        self.hex = QLineEdit(self)                      # Farbcode eintippen oder einfuegen, z. B. #E0559A
+        self.hex.setPlaceholderText("#Farbcode")
+        self.hex.setFixedSize(118, 28)
+        self.hex.setMaxLength(9)
+        self.hex.setStyleSheet("padding: 2px 10px; border-radius: 14px;")
+        self.hex.setCursor(Qt.IBeamCursor)
+        self.hex.setText(self.cur.upper())
+        self.hex.textEdited.connect(self._typed)
+
+    def resizeEvent(self, e):
+        nr = self._none_rect()
+        self.hex.move(int(nr.right() + 44), int(nr.top() - 1))
+
+    def _typed(self, txt):
+        t = txt.strip()
+        if t and not t.startswith("#"):
+            t = "#" + t
+        c = QColor(t)
+        if len(t) in (4, 7) and c.isValid():
+            self.cur = c.name()
+            self.changed.emit(self.cur)
+            self.update()
 
     def _none_rect(self):
         return QRectF(0, self.H + 10, 118, 26)
@@ -1758,12 +1780,14 @@ class ColorChoice(QWidget):
         # oben: kraeftig & hell, unten: dunkler
         c = QColor.fromHslF(x * 0.999, 0.78 - 0.18 * y, 0.70 - 0.38 * y)
         self.cur = c.name()
+        self.hex.setText(self.cur.upper())
         self.changed.emit(self.cur)
         self.update()
 
     def mousePressEvent(self, e):
         if self._none_rect().contains(e.position()):
             self.cur = ""
+            self.hex.clear()
             self.changed.emit("")
             self.update()
             return
@@ -1826,14 +1850,15 @@ class ColorChoice(QWidget):
         p.setPen(ink(220 if sel else 160))
         p.setFont(app_font(9))
         p.drawText(QRectF(nr.left() + 28, nr.top(), nr.width() - 30, nr.height()), Qt.AlignVCenter, "Keine Farbe")
-        # Vorschau der gewaehlten Farbe
+        # Vorschau der gewaehlten Farbe (daneben das Feld fuer den Farbcode)
+        sw = QRectF(nr.right() + 14, nr.top() + 3, 20, 20)
         if self.cur:
-            sw = QRectF(nr.right() + 12, nr.top() + 3, 20, 20)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(self.cur))
-            p.drawEllipse(sw)
-            p.setPen(ink(160))
-            p.drawText(QRectF(sw.right() + 8, nr.top(), 120, nr.height()), Qt.AlignVCenter, QColor(self.cur).name().upper())
+        else:
+            p.setPen(QPen(ink(70), 1))
+            p.setBrush(Qt.NoBrush)
+        p.drawEllipse(sw)
 
 
 class DialogCard(Glass):
@@ -2801,6 +2826,9 @@ class Window(QMainWindow):
                 continue
             d = dict(s)
             d["name"] = self.st["names"].get(s["id"], s["name"])
+            ov = self.st.get("overrides", {}).get(s["id"])
+            if ov:                                          # eigene Vorlage statt der eingebauten
+                d.update(ov)
             out.append(d)
         return out + self.st["servers"]
 
@@ -3030,6 +3058,9 @@ class Window(QMainWindow):
         rx0, ry0, rx1, ry1 = r["region"]
         for fname, crop in (("anchor.png", im[ay0:ay1, ax0:ax1]), ("word.png", im[wy0:wy1, wx0:wx1])):
             cv2.imencode(".png", crop)[1].tofile(os.path.join(d, fname))
+        ex0, ey0 = max(0, min(ax0, wx0, rx0) - 8), max(0, min(ay0, wy0, ry0) - 8)
+        ex1, ey1 = min(im.shape[1], max(ax1, wx1, rx1) + 8), min(im.shape[0], max(ay1, wy1, ry1) + 8)
+        cv2.imencode(".png", im[ey0:ey1, ex0:ex1])[1].tofile(os.path.join(d, "example.png"))
         return {"id": sid, "name": name, "kind": "notify", "ref_h": r["ref_h"],
                 "region": [rx0 - ax0, ry0 - ay0, rx1 - ax0, ry1 - ay0]}
 
@@ -3052,17 +3083,25 @@ class Window(QMainWindow):
         if tv is not None:
             card.body.addWidget(label("Erkennungs-Vorlage (danach wird gesucht)", 10.5, True, MUT))
             card.body.addWidget(tv)
-        if s["kind"] == "notify":
-            pick = PopButton("Kill-Meldung neu markieren …", "crosshair", "glass", 42)
+        tr = QHBoxLayout()
+        tr.setSpacing(8)
+        pick = PopButton("Vorlage ändern …", "crosshair", "glass", 38)
 
-            def do_pick():
-                p, _ = QFileDialog.getOpenFileName(self, "Screenshot wählen", "",
-                                                   "Bilder (*.png *.jpg *.jpeg *.webp *.bmp)")
-                if p:
-                    self.open_region_picker(p, lambda res: self._edit_after_pick(s, name.text(), res),
-                                            lambda: self.open_edit_server(s))
-            pick.clicked.connect(do_pick)
-            card.body.addWidget(pick)
+        def do_pick():
+            p, _ = QFileDialog.getOpenFileName(self, "Screenshot mit einer Kill-Meldung wählen", "",
+                                               "Bilder (*.png *.jpg *.jpeg *.webp *.bmp)")
+            if p:
+                self.open_region_picker(p, lambda res: self._edit_after_pick(s, name.text(), res),
+                                        lambda: self.open_edit_server(s))
+        pick.clicked.connect(do_pick)
+        tr.addWidget(pick)
+        has_ov = s.get("builtin") and s["id"] in self.st.get("overrides", {})
+        if has_ov or (not s.get("builtin") and s["kind"] == "notify"):
+            rm = PopButton("Auf Standard zurücksetzen" if has_ov else "Vorlage entfernen", "trash", "glass", 38)
+            rm.clicked.connect(lambda: self.remove_template(s))
+            tr.addWidget(rm)
+        tr.addStretch(1)
+        card.body.addLayout(tr)
 
         def save():
             nm = name.text().strip()
@@ -3098,6 +3137,8 @@ class Window(QMainWindow):
             items.append(("Beispiel-Meldung", resource("profiles", "bruder_notify.png")))
         elif s["kind"] == "notify":
             d = os.path.join(core.DATA_DIR, "servers", s["id"])
+            if os.path.exists(os.path.join(d, "example.png")):
+                items.append(("Beispiel-Meldung", os.path.join(d, "example.png")))
             items += [("Fester Teil (Erkennung)", os.path.join(d, "anchor.png")),
                       ("Kill-Wort (Prüfung)", os.path.join(d, "word.png"))]
         else:
@@ -3123,8 +3164,32 @@ class Window(QMainWindow):
         row.addStretch(1)
         return box
 
+    def remove_template(self, s):
+        """Eigene Vorlage loeschen: Standard-Server bekommen ihre eingebaute Erkennung zurueck,
+        eigene Server erkennen danach den roten Kill-X."""
+        shutil.rmtree(os.path.join(core.DATA_DIR, "servers", s["id"]), ignore_errors=True)
+        if s.get("builtin"):
+            self.st.setdefault("overrides", {}).pop(s["id"], None)
+        else:
+            for x in self.st["servers"]:
+                if x["id"] == s["id"]:
+                    x["kind"] = "xhit"
+                    x.pop("region", None)
+                    x.pop("ref_h", None)
+        self.save_settings()
+        self.sync_catalog()
+        if self.server and self.server["id"] == s["id"]:
+            self.server = next((x for x in self.all_servers() if x["id"] == s["id"]), None)
+        self.render_servers()
+        self.overlay.dismiss()
+        self.say("Vorlage entfernt")
+
     def _edit_after_pick(self, s, name, res):
         srv = self.write_notify_server(s["id"], name or s["name"], res)
+        if s.get("builtin"):
+            self.st.setdefault("overrides", {})[s["id"]] = {"kind": "notify", "ref_h": srv["ref_h"],
+                                                             "region": srv["region"]}
+            srv = next((x for x in self.all_servers() if x["id"] == s["id"]), srv)
         for i, x in enumerate(self.st["servers"]):
             if x["id"] == s["id"]:
                 self.st["servers"][i] = srv
@@ -3134,7 +3199,7 @@ class Window(QMainWindow):
             self.server = srv
         self.render_servers()
         self.overlay.dismiss()
-        self.say("Kill-Meldung aktualisiert")
+        self.say("Vorlage gespeichert")
 
     def rename_server(self, s, nm):
         if s.get("builtin"):

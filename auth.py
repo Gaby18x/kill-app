@@ -60,8 +60,11 @@ def pack_catalog(st, avatar_path, builtin_ids=()):
         b = _b64(avatar_path(sid))
         if b:
             avatars[sid] = b
+        d = os.path.join(core.DATA_DIR, "servers", sid)
+        if sid in st.get("overrides", {}) and os.path.isdir(d):
+            files[sid] = {n: _b64(os.path.join(d, n)) for n in os.listdir(d) if n.endswith(".png")}
     return {"servers": st.get("servers", []), "names": st.get("names", {}), "hidden": st.get("hidden", []),
-            "themes": st.get("themes", {}), "files": files, "avatars": avatars}
+            "themes": st.get("themes", {}), "overrides": st.get("overrides", {}), "files": files, "avatars": avatars}
 
 
 def unpack_catalog(data, st, avatar_path, builtin_ids=()):
@@ -98,3 +101,4 @@ def unpack_catalog(data, st, avatar_path, builtin_ids=()):
     st["names"] = data.get("names", {})
     st["hidden"] = data.get("hidden", [])
     st["themes"] = data.get("themes", {})
+    st["overrides"] = data.get("overrides", {})
