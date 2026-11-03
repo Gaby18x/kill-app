@@ -3036,7 +3036,7 @@ class Window(QMainWindow):
             pick.setVisible(not x)
             ok.setVisible(not x)
             info.setText({
-                "Info-Meldung": "Empfohlen: lila „Information“-Meldung mit „Du hast … getötet“ (wie bei Bruder). "
+                "Info-Meldung": "Empfohlen: lila „Information“-Meldung mit „Du hast … getötet“ (wie auf Pruda). "
                                 "Schnell und zuverlässig – nichts zu markieren.",
                 "Roter Kill-X": "Der rote X-Treffer in der Bildmitte (Hitmarker) zählt als Kill. Keine weitere "
                                 "Einrichtung nötig.",
