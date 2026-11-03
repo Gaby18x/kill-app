@@ -277,10 +277,13 @@ class ServerCard(QWidget):
             paint_icon(p, "plus", cr.adjusted(13, 13, -13, -13), ink(220), 1.8)
             p.setPen(ink(235))
             p.setFont(app_font(10.5, True))
-            p.drawText(QRectF(r.left(), c.y() + 16, r.width(), 24), Qt.AlignCenter, "Neuer Server")
+            req = getattr(self, "request", False)
+            p.drawText(QRectF(r.left(), c.y() + 16, r.width(), 24), Qt.AlignCenter,
+                       "Server anfragen" if req else "Neuer Server")
             p.setPen(ink(130))
             p.setFont(app_font(9))
-            p.drawText(QRectF(r.left(), c.y() + 38, r.width(), 20), Qt.AlignCenter, "Eigene Kill-Erkennung anlegen")
+            p.drawText(QRectF(r.left(), c.y() + 38, r.width(), 20), Qt.AlignCenter,
+                       "Dein Server fehlt? Frag ihn beim Admin an" if req else "Eigene Kill-Erkennung anlegen")
             return
         paint_avatar(p, QRectF(r.left() + 18, r.top() + 18, 42, 42), self.name, 21, 16, self.sid)
         tx = r.left() + 72
@@ -508,6 +511,8 @@ class Dock(QWidget):
     def mouseMoveEvent(self, e):
         x, y = e.position().x(), e.position().y()
         i = self._hit(x, y)
+        if y <= self.PANEL and not self._exp:     # zurueck aufs Dock: wieder Platz fuer Groesse und Namen schaffen
+            self.expand(True)
         if y > self.PANEL + 6 and i < 0:          # unter dem Dock: wie Verlassen (Inhalt darunter bleibt klickbar)
             self.leaveEvent(None)
             return
@@ -2389,8 +2394,10 @@ class Window(QMainWindow):
         self.top_chip.clicked.connect(self.open_server_menu)
         lay.addWidget(self.top_chip)
         lay.addSpacing(4)
-        self.upd_dot = IconDot("refresh", "Nach Updates suchen")
-        self.upd_dot.hide()
+        self.upd_dot = IconDot("download", "Update")
+        self.upd_dot.clicked.connect(self._top_update)
+        lay.addSpacing(6)
+        lay.addWidget(self.upd_dot)
         self.btn_update = PopButton("Update installieren", "upload", "glass", 36)
         self.btn_update.clicked.connect(self.do_update)
         self.btn_update.hide()
@@ -2474,8 +2481,9 @@ class Window(QMainWindow):
         cur = self.stack.cur
         if self.fs and i != 1:
             self.toggle_fullscreen()
-        if i == 0 and self.theme_override:
-            self.set_override(None)
+        want = self.st.get("themes", {}).get(self.server["id"]) if (self.server and i in (1, 2)) else None
+        if want != self.theme_override:
+            self.set_override(want)
         if cur == 1 and i != 1 and self.playing:
             self.toggle_play()
         for k, n in enumerate(self.nav):
@@ -2491,6 +2499,8 @@ class Window(QMainWindow):
             QTimer.singleShot(60, lambda: self.player.request_seek(self.pos))
         if i == 2:
             self.refresh_library()
+        if i == 3 and self.role == "admin" and hasattr(self, "users_box"):
+            self.load_users()
 
     # ------------------------------------------------------------ Seite: Server
     def page_header(self, title, sub):
@@ -2557,10 +2567,13 @@ class Window(QMainWindow):
             card.delete.connect(lambda s=s: self.open_confirm_delete(s))
             grid.addWidget(card, i // cols, i % cols)
             self.tags[s["id"]] = card
+        add = ServerCard(add=True)
         if self.is_admin:
-            add = ServerCard(add=True)
             add.clicked.connect(lambda: self.open_add_server())
-            grid.addWidget(add, len(items) // cols, len(items) % cols)
+        else:
+            add.request = True                    # Spieler: Server beim Admin anfragen
+            add.clicked.connect(self.open_request_server)
+        grid.addWidget(add, len(items) // cols, len(items) % cols)
         grid.setColumnStretch(cols, 1)
         grid.setRowStretch(len(items) // cols + 1, 1)
         self.srv_scroll.setWidget(host)
@@ -2583,7 +2596,6 @@ class Window(QMainWindow):
         self.st["last_server"] = s["id"]
         self.ed_chip.set_server(s["name"], s["id"])
         self.nav[1].set_nav_enabled(True)
-        self.set_override(self.st.get("themes", {}).get(s["id"]))
         self.save_settings()
         self.render_servers()
         self.go_page(1)
@@ -3059,7 +3071,8 @@ class Window(QMainWindow):
         sb_ = PopButton("Wechseln", "chevron", "glass", 30)
         sb_.clicked.connect(lambda: self.go_page(0))
         sl.addWidget(sb_)
-        ml.addWidget(st)
+        st.hide()                                    # (Server wechselt man oben rechts)
+        self._srv_tile = st
         hr = QHBoxLayout()
         hr.setContentsMargins(4, 6, 4, 0)
         self.ed_title = label("Deine Clips", 11.5, True)
@@ -3282,7 +3295,7 @@ class Window(QMainWindow):
             d[sid] = name
         else:
             d.pop(sid, None)
-        if self.server and self.server["id"] == sid:
+        if self.server and self.server["id"] == sid and self.stack.cur in (1, 2):
             self.set_override(d.get(sid))
 
     def theme_colors(self):
@@ -3656,6 +3669,99 @@ class Window(QMainWindow):
             elif it.layout():
                 self._clear_layout(it.layout())
 
+    def open_request_server(self):
+        """Spieler: einen noch nicht eingerichteten Server beim Admin anfragen (mit optionalem Screenshot)."""
+        if not core.ACCOUNT_URL or not self.st.get("acct_token"):
+            self.say("Dafür musst du angemeldet sein", AMBER)
+            return
+        card = DialogCard("Server anfragen", "Der Admin bekommt deine Anfrage und richtet den Server ein.", 520)
+        card.body.addWidget(label("Name des Servers", 10.5, True, MUT))
+        nm = QLineEdit()
+        self.style_edit(nm)
+        card.body.addWidget(nm)
+        card.body.addWidget(label("Wie sieht die Kill-Meldung aus? (optional)", 10.5, True, MUT))
+        note = QLineEdit()
+        note.setPlaceholderText("z. B. oben rechts: „Du hast … getötet“")
+        self.style_edit(note)
+        card.body.addWidget(note)
+        st = {"img": None}
+        pick = PopButton("Screenshot der Kill-Meldung anhängen …", "folder", "glass", 38)
+        info = label("", 9, color=MUT)
+
+        def do_pick():
+            p, _ = QFileDialog.getOpenFileName(self, "Screenshot wählen", "", "Bilder (*.png *.jpg *.jpeg *.webp *.bmp)")
+            if p:
+                im = QImage(p)
+                if not im.isNull():
+                    im = im.scaled(1600, 900, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    from PySide6.QtCore import QBuffer, QByteArray
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QBuffer.WriteOnly)
+                    im.save(buf, "JPG", 80)
+                    import base64
+                    st["img"] = base64.b64encode(bytes(ba)).decode()
+                    info.setText(f"Angehängt: {os.path.basename(p)}")
+        pick.clicked.connect(do_pick)
+        card.body.addWidget(pick)
+        card.body.addWidget(info)
+        cancel = PopButton("Abbrechen", None, "glass", 40)
+        cancel.clicked.connect(self.overlay.dismiss)
+        go = PopButton("Anfrage senden", "check", "accent", 40)
+        card.btns.addWidget(cancel)
+        card.btns.addWidget(go)
+        tok = self.st.get("acct_token")
+
+        def send():
+            if not nm.text().strip():
+                card.err.setText("Bitte den Namen des Servers eingeben.")
+                return
+            go.setEnabled(False)
+
+            def work():
+                try:
+                    auth.call("POST", "/requests", {"name": nm.text().strip(), "note": note.text().strip(),
+                                                    "image": st["img"]}, token=tok, timeout=40)
+                    self.ui(lambda: (self.overlay.dismiss(), self.say("Anfrage gesendet – der Admin kümmert sich darum")))
+                except auth.ApiError as e:
+                    self.ui(lambda m: (card.err.setText(m), go.setEnabled(True)), str(e))
+            threading.Thread(target=work, daemon=True).start()
+        go.clicked.connect(send)
+        self.overlay.present(card)
+
+    def open_request(self, rq):
+        """Admin: eine Server-Anfrage ansehen."""
+        card = DialogCard(f"Anfrage: {rq.get('name', '?')}", f"von {rq.get('by', '?')}", 640)
+        if rq.get("note"):
+            card.body.addWidget(label(rq["note"], 10.5, wrap=True))
+        tok = self.st.get("acct_token")
+        img_lbl = QLabel("Screenshot wird geladen …" if rq.get("has_image") else "Kein Screenshot angehängt.")
+        img_lbl.setProperty("role", "muted")
+        card.body.addWidget(img_lbl)
+        if rq.get("has_image"):
+            def work():
+                try:
+                    r = auth.call("GET", f"/requests/image?id={rq.get('id')}", token=tok, timeout=40)
+                    self.ui(show_img, r.get("image"))
+                except auth.ApiError as e:
+                    self.ui(img_lbl.setText, str(e))
+
+            def show_img(b64):
+                import base64
+                pm = QPixmap()
+                pm.loadFromData(base64.b64decode(b64 or ""))
+                if pm.isNull():
+                    img_lbl.setText("Screenshot konnte nicht geladen werden.")
+                    return
+                img_lbl.setPixmap(pm.scaled(576, 330, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                card.fit()
+                self.overlay._center()
+            threading.Thread(target=work, daemon=True).start()
+        ok = PopButton("Schließen", None, "glass", 40)
+        ok.clicked.connect(self.overlay.dismiss)
+        card.btns.addWidget(ok)
+        self.overlay.present(card)
+
     def open_password(self):
         card = DialogCard("Passwort ändern", "Gib dein altes und ein neues Passwort ein (mindestens 6 Zeichen).", 480)
         fields = []
@@ -3745,19 +3851,45 @@ class Window(QMainWindow):
         def work():
             try:
                 u = auth.call("GET", "/users", token=tok)["users"]
-                i = auth.call("GET", "/invites", token=tok)["invites"]
-                self.ui(self.show_users, u, i)
             except auth.ApiError as e:
-                self.ui(self.say, str(e), RED)
+                self.ui(self.say, f"Konten konnten nicht geladen werden: {e}", RED)
+                return
+            res = {}
+            for key, path in (("inv", "/invites"), ("req", "/requests")):
+                try:
+                    res[key] = auth.call("GET", path, token=tok)[{"inv": "invites", "req": "requests"}[key]]
+                except auth.ApiError:
+                    res[key] = None            # aelterer Konto-Server ohne diese Funktion
+            self.ui(self.show_users, u, res["inv"] or [], res["req"])
         threading.Thread(target=work, daemon=True).start()
 
-    def show_users(self, users, invites=()):
+    def show_users(self, users, invites=(), requests=None):
         if not hasattr(self, "users_box") or self.users_box is None:
             return
         try:
             self._clear_layout(self.users_box)
         except RuntimeError:
             return
+        hr = QHBoxLayout()
+        hr.addStretch(1)
+        rb = PopButton("Aktualisieren", "refresh", "glass", 30)
+        rb.clicked.connect(self.load_users)
+        hr.addWidget(rb)
+        self.users_box.addLayout(hr)
+        if requests is None:
+            self.users_box.addWidget(label("Server-Anfragen: Bitte den Konto-Server (worker.js) aktualisieren.", 9, color=MUT))
+        elif requests:
+            self.users_box.addWidget(label(f"Server-Anfragen ({len(requests)})", 11, True))
+            for rq in requests:
+                row = QHBoxLayout()
+                row.addWidget(label(f"{rq.get('name', '?')}  ·  von {rq.get('by', '?')}", 10, color=MUT), 1)
+                b1 = PopButton("Ansehen", None, "glass", 32)
+                b1.clicked.connect(lambda _=False, r=rq: self.open_request(r))
+                b2 = PopButton("Erledigt", "check", "glass", 32)
+                b2.clicked.connect(lambda _=False, c=rq.get("id"): self.user_action("/requests/delete", {"id": c}))
+                row.addWidget(b1)
+                row.addWidget(b2)
+                self.users_box.addLayout(row)
         if invites:
             self.users_box.addWidget(label("Einladungen", 11, True))
             for i in invites:

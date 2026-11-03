@@ -91,7 +91,7 @@ class Theme:
         k = max(0.0, min(1.0, (a - 90) / 120.0))
         if self.dark:
             return QColor(23, 23, 22, int(215 + 35 * k))          # #171716 - leicht abgesetzte Flaeche
-        return QColor(245, 247, 250, int(220 + 35 * k))
+        return QColor(236, 238, 242, int(225 + 30 * k))
 
     def line(self, k=1.0):
         """Feine Randfarbe (heller Strich im Dunkeln, dunkler im Hellen)."""
@@ -170,20 +170,20 @@ class Theme:
         """Kartenflaeche (kein Glas mehr): ruhiges, fast deckendes Dunkel bzw. Weiss."""
         if self.dark:
             return QColor(17, 17, 17, int(max(0, min(255, 200 + 30 * k))))
-        return QColor(255, 255, 255, int(max(0, min(255, 215 + 25 * k))))
+        return QColor(242, 243, 246, int(max(0, min(255, 225 + 25 * k))))
 
     def glass_edge(self, k=1.0):
         """Kartenrand (#2b2a25 im Dunkeln, #e3e7ec im Hellen)."""
         if self.dark:
             return QColor(43, 42, 37, int(max(0, min(255, 255 * min(1.0, 0.6 + 0.4 * k)))))
-        return QColor(227, 231, 236, int(max(0, min(255, 255 * min(1.0, 0.6 + 0.4 * k)))))
+        return QColor(214, 218, 225, int(max(0, min(255, 255 * min(1.0, 0.6 + 0.4 * k)))))
 
     def glow(self):
         """Farbe des Lichts am unteren Rand: folgt dem Farbthema, bewusst gedaempft (angenehm fuer die Augen)."""
         h, s, l = _hsl(self.acc)
         if s < 0.25:                                    # Grau: neutrales, ruhiges Licht
-            return hsl(h, 0.10, 0.20) if self.dark else hsl(h, 0.10, 0.86)
-        return hsl(h, min(s, 0.6) * 0.62, 0.24) if self.dark else hsl(h, min(s, 0.6) * 0.55, 0.88)
+            return hsl(h, 0.10, 0.20) if self.dark else hsl(h, 0.10, 0.78)
+        return hsl(h, min(s, 0.6) * 0.62, 0.24) if self.dark else hsl(h, min(s, 0.6) * 0.50, 0.80)
 
     # ---- Globales Stylesheet
     def qss(self):

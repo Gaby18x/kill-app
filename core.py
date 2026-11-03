@@ -280,18 +280,77 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             region = (ry0, ry1, rx0, rx1)
         oh = int(round(ow * h / w / 2)) * 2
         scale_vf = f"scale={ow}:{oh}:flags=area"
-        text_thr = min(0.85, max(0.55, 0.85 - 0.025 * sens))
+        text_thr = min(0.85, max(0.70, 0.85 - 0.02 * sens))
+        # --- automatische Groessen-Anpassung: Meldungen koennen je nach Aufloesung / HUD-Groesse
+        #     groesser oder kleiner sein als bei der Vorlage. Dafuer werden moegliche Meldungen gesammelt.
+        base_k, base_ks = k, ks
+        samples, samp_lock = [], threading.Lock()
+        scale_f = 1.0
+
+        def make_tpl(f):
+            nonlocal tpl, pad, need, k, ks
+            k, ks = base_k * f, base_ks * f
+            if kind == "bruder":
+                t_ = cv2.resize(hdr, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+                need = max(20, int(t_.sum() * 0.35))
+                pad = max(1, int(8 * k))
+                tpl = cv2.copyMakeBorder(t_, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+            else:
+                tpl = cv2.resize(anchor, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+
+        def collect(x):
+            if len(samples) < 24:
+                with samp_lock:
+                    samples.append(x)
+
+        def calibrate():
+            """Waehlt die Groesse, bei der die gesammelten Meldungen am besten zur Vorlage passen."""
+            if len(samples) < 2:
+                return 1.0
+            best_f, best_s, s_one = 1.0, -1.0, -1.0
+            for f in np.arange(0.70, 1.41, 0.05):
+                if kind == "bruder":
+                    t_ = cv2.resize(hdr, None, fx=base_k * f, fy=base_k * f, interpolation=cv2.INTER_AREA)
+                    p_ = max(1, int(8 * base_k * f))
+                    t_ = cv2.copyMakeBorder(t_, p_, p_, p_, p_, cv2.BORDER_CONSTANT, value=0)
+                else:
+                    t_ = cv2.resize(anchor, None, fx=base_k * f, fy=base_k * f, interpolation=cv2.INTER_AREA)
+                sc = []
+                for s_ in samples:
+                    if s_.shape[0] > t_.shape[0] and s_.shape[1] > t_.shape[1] and min(t_.shape[:2]) >= 4:
+                        sc.append(float(cv2.matchTemplate(s_, t_, cv2.TM_CCOEFF_NORMED).max()))
+                if not sc:
+                    continue
+                v = float(np.mean(sorted(sc, reverse=True)[:3]))
+                if abs(f - 1.0) < 0.01:
+                    s_one = v
+                if v > best_s:
+                    best_f, best_s = float(f), v
+            if best_s > 0.45 and best_s >= s_one + 0.03:
+                return best_f
+            return 1.0
+
+        def verify(fr, loc):
+            """Text-Pruefung, etwas tolerant gegenueber kleinen Groessenunterschieden."""
+            for s_ in (1.0, 0.95, 1.05):
+                if verify_text(fr, loc, ks * s_, words, text_thr, region)[0]:
+                    return True
+            return False
 
         def detect(fr):
             """Gibt (Treffer, Lage) fuer ein verkleinertes Bild zurueck."""
             if kind == "bruder":
                 m = purple_mask(fr)
+                if m.sum() >= need * 0.5:
+                    collect(m)
                 if m.sum() >= need:
                     _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED))
                     if mx >= thr:
                         return True, ((ml[0] + pad) * w / ow, (ml[1] + pad) * w / ow)
                 return False, None
             _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(fr, tpl, cv2.TM_CCOEFF_NORMED))
+            if mx >= 0.35:
+                collect(fr.copy())
             return (True, (ml[0] * w / ow, ml[1] * w / ow)) if mx >= thr else (False, None)
 
         # --- Schnellsuche: nur Keyframes ansehen (die Meldung steht mehrere Sekunden, also wird sie getroffen)
@@ -301,7 +360,8 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
         probe = [t for t, _ in keyframes_from_ffmpeg(ffmpeg, path, "scale=16:16", 16, 16, cancel, None, 75)]
         if thorough or (len(probe) >= 4 and float(np.median(np.diff(probe))) > MAX_KEYGAP):
             sparse = True
-        if not sparse and len(probe) >= 2 and not (cancel is not None and cancel.is_set()):
+        def fast_pass():
+            times_, khits_ = [], []
             nseg = max(1, min(os.cpu_count() or 2, 6, int(duration // 90)))
             bounds = [duration * i / nseg for i in range(nseg + 1)]
             parts = [None] * nseg
@@ -328,10 +388,28 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                 for f in futs:
                     f.result()
             for ts, hs in parts:
-                times += ts
-                khits += hs
-            times.sort()
-            khits.sort(key=lambda x: x[0])
+                times_ += ts
+                khits_ += hs
+            times_.sort()
+            khits_.sort(key=lambda x: x[0])
+            return times_, khits_
+
+        if not sparse and len(probe) >= 2 and not (cancel is not None and cancel.is_set()):
+            times, khits = fast_pass()
+            scale_f = calibrate()
+            if scale_f != 1.0 and not (cancel is not None and cancel.is_set()):
+                make_tpl(scale_f)                 # Meldungen sind anders gross: mit passender Groesse neu suchen
+                times, khits = fast_pass()
+        elif not (cancel is not None and cancel.is_set()):
+            # gruendliche Suche: vorher auf Keyframes Beispiele sammeln, um die Groesse anzupassen
+            for t_, fr_ in keyframes_from_ffmpeg(ffmpeg, path, scale_vf, ow, oh, cancel):
+                detect(fr_)
+                if len(samples) >= 12:
+                    break
+            scale_f = calibrate()
+            if scale_f != 1.0:
+                make_tpl(scale_f)
+        info["groesse"] = round(scale_f, 2)
         if cancel is not None and cancel.is_set():
             cap.release()
             return [], {"notices": 0, "mode": "abgebrochen"}
@@ -360,7 +438,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     caps_open.append(c)
                 c.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
                 ok, fr = c.read()
-                return item if ok and verify_text(fr, loc, ks, words, text_thr, region)[0] else None
+                return item if ok and verify(fr, loc) else None
             with ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 2))) as ex:
                 hits = [r for r in ex.map(check, khits) if r is not None]
             for c in caps_open:
@@ -441,7 +519,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     continue
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
                 ok, fr = cap.read()
-                if ok and verify_text(fr, near, ks, words, text_thr, region)[0]:
+                if ok and verify(fr, near):
                     ok_any = True
                     break
             if ok_any:

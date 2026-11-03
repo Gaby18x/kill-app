@@ -179,6 +179,10 @@ def paint_icon(p, name, rect, color, lw=1.9):
     elif name == "ticket":
         p.drawRoundedRect(QRectF(4.5, 7, 15, 10), 2, 2)
         p.drawLine(P(14, 7.5), P(14, 16.5))
+    elif name == "download":
+        p.drawLine(P(12, 4.5), P(12, 14.5))
+        poly([(7.5, 10.5), (12, 15), (16.5, 10.5)])
+        p.drawPolyline(QPolygonF([P(5, 15.5), P(5, 19), P(19, 19), P(19, 15.5)]))
     elif name == "sun":
         p.drawEllipse(P(12, 12), 3.8, 3.8)
         for i in range(8):
@@ -297,7 +301,7 @@ class Background(QWidget):
         g = np.array([gc.redF(), gc.greenF(), gc.blueF()], dtype=np.float32)
         gl = np.array([QColor(gc).lighter(112).redF(), QColor(gc).lighter(112).greenF(), QColor(gc).lighter(112).blueF()],
                       dtype=np.float32)
-        base = np.zeros(3, np.float32) if T.dark else np.ones(3, np.float32)
+        base = np.zeros(3, np.float32) if T.dark else np.array([0.88, 0.885, 0.90], np.float32)   # Hell: sanftes Grau statt Weiss
         ys = (np.arange(h, dtype=np.float32) + 0.5) / h
         xs = (np.arange(w, dtype=np.float32) + 0.5) / w
 

@@ -145,6 +145,18 @@ export default {
         return J({ ok: true });
       }
 
+      if (m === "POST" && path === "/requests") {
+        const b = await body(req);
+        const name = String(b.name || "").trim().slice(0, 60);
+        if (!name) return J({ error: "Bitte einen Namen angeben." }, 400);
+        const img = typeof b.image === "string" && b.image.length < 3_000_000 ? b.image : null;
+        const id = rnd(6);
+        await env.KV.put("req:" + id, JSON.stringify({ id, name, note: String(b.note || "").slice(0, 400), by: me.name,
+          created: Date.now(), has_image: !!img }), { expirationTtl: 60 * DAY });
+        if (img) await env.KV.put("reqimg:" + id, img, { expirationTtl: 60 * DAY });
+        return J({ ok: true });
+      }
+
       if (m === "GET" && path === "/catalog") {
         const c = await env.KV.get("catalog", "json");
         return J(c || { ver: 0, data: null });
@@ -179,6 +191,27 @@ export default {
       if (m === "POST" && path === "/invites/delete") {
         const b = await body(req);
         await env.KV.delete("inv:" + String(b.code || "").replace(/[^A-Za-z0-9]/g, ""));
+        return J({ ok: true });
+      }
+      if (m === "GET" && path === "/requests") {
+        const l = await env.KV.list({ prefix: "req:" });
+        const out = [];
+        for (const k of l.keys) {
+          const r = await env.KV.get(k.name, "json");
+          if (r) out.push(r);
+        }
+        out.sort((a, b) => b.created - a.created);
+        return J({ requests: out });
+      }
+      if (m === "GET" && path === "/requests/image") {
+        const id = String(url.searchParams.get("id") || "").replace(/[^a-f0-9]/g, "");
+        return J({ image: await env.KV.get("reqimg:" + id) });
+      }
+      if (m === "POST" && path === "/requests/delete") {
+        const b = await body(req);
+        const id = String(b.id || "").replace(/[^a-f0-9]/g, "");
+        await env.KV.delete("req:" + id);
+        await env.KV.delete("reqimg:" + id);
         return J({ ok: true });
       }
       if (m === "GET" && path === "/users") {
