@@ -179,6 +179,16 @@ def paint_icon(p, name, rect, color, lw=1.9):
     elif name == "ticket":
         p.drawRoundedRect(QRectF(4.5, 7, 15, 10), 2, 2)
         p.drawLine(P(14, 7.5), P(14, 16.5))
+    elif name == "bell":
+        path = QPainterPath()
+        path.moveTo(P(6, 16.5))
+        path.cubicTo(P(7.5, 14.5), P(7, 12.5), P(7, 10.5))
+        path.cubicTo(P(7, 7.2), P(9.2, 5), P(12, 5))
+        path.cubicTo(P(14.8, 5), P(17, 7.2), P(17, 10.5))
+        path.cubicTo(P(17, 12.5), P(16.5, 14.5), P(18, 16.5))
+        path.closeSubpath()
+        p.drawPath(path)
+        p.drawArc(QRectF(10, 16.5, 4, 3.4), 180 * 16, 180 * 16)
     elif name == "download":
         p.drawLine(P(12, 4.5), P(12, 14.5))
         poly([(7.5, 10.5), (12, 15), (16.5, 10.5)])
@@ -403,6 +413,29 @@ class Background(QWidget):
             img = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         return QPixmap.fromImage(img)
 
+    fade_k = 0.0
+
+    def prepare_next(self):
+        """Hintergrund fuer die gerade eingestellten Farben vorab berechnen (fuer den Uebergang)."""
+        dpr = self.devicePixelRatioF()
+        pm = self.render(int(self.width() * dpr), int(self.height() * dpr))
+        pm.setDevicePixelRatio(dpr)
+        return pm
+
+    def begin_fade(self, pm):
+        self._next = pm
+        self.fade_k = 0.0
+
+    def set_fade(self, v):
+        self.fade_k = float(v)
+        self.update()
+
+    def end_fade(self):
+        if getattr(self, "_next", None) is not None:
+            self._pm, self._next = self._next, None
+            self._size = self.size()
+        self.update()
+
     def refresh(self):
         self._rebuild()
 
@@ -441,6 +474,11 @@ class Background(QWidget):
             p.drawPixmap(0, 0, self._pm)
         else:
             p.drawPixmap(self.rect(), self._pm)
+        nx = getattr(self, "_next", None)
+        if nx is not None:                           # neuer Hintergrund blendet weich ueber den alten
+            p.setOpacity(max(0.0, min(1.0, self.fade_k)))
+            p.drawPixmap(self.rect(), nx)
+            p.setOpacity(1.0)
         # feiner, klarer Rahmen ums Fenster (flaches Kartendesign)
         if self.radius > 0:
             r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)

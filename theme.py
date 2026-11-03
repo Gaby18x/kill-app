@@ -204,7 +204,7 @@ QLabel[role="onvideo"] {{ color: {r['onvideo']}; }}
 QLabel[role="onvideo2"] {{ color: {r['onvideo2']}; }}
 QLabel[role="badge"] {{ background: {acc_soft}; color: {r['acc']}; border-radius: 10px; padding: 2px 10px; }}
 QLabel[role="thumbbg"] {{ background: {rgba(T.ink(40))}; border-radius: 12px; }}
-QLabel[role="ctaicon"] {{ background: rgba(255,255,255,40); border-radius: 42px; }}
+QLabel[role="ctaicon"] {{ background: rgba(255,255,255,40); border-radius: 38px; }}
 QLineEdit {{ background: {rgba(T.card_fill(150))}; border: 1px solid {rgba(T.glass_edge(1.0))}; border-radius: 12px;
             padding: 9px 14px; color: {r['text']}; selection-background-color: {acc}; selection-color: white; }}
 QLineEdit:focus {{ border: 1px solid {rgba(T.ink(150))}; }}

@@ -769,6 +769,119 @@ class ServerMenu(QWidget):
         QTimer.singleShot(150, self.hide)
 
 
+class BellNotify(QWidget):
+    """Meldung oben: zuerst ploppt eine Glocke auf (sie klingelt kurz), dann gleitet der Text aus ihr heraus."""
+    H = 46
+
+    def __init__(self, parent, win):
+        super().__init__(parent)
+        self.win = win
+        self.text = ""
+        self.color = None
+        self.pop = 0.0
+        self.open = 0.0
+        self.ring = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+        self.t_hide = QTimer(self)
+        self.t_hide.setSingleShot(True)
+        self.t_hide.timeout.connect(self._close)
+        self.ra = QVariantAnimation(self)
+        self.ra.setDuration(700)
+        self.ra.setStartValue(0.0)
+        self.ra.setEndValue(1.0)
+        self.ra.valueChanged.connect(lambda v: (setattr(self, "ring", math.sin(float(v) * math.pi * 5) * 18 * (1 - float(v))),
+                                                self.update()))
+
+    def _maxw(self):
+        fm = QFontMetrics(app_font(10, True))
+        return min(self.avail(), self.H + 22 + fm.horizontalAdvance(self.text) + 22)
+
+    def avail(self):
+        w = self.win
+        x0 = self.x()
+        right = w.top_chip.mapTo(w.bg, w.top_chip.rect().topLeft()).x() - 16 if hasattr(w, "top_chip") else w.bg.width()
+        return max(self.H + 60, right - x0)
+
+    def reposition(self):
+        w = self.win
+        d = getattr(w, "dock", None)
+        if d is None:
+            return
+        xs, tw = d._layout()
+        dock_right = d.x() + (d.width() - d.total_width()) / 2 + d.total_width()
+        free_l = dock_right + 18
+        right = w.top_chip.mapTo(w.bg, w.top_chip.rect().topLeft()).x() - 16
+        x = int(max(free_l, (free_l + right) / 2 - 170))
+        self.setGeometry(x, 12 + (Dock.PANEL - self.H) // 2, max(self.H + 40, right - x), self.H)
+
+    def show_text(self, text, color=None):
+        self.text = text
+        self.color = QColor(color) if color is not None else None
+        self.reposition()
+        first = not self.isVisible() or self.pop < 0.5
+        self.show()
+        self.raise_()
+        if first:
+            self.open = 0.0
+            tween(self, "pop", 1.0, 420, QEasingCurve(QEasingCurve.OutBack))
+            QTimer.singleShot(260, lambda: tween(self, "open", 1.0, 460))
+        else:
+            self.open = 0.55
+            tween(self, "open", 1.0, 300)
+        self.ra.stop()
+        self.ra.start()
+        self.t_hide.start(3600)
+
+    def _close(self):
+        tween(self, "open", 0.0, 280)
+        QTimer.singleShot(260, lambda: tween(self, "pop", 0.0, 220))
+        QTimer.singleShot(520, lambda: self.pop < 0.05 and self.hide())
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        H = self.H
+        s = max(0.0, self.pop)
+        if s <= 0.01:
+            return
+        mw = self._maxw()
+        o = max(0.0, min(1.0, self.open))
+        wdt = H + (mw - H) * o
+        r = QRectF(0.5, 0.5, wdt - 1, H - 1)
+        c = QPointF(H / 2, H / 2)
+        p.translate(c)
+        p.scale(min(1.15, s), min(1.15, s))
+        p.translate(-c)
+        p.setOpacity(min(1.0, s))
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(T.card_fill(235))
+        p.drawRoundedRect(r, H / 2, H / 2)
+        # Glocke
+        bc = QRectF(5, 5, H - 10, H - 10)
+        col = self.color if self.color is not None else ink(235)
+        p.setPen(Qt.NoPen)
+        p.setBrush(with_alpha(col, 40) if self.color is not None else ink(22))
+        p.drawEllipse(bc)
+        p.save()
+        p.translate(bc.center())
+        p.rotate(self.ring)
+        p.translate(-bc.center())
+        paint_icon(p, "bell", QRectF(bc.center().x() - 10, bc.center().y() - 10, 20, 20), col, 1.7)
+        p.restore()
+        # Text gleitet aus der Glocke heraus
+        if o > 0.05:
+            p.setClipRect(QRectF(H - 4, 0, wdt - H, H))
+            p.setOpacity(min(1.0, s) * min(1.0, o * 1.4))
+            p.setPen(ink(240))
+            p.setFont(app_font(10, True))
+            fm = QFontMetrics(p.font())
+            avail = int(mw - H - 30)
+            p.drawText(QRectF(H + 6 - (1 - o) * 18, 0, avail + 10, H), Qt.AlignVCenter | Qt.AlignLeft,
+                       fm.elidedText(self.text, Qt.ElideRight, avail))
+
+
 class _NavProxy:
     """Damit der alte Code (self.nav[i].set_selected / set_nav_enabled) weiter funktioniert."""
 
@@ -1769,7 +1882,7 @@ class IconDot(QWidget):
     def __init__(self, icon, tip="", parent=None):
         super().__init__(parent)
         self.icon, self.dot, self.pop = icon, False, 0.0
-        self.setFixedSize(40, 40)
+        self.setFixedSize(46, 46)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(tip)
 
@@ -1791,7 +1904,7 @@ class IconDot(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(2, 2, -2, -2)
         paint_glass(p, self, r, r.height() / 2, 130 + 60 * self.pop)
-        paint_icon(p, self.icon, QRectF(r.center().x() - 8, r.center().y() - 8, 16, 16), ink(int(170 + 60 * self.pop)), 1.6)
+        paint_icon(p, self.icon, QRectF(r.center().x() - 9, r.center().y() - 9, 18, 18), ink(int(170 + 60 * self.pop)), 1.7)
         if self.dot:
             p.setPen(QPen(T.bg_stops()[0], 2))
             p.setBrush(RED)
@@ -1806,8 +1919,8 @@ class ServerChip(QWidget):
         super().__init__(parent)
         self.name = ""
         self.pop = 0.0
-        self.setFixedHeight(44)
-        self.setFixedWidth(230)
+        self.setFixedHeight(50)
+        self.setFixedWidth(250)
         self.setCursor(Qt.PointingHandCursor)
 
     def set_server(self, name, sid=None):
@@ -2122,7 +2235,7 @@ class Window(QMainWindow):
         self.dock.select = lambda i, animate=True: self.nav[i].set_selected(True)
         self.server_menu = ServerMenu(self.bg, self.switch_server, lambda: self.go_page(0))
         self.overlay = Overlay(self.bg)
-        self.toast = Toast(self.bg)
+        self.toast = BellNotify(self.bg, self)
         self.drop_hint = DropHint(self.bg)
         self.pending_video = None
         self.setAcceptDrops(True)
@@ -2219,7 +2332,10 @@ class Window(QMainWindow):
             big = d._exp
         w = d.total_width() + 160
         h = Dock.PANEL + (Dock.HEAD + 14 if big else 2)
-        d.setGeometry(int((self.bg.width() - w) / 2), 12, w, h)
+        lx = 200                                     # Dock beginnt rechts neben Logo und Seitenname
+        d.setGeometry(int(lx - (w - d.total_width()) / 2), 12, w, h)
+        if hasattr(self, "toast") and hasattr(self.toast, "reposition"):
+            self.toast.reposition()
         d.raise_()
         if hasattr(self, "theme_pop") and self.theme_pop.isVisible():
             self.theme_pop.raise_()
@@ -2373,28 +2489,28 @@ class Window(QMainWindow):
         lay = QHBoxLayout(sb)
         lay.setContentsMargins(4, 0, 150, 0)
         lay.setSpacing(6)
-        logo = Glass(radius=40, alpha=130)
-        logo.setFixedSize(48, 48)
-        ll = QHBoxLayout(logo)
-        ll.setContentsMargins(0, 0, 0, 0)
         lg = QLabel()
-        lg.setPixmap(QPixmap(resource("assets", "logo.png")).scaled(26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        dpr_ = 2
+        pm_ = QPixmap(resource("assets", "logo.png")).scaled(34 * dpr_, 34 * dpr_, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm_.setDevicePixelRatio(dpr_)
+        lg.setPixmap(pm_)
+        lg.setFixedSize(40, 48)
         lg.setAlignment(Qt.AlignCenter)
-        ll.addWidget(lg)
-        lay.addWidget(logo)
+        lay.addWidget(lg)
         lay.addSpacing(8)
         nm = QLabel("ACE")
         nm.setFont(display_font(15, QFont.Bold))
         lay.addWidget(nm)
         lay.addSpacing(10)
         self.page_lbl = label("", 10, color=MUT)
-        lay.addWidget(self.page_lbl)
+        self.page_lbl.setFixedWidth(1)
+        self.page_lbl.hide()                         # Seitenname: der Punkt im Dock zeigt die Seite
         lay.addStretch(1)
         self.top_chip = ServerChip()
         self.top_chip.clicked.connect(self.open_server_menu)
         lay.addWidget(self.top_chip)
         lay.addSpacing(4)
-        self.upd_dot = IconDot("download", "Update")
+        self.upd_dot = IconDot("refresh", "Nach Updates suchen")
         self.upd_dot.clicked.connect(self._top_update)
         lay.addSpacing(6)
         lay.addWidget(self.upd_dot)
@@ -3233,7 +3349,7 @@ class Window(QMainWindow):
         upd.body.addWidget(b)
         upd.body.addWidget(self.btn_update)
 
-        exp = BentoCard("folders", "folder", "Export", "Wohin die fertigen Clips gespeichert werden.")
+        exp = BentoCard(None, "folder", "Export", "Wohin die fertigen Clips gespeichert werden.")
         exp.body.addWidget(self.make_dir_row())
         keys = BentoCard(None, None, "Tastenkürzel", "Schneller schneiden mit der Tastatur.")
         kg = QGridLayout()
@@ -3328,21 +3444,29 @@ class Window(QMainWindow):
         an = self._theme_anim = QVariantAnimation(self)
         an.setStartValue(0.0)
         an.setEndValue(1.0)
-        an.setDuration(480)
+        an.setDuration(650)
         an.setEasingCurve(QEasingCurve(QEasingCurve.OutCubic))
 
         def mix(c0, c1, t):
             return QColor(int(c0.red() + (c1.red() - c0.red()) * t), int(c0.green() + (c1.green() - c0.green()) * t),
                           int(c0.blue() + (c1.blue() - c0.blue()) * t))
 
+        # Ziel-Hintergrund vorab berechnen und dann weich ueberblenden
+        T.configure(dark, acc, acc2, bg)
+        nxt = self.bg.prepare_next()
+        T.configure(dark, *(c.name() for c in a0))
+        self.bg.begin_fade(nxt)
+
         def step(v):
             t = float(v)
             T.configure(dark, *(mix(x, y, t).name() for x, y in zip(a0, a1)))
-            self._repaint_theme(qss=False, bg=False)      # Hintergrund erst am Ende neu berechnen (spart Rechenzeit)
+            self.bg.set_fade(t)
+            self._repaint_theme(qss=False, bg=False)
 
         def done():
             T.configure(dark, acc, acc2, bg)
-            self._repaint_theme()
+            self.bg.end_fade()
+            self._repaint_theme(bg=False)
         an.valueChanged.connect(step)
         an.finished.connect(done)
         an.start()
