@@ -808,9 +808,11 @@ class Overlay(QWidget):
         self.anim.valueChanged.connect(self._tick)
         self.anim.finished.connect(self._finished)
         self.closing = False
+        self.opaque = False
         self.eff = None
 
-    def present(self, card):
+    def present(self, card, opaque=False):
+        self.opaque = opaque
         if self.card is not None:
             self.card.hide()
             self.card.deleteLater()
@@ -878,6 +880,9 @@ class Overlay(QWidget):
         p = QPainter(self)
         c = QColor(T.scrim)
         c.setAlpha(int(c.alpha() * self.k * 1.0))
+        if self.opaque:                                   # ganzes Fenster zudecken (z. B. Pflicht-Update)
+            c = QColor(T.bg_stops()[0])
+            c.setAlpha(int(255 * min(1.0, self.k * 1.4)))
         p.setRenderHint(QPainter.Antialiasing)
         p.setClipPath(self.parent().clip_path())
         p.fillRect(self.rect(), c)

@@ -1133,10 +1133,8 @@ class Window(QMainWindow):
         self.timer.timeout.connect(self.poll_player)
         self.timer.start(8)
         QTimer.singleShot(250, self.check_ffmpeg)
-        QTimer.singleShot(150, self.start_account)
+        QTimer.singleShot(150, self.startup)
         QTimer.singleShot(500, self.stack.warm)
-        if self.st["autoupd"]:
-            QTimer.singleShot(1500, lambda: self.start_update_check(False))
 
     # ------------------------------------------------------------ Infrastruktur
     def ui(self, fn, *args):
@@ -1162,7 +1160,7 @@ class Window(QMainWindow):
     def save_settings(self):
         self.st.update(pre=self.s_pre.value(), post=self.s_post.value(), sens=int(round(self.s_sens.value())),
                        mode=self.seg_mode.current(), open=self.tg_open.isChecked(), loop=self.tg_loop.isChecked(),
-                       autoupd=self.tg_upd.isChecked(), gpu=self.tg_gpu.isChecked(),
+                       gpu=self.tg_gpu.isChecked(),
                        thorough=self.tg_thorough.isChecked())
         try:
             with open(SETTINGS, "w") as f:
@@ -2075,8 +2073,6 @@ class Window(QMainWindow):
         gl.addWidget(self.make_dir_row())
         v.addWidget(g)
         g, gl = panel("Updates", alpha=150)
-        self.tg_upd = toggle_row(gl, "Beim Start nach Updates suchen", "Neue Versionen werden automatisch gefunden.",
-                                 self.st["autoupd"])
         r = QHBoxLayout()
         r.addWidget(label(f"Installierte Version: {core.APP_VERSION}", 10.5, color=MUT), 1)
         b = PopButton("Nach Updates suchen", "refresh", "glass", 40)
@@ -2237,6 +2233,7 @@ class Window(QMainWindow):
         for w_ in (inv, user, pw):
             w_.returnPressed.connect(submit)
         self.overlay.present(card)
+        self.controls.raise_()
 
     def on_login_ok(self, name, role, token, offline, dismiss=False):
         self.st.update(acct_token=token, acct_role=role, acct_name=name)
@@ -2438,6 +2435,45 @@ class Window(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ Updates
+    def startup(self):
+        """Beim Start zuerst nach einem Update suchen. Gibt es eines, ist die App gesperrt, bis es installiert ist."""
+        def work():
+            try:
+                res = check_update()
+            except Exception:
+                res = None
+            if res:
+                self.ui(self.show_forced_update, *res)
+            else:
+                self.ui(self.start_account)
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_forced_update(self, version, url):
+        self.update_url = url
+        self.login_open = True                       # sperrt Esc und Schliessen des Fensters per Klick daneben
+        card = DialogCard("Neues Update verfügbar", f"ACE v{version} ist da. Du kannst die App erst wieder "
+                          "benutzen, wenn du das Update installiert hast. Es dauert nur einen Moment, danach "
+                          "startet ACE von selbst neu.", 560)
+        btn = PopButton("Jetzt aktualisieren", "upload", "accent", 48)
+        card.btns.addWidget(btn)
+
+        def go():
+            btn.setEnabled(False)
+            btn.setText("Lade herunter …")
+            card.err.setText("")
+
+            def work():
+                try:
+                    path = download_file(url, lambda p: self.ui(btn.setText, f"Lade … {int(p * 100)} %"))
+                    self.ui(self.run_installer, path)
+                except Exception as e:
+                    self.ui(lambda m: (btn.setEnabled(True), btn.setText("Erneut versuchen"),
+                                       card.err.setText(f"Download fehlgeschlagen: {m}")), str(e))
+            threading.Thread(target=work, daemon=True).start()
+        btn.clicked.connect(go)
+        self.overlay.present(card, opaque=True)
+        self.controls.raise_()                       # Schliessen/Minimieren bleibt erreichbar
+
     def start_update_check(self, manual):
         def work():
             try:
