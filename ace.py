@@ -27,7 +27,7 @@ import core
 from core import Player, check_update, download_file, export_clip, find_ffmpeg, resource, scan_video
 from theme import AMBER, DEFAULT, PRESETS, RED, T, ink, white, with_alpha
 from ui import (Background, Bar, ElidedLabel, FadeStack, Glass, Overlay, PopButton, SeekBar, Segmented, SliderRow,
-                Timeline, Toast, Toggle, app_font, paint_icon, tween)
+                Timeline, Toast, Toggle, app_font, display_font, load_fonts, paint_glass, paint_icon, tween)
 
 # Textrollen (Farben kommen aus dem Farbsystem, damit der Modus umschaltbar ist)
 TXT, MUT, DIM, ACC_TEXT = "text", "muted", "dim", "acc"
@@ -121,10 +121,8 @@ class Bridge(QObject):
 
 
 def hero_font(size):
-    """Grosse, ruhige Ueberschrift (mittleres Gewicht, wie im Vorbild)."""
-    f = app_font(size)
-    f.setWeight(QFont.Medium)
-    return f
+    """Grosse Ueberschrift / grosse Zahl (Sora)."""
+    return display_font(size, QFont.DemiBold)
 
 
 def label(text="", size=10.5, bold=False, color=None, wrap=False):
@@ -233,6 +231,8 @@ class ServerCard(QWidget):
         tween(self, "dhov", 0.0, 120)
 
     def mouseMoveEvent(self, e):
+        self.mx, self.my = e.position().x(), e.position().y()
+        self.update()
         if not self.add and not self.locked:
             tween(self, "ehov", 1.0 if self._edit_rect().contains(e.position()) else 0.0, 110)
             tween(self, "dhov", 1.0 if self._del_rect().contains(e.position()) else 0.0, 110)
@@ -258,13 +258,15 @@ class ServerCard(QWidget):
         p.translate(c)
         p.scale(1 + 0.012 * self.pop, 1 + 0.012 * self.pop)
         p.translate(-c)
-        rad = 20
-        p.setBrush(T.card_fill(140 + 50 * hv))
-        pen = QPen(T.line(1.3 + 0.8 * hv), 1)
+        rad = 22
+        paint_glass(p, self, r.adjusted(0.5, 0.5, -0.5, -0.5), rad, 140 + 50 * hv, border=not self.add,
+                    sheen=(getattr(self, "mx", c.x()), getattr(self, "my", c.y()), hv))
         if self.add:
+            pen = QPen(T.glass_edge(0.9 + 0.5 * hv), 1.2)
             pen.setStyle(Qt.DashLine)
-        p.setPen(pen)
-        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
         if self.add:
             d = 44
             cr = QRectF(c.x() - d / 2, c.y() - 34, d, d)
@@ -287,7 +289,7 @@ class ServerCard(QWidget):
         p.drawText(QRectF(tx, r.top() + 19, avail, 16), Qt.AlignVCenter,
                    QFontMetrics(p.font()).elidedText(self.sub, Qt.ElideRight, int(avail)))
         p.setPen(ink(240))
-        p.setFont(app_font(12, True))
+        p.setFont(display_font(12.5))
         p.drawText(QRectF(tx, r.top() + 36, avail, 24), Qt.AlignVCenter,
                    QFontMetrics(p.font()).elidedText(self.name, Qt.ElideRight, int(avail)))
         if not self.locked:
@@ -358,16 +360,65 @@ class NavItem(QWidget):
         p.setOpacity(1.0 if self.enabled_nav else 0.35)
         r = QRectF(self.rect()).adjusted(1, 3, -1, -3)
         a = max(0.0, min(1.0, self.sel))
-        p.setPen(Qt.NoPen)
-        p.setBrush(T.tab_fill(a))
-        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        if a > 0.02:
-            p.setPen(QPen(T.line(1.1 * a), 1))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        p.setPen(ink(int(140 + 50 * self.pop + 65 * a)))
-        p.setFont(app_font(9.5, False))
+        base = ink(int(150 + 60 * self.pop))
+        hi = T.pill()[1]
+        p.setPen(QColor(int(base.red() + (hi.red() - base.red()) * a), int(base.green() + (hi.green() - base.green()) * a),
+                        int(base.blue() + (hi.blue() - base.blue()) * a), int(base.alpha() + (255 - base.alpha()) * a)))
+        p.setFont(app_font(9.5, a > 0.5))
         p.drawText(r, Qt.AlignCenter, self.text)
+
+
+class NavBar(Glass):
+    """Glas-Leiste mit den Reitern; die helle Markierung gleitet weich zum gewaehlten Reiter."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, radius=40, alpha=120)
+        self.items = []
+        self.cur = 0
+        self.ix, self.iw = 0.0, 0.0
+        self.lay = QHBoxLayout(self)
+        self.lay.setContentsMargins(5, 0, 5, 0)
+        self.lay.setSpacing(0)
+        self.setFixedHeight(48)
+
+    def add(self, item):
+        self.items.append(item)
+        self.lay.addWidget(item)
+
+    def select(self, i, animate=True):
+        self.cur = i
+        g = self.items[i].geometry()
+        if animate and self.iw > 0 and g.width() > 0:
+            tween(self, "ix", g.x(), 320)
+            tween(self, "iw", g.width(), 320)
+        else:
+            self.ix, self.iw = float(g.x()), float(g.width())
+            self.update()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        QTimer.singleShot(0, lambda: self.select(self.cur, False))
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self.iw <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.ix + 1, 6, self.iw - 2, self.height() - 12)
+        pf, _ = T.pill()
+        g = QLinearGradient(r.topLeft(), r.bottomLeft())
+        g.setColorAt(0, pf.lighter(118))
+        g.setColorAt(1, pf.darker(104))
+        p.setPen(Qt.NoPen)
+        p.setBrush(g)
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        hl = QLinearGradient(r.left(), 0, r.right(), 0)
+        hl.setColorAt(0, QColor(255, 255, 255, 0))
+        hl.setColorAt(0.5, QColor(255, 255, 255, 160))
+        hl.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setPen(QPen(hl, 1))
+        p.drawLine(QPointF(r.left() + 12, r.top() + 1), QPointF(r.right() - 12, r.top() + 1))
 
 
 class SideServer(QWidget):
@@ -446,6 +497,8 @@ class ClipRow(QWidget):
         tween(self, "ehov", 0.0, 100)
 
     def mouseMoveEvent(self, e):
+        self.mx, self.my = e.position().x(), e.position().y()
+        self.update()
         tween(self, "xhov", 1.0 if self._xr().contains(e.position()) else 0.0, 100)
         tween(self, "ehov", 1.0 if self._er().contains(e.position()) else 0.0, 100)
 
@@ -470,9 +523,8 @@ class ClipRow(QWidget):
             p.setOpacity(max(0.0, self.appear))
             p.translate(0, (1 - self.appear) * 8)
         sel = 1.0 if self.selected else 0.0
-        p.setPen(QPen(T.line(1.2 + 0.8 * self.hov + 1.6 * sel), 1))
-        p.setBrush(T.card_fill(150 + 30 * self.hov + 50 * sel))
-        p.drawRoundedRect(r, 16, 16)
+        paint_glass(p, self, r, 18, 150 + 30 * self.hov + 60 * sel, tint=self.selected,
+                    sheen=(getattr(self, "mx", 0.0), getattr(self, "my", 0.0), self.hov))
         c = self.c
         # Vorschaubild rund wie ein Profilbild
         t = QRectF(r.left() + 14, r.top() + 14, 34, 34)
@@ -496,6 +548,7 @@ class ClipRow(QWidget):
                    QFontMetrics(p.font()).elidedText(cap, Qt.ElideRight, int(avail)))
         p.setPen(ink(240))
         p.setFont(app_font(10.5, True))
+        p.setFont(display_font(11))
         name = f"{fmt_short(c.start)} – {fmt_short(c.end)}"
         p.drawText(QRectF(tx, r.top() + 29, avail, 20), Qt.AlignVCenter,
                    QFontMetrics(p.font()).elidedText(name, Qt.ElideRight, int(avail)))
@@ -744,7 +797,9 @@ def panel(title, sub="", radius=30, alpha=130):
     lay.setSpacing(10)
     head = QVBoxLayout()
     head.setSpacing(2)
-    head.addWidget(label(title, 12.5, True))
+    tl_ = QLabel(title)
+    tl_.setFont(display_font(12.5, QFont.DemiBold))
+    head.addWidget(tl_)
     if sub:
         head.addWidget(ElidedLabel(sub, 9, False, MUT))
     lay.addLayout(head)
@@ -1002,9 +1057,7 @@ class IconDot(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-        p.setPen(QPen(T.line(1.3 + 0.6 * self.pop), 1))
-        p.setBrush(T.card_fill(120 + 40 * self.pop))
-        p.drawEllipse(r)
+        paint_glass(p, self, r, r.height() / 2, 130 + 60 * self.pop)
         paint_icon(p, self.icon, QRectF(r.center().x() - 8, r.center().y() - 8, 16, 16), ink(int(170 + 60 * self.pop)), 1.6)
         if self.dot:
             p.setPen(QPen(T.bg_stops()[0], 2))
@@ -1043,9 +1096,7 @@ class ServerChip(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
         r = QRectF(self.rect()).adjusted(1, 4, -1, -4)
-        p.setPen(QPen(T.line(1.3 + 0.6 * self.pop), 1))
-        p.setBrush(T.card_fill(120 + 40 * self.pop))
-        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        paint_glass(p, self, r, r.height() / 2, 130 + 60 * self.pop)
         x = r.left() + 6
         if self.name:
             paint_avatar(p, QRectF(x, r.center().y() - 12, 24, 24), self.name, 12, 10, getattr(self, "sid", None))
@@ -1535,20 +1586,26 @@ class Window(QMainWindow):
         lay = QHBoxLayout(sb)
         lay.setContentsMargins(4, 0, 150, 0)
         lay.setSpacing(6)
-        logo = QLabel()
-        logo.setPixmap(QPixmap(resource("assets", "logo.png")).scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        logo.setFixedWidth(44)
-        logo.setAlignment(Qt.AlignCenter)
+        logo = Glass(radius=40, alpha=130)
+        logo.setFixedSize(48, 48)
+        ll = QHBoxLayout(logo)
+        ll.setContentsMargins(0, 0, 0, 0)
+        lg = QLabel()
+        lg.setPixmap(QPixmap(resource("assets", "logo.png")).scaled(26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        lg.setAlignment(Qt.AlignCenter)
+        ll.addWidget(lg)
         lay.addWidget(logo)
-        lay.addSpacing(14)
+        lay.addSpacing(8)
         self.nav = []
+        self.navbar = NavBar()
         for i, (ic, tx) in enumerate((("server", "Server"), ("film", "Editor"), ("folder", "Bibliothek"),
                                       ("gear", "Einstellungen"))):
             n = NavItem(ic, tx)
             n.clicked.connect(lambda i=i: self.nav_clicked(i))
-            lay.addWidget(n)
+            self.navbar.add(n)
             self.nav.append(n)
         self.nav[1].set_nav_enabled(False)
+        lay.addWidget(self.navbar)
         lay.addStretch(1)
         self.top_chip = ServerChip()
         self.top_chip.clicked.connect(lambda: self.go_page(0))
@@ -1622,6 +1679,7 @@ class Window(QMainWindow):
             self.toggle_play()
         for k, n in enumerate(self.nav):
             n.set_selected(k == i)
+        self.navbar.select(i, animate)
         if animate:
             self.stack.go(i, 1 if i >= max(cur, 0) else -1)
         else:
@@ -3746,6 +3804,7 @@ class Window(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    load_fonts(resource("assets", "fonts"))
     app.setFont(app_font(10))
     try:
         from PySide6.QtGui import QIcon

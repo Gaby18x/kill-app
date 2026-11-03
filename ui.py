@@ -8,14 +8,36 @@ from theme import AMBER, RED, T, ink, white, with_alpha
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
                                QSizePolicy, QSlider, QWidget)
 
-FONT_FAMILIES = ["Segoe UI Variable Display", "Segoe UI", "Inter", "Helvetica Neue", "Arial", "DejaVu Sans"]
+FONT_FAMILIES = ["Manrope", "Segoe UI Variable Display", "Segoe UI", "Inter", "Arial", "DejaVu Sans"]
+DISPLAY_FAMILIES = ["Sora", "Manrope", "Segoe UI Variable Display", "Segoe UI", "Arial"]
+
+
+def load_fonts(folder):
+    """Eigene Schriften (Manrope fuer Text, Sora fuer Ueberschriften und Zahlen) einmal beim Start laden."""
+    import os
+    from PySide6.QtGui import QFontDatabase
+    try:
+        for n in sorted(os.listdir(folder)):
+            if n.lower().endswith(".ttf"):
+                QFontDatabase.addApplicationFont(os.path.join(folder, n))
+    except OSError:
+        pass
+
+
+def display_font(size=14.0, weight=QFont.DemiBold):
+    """Ueberschriften, grosse Zahlen und Titel."""
+    f = QFont()
+    f.setFamilies(DISPLAY_FAMILIES)
+    f.setPointSizeF(size)
+    f.setWeight(weight)
+    return f
 
 
 def app_font(size=10.0, bold=False):
     f = QFont()
     f.setFamilies(FONT_FAMILIES)
     f.setPointSizeF(size)
-    f.setWeight(QFont.DemiBold if bold else QFont.Normal)
+    f.setWeight(QFont.Bold if bold else QFont.Medium)
     return f
 
 
@@ -217,6 +239,7 @@ class Background(QWidget):
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._rebuild)
         self.hooks = {}
+        self.blur = None
         self.setMouseTracking(True)
 
     def mousePressEvent(self, e):
@@ -234,10 +257,13 @@ class Background(QWidget):
         if h:
             h(e)
 
+    instance = None             # das Fenster-Hintergrundbild (fuer das Milchglas der Karten)
+
     @staticmethod
     def render(w, h):
         pm = QPixmap(max(1, w), max(1, h))
         p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
         c0, c1, c2 = T.bg_stops()
         lg = QLinearGradient(0, 0, w, h)
         lg.setColorAt(0.0, c0)
@@ -248,10 +274,51 @@ class Background(QWidget):
         for cx, cy, r, c, a in T.bg_blobs():
             rg = QRadialGradient(cx * w, cy * h, r * m)
             rg.setColorAt(0.0, with_alpha(c, a))
+            rg.setColorAt(0.55, with_alpha(c, a * 0.35))
             rg.setColorAt(1.0, with_alpha(c, 0))
             p.fillRect(0, 0, w, h, rg)
+        # feine Lichtboegen (wie Umlaufbahnen) - unter dem Glas erscheinen sie weich verschwommen
+        lc = T.arc_color()
+        for (cx, cy, rx, ry, a0, span, alpha) in ((0.18, 1.15, 0.95, 0.80, 15, 70, 150), (0.92, -0.10, 0.70, 0.55, 190, 80, 120),
+                                                   (0.55, 1.45, 1.20, 0.95, 40, 60, 95)):
+            g = QLinearGradient(0, 0, w, h)
+            g.setColorAt(0, with_alpha(lc, 0))
+            g.setColorAt(0.5, with_alpha(lc, alpha))
+            g.setColorAt(1, with_alpha(lc, 0))
+            p.setPen(QPen(g, max(1.0, m / 800)))
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(QRectF((cx - rx) * w, (cy - ry) * h, 2 * rx * w, 2 * ry * h), int(a0 * 16), int(span * 16))
+        # Koernung (macht Flaechen edler, verhindert Farbstreifen)
+        p.setOpacity(T.grain_alpha())
+        p.drawTiledPixmap(0, 0, w, h, Background._grain())
         p.end()
         return pm
+
+    _grain_pm = None
+
+    @staticmethod
+    def _grain():
+        if Background._grain_pm is None:
+            import random
+            from PySide6.QtGui import QImage
+            img = QImage(160, 160, QImage.Format_ARGB32)
+            rnd = random.Random(7)
+            for y in range(160):
+                for x in range(160):
+                    v = rnd.randint(0, 255)
+                    img.setPixel(x, y, (40 << 24) | (v << 16) | (v << 8) | v)
+            Background._grain_pm = QPixmap.fromImage(img)
+        return Background._grain_pm
+
+    @staticmethod
+    def blurred(pm):
+        """Stark weichgezeichnete Kopie (verkleinern und wieder vergroessern) - Grundlage des Milchglases."""
+        w, h = pm.width(), pm.height()
+        img = pm.toImage()
+        for f in (14, 7):
+            small = img.scaled(max(1, w // f), max(1, h // f), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            img = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        return QPixmap.fromImage(img)
 
     def refresh(self):
         self._rebuild()
@@ -259,7 +326,10 @@ class Background(QWidget):
     def _rebuild(self):
         dpr = self.devicePixelRatioF()
         self._pm = self.render(int(self.width() * dpr), int(self.height() * dpr))
+        self.blur = self.blurred(self._pm)
         self._pm.setDevicePixelRatio(dpr)
+        self.blur.setDevicePixelRatio(dpr)
+        Background.instance = self
         self._size = self.size()
         self.update()
 
@@ -309,38 +379,65 @@ class Glass(QFrame):
         self.setAttribute(Qt.WA_StyledBackground, False)
 
     def paintEvent(self, e):
-        """Schwebende Glas-Karte: weicher Verlauf, feiner Rand."""
+        """Milchglas: weichgezeichneter Hintergrund, heller Schleier, Lichtkante."""
         if getattr(self, "ghost", False):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        rad = min(self.radius, 28) * 0.78
-        p.setPen(Qt.NoPen)
-        if self.dialog:
-            p.setBrush(T.dialog_fill)
-            p.drawRoundedRect(r, rad, rad)
-        else:
-            base = T.card_fill(self.alpha)
-            g = QLinearGradient(r.topLeft(), r.bottomRight())
-            g.setColorAt(0, QColor(base.red(), base.green(), base.blue(), min(255, int(base.alpha() * 1.55))))
-            g.setColorAt(1, QColor(base.red(), base.green(), base.blue(), int(base.alpha() * 0.7)))
-            p.setBrush(g)
-            p.drawRoundedRect(r, rad, rad)
-            if self.tint:                                   # hervorgehobene Karte: Akzentfarbe laeuft sanft ein
-                tg = QLinearGradient(r.topLeft(), r.bottomRight())
-                tg.setColorAt(0, with_alpha(T.acc, 78 if T.dark else 50))
-                tg.setColorAt(0.75, with_alpha(T.acc, 10))
-                tg.setColorAt(1, with_alpha(T.acc, 0))
-                p.setBrush(tg)
-                p.drawRoundedRect(r, rad, rad)
-        if self.border:
-            lg = QLinearGradient(r.topLeft(), r.bottomRight())
-            lg.setColorAt(0, T.line(1.9 if not self.dialog else 1.8))
-            lg.setColorAt(1, T.line(0.7))
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(lg, 1.0))
-            p.drawRoundedRect(r, rad, rad)
+        paint_glass(p, self, QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), min(self.radius, 30) * 0.8,
+                    self.alpha, dialog=self.dialog, tint=self.tint, border=self.border)
+
+
+def paint_glass(p, w, r, rad, alpha=130, dialog=False, tint=False, border=True, sheen=None):
+    """Zeichnet eine Milchglas-Flaeche in das Rechteck r des Widgets w (auch fuer eigene Karten-Widgets)."""
+    path = QPainterPath()
+    path.addRoundedRect(r, rad, rad)
+    p.save()
+    p.setClipPath(path)
+    bg = Background.instance
+    if bg is not None and bg.blur is not None and not dialog:
+        try:
+            off = w.mapTo(bg, r.topLeft().toPoint())
+            d = bg.blur.devicePixelRatio()
+            p.drawPixmap(r, bg.blur, QRectF(off.x() * d, off.y() * d, r.width() * d, r.height() * d))
+        except Exception:
+            pass
+    p.setPen(Qt.NoPen)
+    if dialog:
+        p.fillRect(r, T.dialog_fill)
+    k = max(0.0, min(1.0, (alpha - 90) / 120.0))
+    veil = QLinearGradient(r.topLeft(), r.bottomRight())
+    veil.setColorAt(0, T.glass_veil(1.25 + 0.4 * k))
+    veil.setColorAt(1, T.glass_veil(0.65 + 0.3 * k))
+    p.fillRect(r, veil)
+    if tint:
+        tg = QLinearGradient(r.topLeft(), r.bottomRight())
+        tg.setColorAt(0, with_alpha(T.acc, 60 if T.dark else 40))
+        tg.setColorAt(0.7, with_alpha(T.acc, 0))
+        p.fillRect(r, tg)
+    if sheen is not None and sheen[2] > 0.01:           # weicher Lichtfleck unter der Maus
+        sx, sy, sk = sheen
+        rg = QRadialGradient(sx, sy, max(120.0, r.width() * 0.6))
+        rg.setColorAt(0, QColor(255, 255, 255, int((26 if T.dark else 70) * sk)))
+        rg.setColorAt(1, QColor(255, 255, 255, 0))
+        p.fillRect(r, rg)
+    p.restore()
+    if border:
+        lg = QLinearGradient(r.topLeft(), r.bottomRight())
+        lg.setColorAt(0, T.glass_edge(1.0))
+        lg.setColorAt(0.45, T.glass_edge(0.35))
+        lg.setColorAt(1, T.glass_edge(0.55))
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(lg, 1.0))
+        p.drawRoundedRect(r, rad, rad)
+        if r.width() > 80 and rad >= 12:
+            x0, x1, y = r.left() + rad, r.right() - rad, r.top() + 1.2
+            hl = QLinearGradient(x0, 0, x1, 0)
+            hl.setColorAt(0, QColor(255, 255, 255, 0))
+            hl.setColorAt(0.3, T.glass_edge(0.9))
+            hl.setColorAt(1, QColor(255, 255, 255, 0))
+            p.setPen(QPen(hl, 1.0))
+            p.drawLine(QPointF(x0, y), QPointF(x1, y))
 
 
 # ------------------------------------------------------------------ Buttons
@@ -405,8 +502,9 @@ class PopButton(QAbstractButton):
         p.setRenderHint(QPainter.TextAntialiasing)
         M = self.M
         r = QRectF(self.rect()).adjusted(M, M, -M, -M)
-        s = 1 + 0.018 * self.pop - 0.048 * self.press       # Hover: kaum sichtbar, Druck: 0,97
+        s = 1 + 0.012 * self.pop - 0.045 * self.press       # Hover: hebt sich leicht, Druck: 0,97
         c = r.center()
+        p.translate(0, -1.2 * self.pop * (1 - self.press))
         p.translate(c)
         p.scale(s, s)
         p.translate(-c)
@@ -416,9 +514,18 @@ class PopButton(QAbstractButton):
         k = self.kind
         if k == "accent":
             pf, fg = T.pill()
-            p.setBrush(pf.lighter(106) if hv > 0.5 else pf)
+            g = QLinearGradient(r.topLeft(), r.bottomLeft())
+            g.setColorAt(0, pf.lighter(118 + int(8 * hv)))
+            g.setColorAt(1, pf.darker(104))
+            p.setBrush(g)
             p.setPen(Qt.NoPen)
             p.drawRoundedRect(r, rad, rad)
+            hl = QLinearGradient(r.left(), 0, r.right(), 0)
+            hl.setColorAt(0, QColor(255, 255, 255, 0))
+            hl.setColorAt(0.5, QColor(255, 255, 255, 150))
+            hl.setColorAt(1, QColor(255, 255, 255, 0))
+            p.setPen(QPen(hl, 1))
+            p.drawLine(QPointF(r.left() + rad, r.top() + 1), QPointF(r.right() - rad, r.top() + 1))
         elif k == "danger":
             p.setBrush(with_alpha(RED, 50))
             p.setPen(QPen(with_alpha(RED, 140), 1))
@@ -435,10 +542,8 @@ class PopButton(QAbstractButton):
             p.setPen(QPen(QColor(255, 255, 255, int(40 + 30 * hv)), 1))
             p.drawRoundedRect(r, rad, rad)
             fg = QColor(255, 255, 255, 235)
-        else:                                            # glass = ruhige Flaeche mit Rand
-            p.setBrush(T.card_fill(150 + 60 * hv))
-            p.setPen(QPen(T.line(1.4), 1.0))
-            p.drawRoundedRect(r, rad, rad)
+        else:                                            # glass = Milchglas-Pille
+            paint_glass(p, self, r, rad, 150 + 70 * hv)
             fg = ink(235)
         if self._kfocus and self.hasFocus():            # sichtbarer Tastatur-Fokus
             p.setBrush(Qt.NoBrush)
@@ -553,7 +658,7 @@ class Toggle(QAbstractButton):
             return QColor(int(off.red() + (c.red() - off.red()) * k), int(off.green() + (c.green() - off.green()) * k),
                           int(off.blue() + (c.blue() - off.blue()) * k), int(off.alpha() + (255 - off.alpha()) * k))
         p.setPen(Qt.NoPen)
-        p.setBrush(mixc(T.acc))
+        p.setBrush(mixc(T.pill()[0]))
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         d = r.height() - 6
         x = r.left() + 3 + (r.width() - d - 6) * self.k
@@ -644,8 +749,8 @@ class SmoothSlider(QWidget):
         p.setBrush(ink(38))
         p.drawRoundedRect(QRectF(left, cy - 3, right - left, 6), 3, 3)
         g = QLinearGradient(left, 0, right, 0)
-        g.setColorAt(0, T.acc)
-        g.setColorAt(1, T.acc2)
+        g.setColorAt(0, with_alpha(T.pill()[0], 140))
+        g.setColorAt(1, T.pill()[0])
         p.setBrush(g)
         p.drawRoundedRect(QRectF(left, cy - 3, max(6.0, x - left), 6), 3, 3)
         # Griff: weisser Kreis mit weichem Schatten, immer gleich gross
@@ -653,8 +758,8 @@ class SmoothSlider(QWidget):
         p.drawEllipse(QPointF(x, cy + 1.5), 10.5, 10.5)
         p.setBrush(QColor("#ffffff"))
         p.drawEllipse(QPointF(x, cy), 9, 9)
-        p.setBrush(T.acc)
-        p.drawEllipse(QPointF(x, cy), 3.4, 3.4)
+        p.setBrush(T.pill()[1] if T.dark else T.acc)
+        p.drawEllipse(QPointF(x, cy), 3.0, 3.0)
 
 
 class InfoDot(QWidget):
@@ -736,7 +841,7 @@ class FadeStack(QWidget):
         self.eff = None
         self.incoming = None
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(180)
+        self.anim.setDuration(260)
         self.anim.setEasingCurve(ease_out())
         self.anim.setStartValue(0.0)
         self.anim.setEndValue(1.0)
@@ -790,12 +895,15 @@ class FadeStack(QWidget):
 
     def _tick(self, v):
         if self.eff is not None:
-            self.eff.setOpacity(float(v))
+            self.eff.setOpacity(min(1.0, float(v) * 1.25))
+        if self.incoming is not None:
+            self.incoming.move(0, int((1 - float(v)) * 16))
 
     def _finish(self):
         self.anim.stop()
         if self.incoming is not None:
             self.incoming.setGraphicsEffect(None)       # Effekt entfernen: danach wird normal (schnell) gezeichnet
+            self.incoming.move(0, 0)
         self.incoming = None
         self.eff = None
 

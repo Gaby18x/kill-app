@@ -109,7 +109,7 @@ class Theme:
         """(Fuellung, Schriftfarbe) fuer die hervorgehobene Pille (aktiver Reiter, Haupt-Knopf)."""
         h, s, l = _hsl(self.acc)
         if self.dark:
-            return hsl(h, min(s, 0.75) * 0.95, 0.77), QColor("#14161a")
+            return hsl(h, min(s, 0.75) * 0.95, 0.86 if s < 0.25 else 0.77), QColor("#14161a")
         return hsl(h, min(s, 0.45), 0.20), QColor("#ffffff")
 
     def acc_bar(self):
@@ -138,21 +138,44 @@ class Theme:
         return hsl(h, 0.40 * self.sk_acc, 0.26, 0.94), hsl(h + 0.03, 0.46 * self.sk_acc, 0.12, 0.96)
 
     # ---- Hintergrund
+    def _aurora_sat(self):
+        return 0.32 + 0.45 * self.sk_acc
+
     def bg_stops(self):
         h, s, l = _hsl(self.bg)
-        k = self.sk_bg
+        k = 0.06 + 0.22 * self.sk_bg
         if self.dark:
-            return (hsl(h, 0.10 * k, 0.052), hsl(h, 0.10 * k, 0.060), hsl(h, 0.08 * k, 0.046))
-        return (hsl(h, 0.10 * k, 0.935), hsl(h, 0.10 * k, 0.95), hsl(h, 0.10 * k, 0.93))
+            return (hsl(h + 0.02, k, 0.065), hsl(h, k, 0.045), hsl(h - 0.03, k, 0.07))
+        return (hsl(h + 0.02, k * 0.9, 0.93), hsl(h, k * 0.8, 0.955), hsl(h - 0.03, k * 0.9, 0.925))
 
     def bg_blobs(self):
-        """(x, y, radius, Farbe, Alpha) - nur zwei sehr dezente Lichtflecken, kein buntes Glas mehr."""
-        h, s, l = _hsl(self.bg)
-        a1 = _hsl(self.acc)
-        k = self.sk_bg
+        """(x, y, radius, Farbe, Alpha) - weiche Aurora-Lichter hinter dem Glas."""
+        ha = _hsl(self.acc)[0]
+        h2 = _hsl(self.acc2)[0]
+        hb = _hsl(self.bg)[0]
+        s = self._aurora_sat()
         if self.dark:
-            return [(0.55, 0.35, 0.55, hsl(a1[0], 0.25 * k, 0.40), 26), (0.0, 1.0, 0.45, hsl(h, 0.3 * k, 0.35), 14)]
-        return [(0.98, 0.0, 0.55, hsl(a1[0], 0.8 * k, 0.80), 70), (0.0, 1.0, 0.45, hsl(h, 0.7 * k, 0.82), 50)]
+            return [(0.10, 0.08, 0.55, hsl(ha, s, 0.46), 150), (0.90, 0.22, 0.48, hsl(h2 + 0.05, s, 0.50), 120),
+                    (0.58, 1.00, 0.62, hsl(hb - 0.08, s * 0.9, 0.40), 140), (0.36, 0.55, 0.30, hsl(ha + 0.04, s, 0.55), 55)]
+        return [(0.10, 0.08, 0.55, hsl(ha, s, 0.78), 170), (0.90, 0.22, 0.48, hsl(h2 + 0.05, s, 0.80), 150),
+                (0.58, 1.00, 0.62, hsl(hb - 0.08, s * 0.9, 0.76), 160), (0.36, 0.55, 0.30, hsl(ha + 0.04, s, 0.82), 80)]
+
+    def arc_color(self):
+        return QColor(255, 255, 255) if self.dark else hsl(_hsl(self.acc)[0], 0.3, 0.35)
+
+    def grain_alpha(self):
+        return 0.45 if self.dark else 0.30
+
+    def glass_veil(self, k=1.0):
+        """Schleier ueber dem weichgezeichneten Hintergrund: dunkles Rauchglas bzw. helles Milchglas."""
+        if self.dark:
+            return QColor(14, 16, 22, int(max(0, min(255, 70 * k))))
+        return QColor(255, 255, 255, int(max(0, min(255, 120 * k))))
+
+    def glass_edge(self, k=1.0):
+        if self.dark:
+            return QColor(255, 255, 255, int(max(0, min(255, 72 * k))))
+        return QColor(255, 255, 255, int(max(0, min(255, 240 * k))))
 
     # ---- Globales Stylesheet
     def qss(self):
