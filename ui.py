@@ -168,6 +168,26 @@ def paint_icon(p, name, rect, color, lw=1.9):
         p.drawLine(P(6, 12), P(18, 12))
     elif name == "square":
         p.drawRoundedRect(QRectF(6.5, 6.5, 11, 11), 2.4, 2.4)
+    elif name == "user":
+        p.drawEllipse(P(12, 8.5), 3.6, 3.6)
+        p.drawArc(QRectF(5, 13.5, 14, 12), 20 * 16, 140 * 16)
+    elif name == "lock":
+        p.drawRoundedRect(QRectF(6, 11, 12, 9), 2.2, 2.2)
+        p.drawArc(QRectF(8.5, 5, 7, 10), 0, 180 * 16)
+        p.drawLine(P(8.5, 10), P(8.5, 11))
+        p.drawLine(P(15.5, 10), P(15.5, 11))
+    elif name == "ticket":
+        p.drawRoundedRect(QRectF(4.5, 7, 15, 10), 2, 2)
+        p.drawLine(P(14, 7.5), P(14, 16.5))
+    elif name == "moon":
+        path = QPainterPath()
+        path.addEllipse(QRectF(5, 5, 14, 14))
+        cut = QPainterPath()
+        cut.addEllipse(QRectF(9.5, 2.5, 13, 13))
+        p.drawPath(path.subtracted(cut))
+    elif name == "arrow":
+        p.drawLine(P(6, 12), P(18, 12))
+        poly([(13, 7), (18, 12), (13, 17)])
     elif name == "expand":
         for (x, y, dx, dy) in ((6, 6, 1, 1), (18, 6, -1, 1), (6, 18, 1, -1), (18, 18, -1, -1)):
             p.drawPolyline(QPolygonF([P(x + 5 * dx, y), P(x, y), P(x, y + 5 * dy)]))
@@ -261,38 +281,59 @@ class Background(QWidget):
 
     @staticmethod
     def render(w, h):
+        """Schwarz oben, von unten steigt ein violettes Licht auf (wie das Hintergrundbild)."""
+        from PySide6.QtGui import QTransform
         pm = QPixmap(max(1, w), max(1, h))
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
-        c0, c1, c2 = T.bg_stops()
-        lg = QLinearGradient(0, 0, w, h)
-        lg.setColorAt(0.0, c0)
-        lg.setColorAt(0.5, c1)
-        lg.setColorAt(1.0, c2)
+        gc = T.glow()
+        base = QColor(0, 0, 0) if T.dark else QColor(255, 255, 255)
+        lg = QLinearGradient(0, 0, 0, h)
+        lg.setColorAt(0.0, base)
+        lg.setColorAt(0.45, base)
+        lg.setColorAt(1.0, gc)
         p.fillRect(0, 0, w, h, lg)
-        m = max(w, h)
-        for cx, cy, r, c, a in T.bg_blobs():
-            rg = QRadialGradient(cx * w, cy * h, r * m)
-            rg.setColorAt(0.0, with_alpha(c, a))
-            rg.setColorAt(0.55, with_alpha(c, a * 0.35))
-            rg.setColorAt(1.0, with_alpha(c, 0))
-            p.fillRect(0, 0, w, h, rg)
-        # feine Lichtboegen (wie Umlaufbahnen) - unter dem Glas erscheinen sie weich verschwommen
-        lc = T.arc_color()
-        for (cx, cy, rx, ry, a0, span, alpha) in ((0.18, 1.15, 0.95, 0.80, 15, 70, 150), (0.92, -0.10, 0.70, 0.55, 190, 80, 120),
-                                                   (0.55, 1.45, 1.20, 0.95, 40, 60, 95)):
-            g = QLinearGradient(0, 0, w, h)
-            g.setColorAt(0, with_alpha(lc, 0))
-            g.setColorAt(0.5, with_alpha(lc, alpha))
-            g.setColorAt(1, with_alpha(lc, 0))
-            p.setPen(QPen(g, max(1.0, m / 800)))
-            p.setBrush(Qt.NoBrush)
-            p.drawArc(QRectF((cx - rx) * w, (cy - ry) * h, 2 * rx * w, 2 * ry * h), int(a0 * 16), int(span * 16))
-        # Koernung (macht Flaechen edler, verhindert Farbstreifen)
-        p.setOpacity(T.grain_alpha())
-        p.drawTiledPixmap(0, 0, w, h, Background._grain())
+        # grosse dunkle Ellipse oben in der Mitte: das Licht kommt nur von den Raendern und von unten
+        p.save()
+        p.setTransform(QTransform().translate(w * 0.5, h * 0.18).scale(w * 0.78, h * 0.80))
+        rg = QRadialGradient(0, 0, 1.0)
+        rg.setColorAt(0.0, with_alpha(base, 255))
+        rg.setColorAt(0.62, with_alpha(base, 245))
+        rg.setColorAt(1.0, with_alpha(base, 0))
+        p.fillRect(QRectF(-1.5, -1.5, 3, 3), rg)
+        p.restore()
+        for cx in (0.0, 1.0):                       # hellere Ecken unten
+            cg = QRadialGradient(cx * w, h * 1.02, max(w, h) * 0.42)
+            cg.setColorAt(0, with_alpha(gc.lighter(115), 150))
+            cg.setColorAt(1, with_alpha(gc, 0))
+            p.fillRect(0, 0, w, h, cg)
         p.end()
         return pm
+
+    @staticmethod
+    def login_backdrop(w, h):
+        """Hintergrund des Anmeldefensters: schwarze Flaeche mit weichen blauen Schwaden (wie Bild 2)."""
+        from PySide6.QtGui import QTransform
+        pm = QPixmap(max(1, w // 4), max(1, h // 4))
+        sw, sh = pm.width(), pm.height()
+        pm.fill(QColor(0, 0, 0))
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        blue = QColor(30, 64, 205)
+        for (x, y, rx, ry, rot, a) in ((0.18, 0.25, 0.30, 0.10, 35, 230), (0.70, 0.12, 0.38, 0.11, -20, 220),
+                                        (0.85, 0.55, 0.30, 0.13, 60, 200), (0.30, 0.78, 0.36, 0.10, -35, 230),
+                                        (0.55, 0.45, 0.22, 0.07, 15, 170), (0.05, 0.60, 0.18, 0.12, 80, 190),
+                                        (0.62, 0.92, 0.28, 0.09, 10, 200), (0.95, 0.15, 0.15, 0.10, 45, 180)):
+            p.save()
+            p.setTransform(QTransform().translate(x * sw, y * sh).rotate(rot).scale(rx * sw, ry * sh))
+            rg = QRadialGradient(0, 0, 1.0)
+            rg.setColorAt(0.0, with_alpha(blue, a))
+            rg.setColorAt(0.6, with_alpha(blue, a * 0.55))
+            rg.setColorAt(1.0, with_alpha(blue, 0))
+            p.fillRect(QRectF(-1.2, -1.2, 2.4, 2.4), rg)
+            p.restore()
+        p.end()
+        return Background.blurred(pm).scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
     _grain_pm = None
 
@@ -315,7 +356,7 @@ class Background(QWidget):
         """Stark weichgezeichnete Kopie (verkleinern und wieder vergroessern) - Grundlage des Milchglases."""
         w, h = pm.width(), pm.height()
         img = pm.toImage()
-        for f in (14, 7):
+        for f in (6, 3):
             small = img.scaled(max(1, w // f), max(1, h // f), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             img = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         return QPixmap.fromImage(img)
@@ -326,9 +367,8 @@ class Background(QWidget):
     def _rebuild(self):
         dpr = self.devicePixelRatioF()
         self._pm = self.render(int(self.width() * dpr), int(self.height() * dpr))
-        self.blur = self.blurred(self._pm)
+        self.blur = None                         # kein Glas mehr: Karten sind ruhige, deckende Flaechen
         self._pm.setDevicePixelRatio(dpr)
-        self.blur.setDevicePixelRatio(dpr)
         Background.instance = self
         self._size = self.size()
         self.update()
@@ -389,55 +429,30 @@ class Glass(QFrame):
 
 
 def paint_glass(p, w, r, rad, alpha=130, dialog=False, tint=False, border=True, sheen=None):
-    """Zeichnet eine Milchglas-Flaeche in das Rechteck r des Widgets w (auch fuer eigene Karten-Widgets)."""
+    """Karte (ohne Glas): deckende ruhige Flaeche, feiner warmer Rand, optional Lichtfleck unter der Maus."""
     path = QPainterPath()
     path.addRoundedRect(r, rad, rad)
     p.save()
     p.setClipPath(path)
-    bg = Background.instance
-    if bg is not None and bg.blur is not None and not dialog:
-        try:
-            off = w.mapTo(bg, r.topLeft().toPoint())
-            d = bg.blur.devicePixelRatio()
-            p.drawPixmap(r, bg.blur, QRectF(off.x() * d, off.y() * d, r.width() * d, r.height() * d))
-        except Exception:
-            pass
     p.setPen(Qt.NoPen)
-    if dialog:
-        p.fillRect(r, T.dialog_fill)
     k = max(0.0, min(1.0, (alpha - 90) / 120.0))
-    veil = QLinearGradient(r.topLeft(), r.bottomRight())
-    veil.setColorAt(0, T.glass_veil(1.25 + 0.4 * k))
-    veil.setColorAt(1, T.glass_veil(0.65 + 0.3 * k))
-    p.fillRect(r, veil)
+    p.fillRect(r, T.dialog_fill if dialog else (T.card_fill(alpha) if alpha >= 175 else T.glass_veil(k)))
     if tint:
         tg = QLinearGradient(r.topLeft(), r.bottomRight())
-        tg.setColorAt(0, with_alpha(T.acc, 60 if T.dark else 40))
-        tg.setColorAt(0.7, with_alpha(T.acc, 0))
+        tg.setColorAt(0, with_alpha(T.glow(), 70 if T.dark else 45))
+        tg.setColorAt(0.8, with_alpha(T.glow(), 0))
         p.fillRect(r, tg)
-    if sheen is not None and sheen[2] > 0.01:           # weicher Lichtfleck unter der Maus
+    if sheen is not None and sheen[2] > 0.01:
         sx, sy, sk = sheen
-        rg = QRadialGradient(sx, sy, max(120.0, r.width() * 0.6))
-        rg.setColorAt(0, QColor(255, 255, 255, int((26 if T.dark else 70) * sk)))
+        rg = QRadialGradient(sx, sy, max(110.0, r.width() * 0.5))
+        rg.setColorAt(0, QColor(255, 255, 255, int((14 if T.dark else 0) * sk)) if T.dark else QColor(0, 0, 0, int(8 * sk)))
         rg.setColorAt(1, QColor(255, 255, 255, 0))
         p.fillRect(r, rg)
     p.restore()
     if border:
-        lg = QLinearGradient(r.topLeft(), r.bottomRight())
-        lg.setColorAt(0, T.glass_edge(1.0))
-        lg.setColorAt(0.45, T.glass_edge(0.35))
-        lg.setColorAt(1, T.glass_edge(0.55))
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(lg, 1.0))
+        p.setPen(QPen(T.glass_edge(1.0), 1.0))
         p.drawRoundedRect(r, rad, rad)
-        if r.width() > 80 and rad >= 12:
-            x0, x1, y = r.left() + rad, r.right() - rad, r.top() + 1.2
-            hl = QLinearGradient(x0, 0, x1, 0)
-            hl.setColorAt(0, QColor(255, 255, 255, 0))
-            hl.setColorAt(0.3, T.glass_edge(0.9))
-            hl.setColorAt(1, QColor(255, 255, 255, 0))
-            p.setPen(QPen(hl, 1.0))
-            p.drawLine(QPointF(x0, y), QPointF(x1, y))
 
 
 # ------------------------------------------------------------------ Buttons
@@ -452,6 +467,8 @@ class PopButton(QAbstractButton):
         self.on_dark = False                          # True: sitzt auf dem Video (Schrift immer hell)
         self.pop = 0.0
         self.press = 0.0
+        self.fill = 0.0
+        self.ox = self.oy = 0.0
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.TabFocus)             # nur per Tab erreichbar (Klick nimmt keinen Fokus)
         self._kfocus = False
@@ -473,13 +490,20 @@ class PopButton(QAbstractButton):
 
     def enterEvent(self, e):
         tween(self, "pop", 1.0, 150)
+        pos = e.position() if hasattr(e, "position") else None
+        if pos is not None:
+            self.ox, self.oy = pos.x(), pos.y()
+        tween(self, "fill", 1.0, 500, _bezier(0.16, 1, 0.3, 1))      # Fuellung waechst vom Eintrittspunkt aus
 
     def leaveEvent(self, e):
         tween(self, "pop", 0.0, 120)                 # Ausblenden etwas schneller als Einblenden
         tween(self, "press", 0.0, 120)
+        tween(self, "fill", 0.0, 500, _bezier(0.16, 1, 0.3, 1))
 
     def mousePressEvent(self, e):
+        self.ox, self.oy = e.position().x(), e.position().y()
         tween(self, "press", 1.0, 100)
+        tween(self, "fill", 1.0, 500, _bezier(0.16, 1, 0.3, 1))
         super().mousePressEvent(e)
 
     def mouseReleaseEvent(self, e):
@@ -526,6 +550,18 @@ class PopButton(QAbstractButton):
             hl.setColorAt(1, QColor(255, 255, 255, 0))
             p.setPen(QPen(hl, 1))
             p.drawLine(QPointF(r.left() + rad, r.top() + 1), QPointF(r.right() - rad, r.top() + 1))
+        elif k == "blue":                                 # kraeftiger blauer Knopf (Anmeldung)
+            rad = min(rad, 12)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(20, 99, 255).lighter(100 + int(10 * hv)))
+            p.drawRoundedRect(r, rad, rad)
+            fg = QColor("#ffffff")
+        elif k == "white":                                # heller Knopf (zweite Wahl)
+            rad = min(rad, 12)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(240, 241, 246) if hv < 0.5 else QColor(255, 255, 255))
+            p.drawRoundedRect(r, rad, rad)
+            fg = QColor("#1f2430")
         elif k == "danger":
             p.setBrush(with_alpha(RED, 50))
             p.setPen(QPen(with_alpha(RED, 140), 1))
@@ -542,9 +578,28 @@ class PopButton(QAbstractButton):
             p.setPen(QPen(QColor(255, 255, 255, int(40 + 30 * hv)), 1))
             p.drawRoundedRect(r, rad, rad)
             fg = QColor(255, 255, 255, 235)
-        else:                                            # glass = Milchglas-Pille
-            paint_glass(p, self, r, rad, 150 + 70 * hv)
-            fg = ink(235)
+        else:                                            # Origin-Knopf: Kreis fuellt sich vom Mauspunkt aus
+            rad = min(rad, 12)
+            path = QPainterPath()
+            path.addRoundedRect(r, rad, rad)
+            p.setPen(Qt.NoPen)
+            p.setBrush(T.card_fill(150))
+            p.drawPath(path)
+            f = max(0.0, min(1.0, self.fill)) if self.isEnabled() else 0.0
+            if f > 0.002:
+                ox, oy = self.ox, self.oy
+                cover = 2 * max(math.hypot(ox - r.left(), oy - r.top()), math.hypot(r.right() - ox, oy - r.top()),
+                                math.hypot(ox - r.left(), r.bottom() - oy), math.hypot(r.right() - ox, r.bottom() - oy))
+                p.save()
+                p.setClipPath(path)
+                p.setBrush(ink(255))
+                rr = cover / 2 * f
+                p.drawEllipse(QPointF(ox, oy), rr, rr)
+                p.restore()
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(T.glass_edge(1.0), 0.8))
+            p.drawPath(path)
+            fg = (QColor("#111111") if T.dark else QColor("#ffffff")) if f > 0.45 else ink(235)
         if self._kfocus and self.hasFocus():            # sichtbarer Tastatur-Fokus
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(T.acc, 2))
@@ -555,6 +610,14 @@ class PopButton(QAbstractButton):
         iw = 18 if self.icon_name else 0
         gap = 8 if (iw and tw) else 0
         x = r.center().x() - (iw + gap + tw) / 2
+        if getattr(self, "icon_right", False):
+            if tw:
+                p.setFont(self.font())
+                p.drawText(QRectF(x, r.top(), tw + 2, r.height()), Qt.AlignVCenter | Qt.AlignLeft, self.text())
+            if self.icon_name:
+                ix = x + tw + gap + 2 * self.pop
+                paint_icon(p, self.icon_name, QRectF(ix, r.center().y() - iw / 2, iw, iw), fg)
+            return
         if self.icon_name:
             paint_icon(p, self.icon_name, QRectF(x, r.center().y() - iw / 2, iw, iw), fg)
             x += iw + gap
@@ -993,9 +1056,14 @@ class Overlay(QWidget):
         p = QPainter(self)
         c = QColor(T.scrim)
         c.setAlpha(int(c.alpha() * self.k * 1.0))
-        if self.opaque:                                   # ganzes Fenster zudecken (z. B. Pflicht-Update)
-            c = QColor(T.bg_stops()[0])
-            c.setAlpha(int(255 * min(1.0, self.k * 1.4)))
+        if self.opaque:                                   # ganzes Fenster zudecken (Anmeldung, Pflicht-Update)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setClipPath(self.parent().clip_path())
+            if getattr(self, "_bd", None) is None or self._bd.size() != self.size():
+                self._bd = Background.login_backdrop(self.width(), self.height())
+            p.setOpacity(min(1.0, self.k * 1.4))
+            p.drawPixmap(0, 0, self._bd)
+            return
         p.setRenderHint(QPainter.Antialiasing)
         p.setClipPath(self.parent().clip_path())
         p.fillRect(self.rect(), c)

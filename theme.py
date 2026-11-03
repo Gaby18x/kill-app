@@ -55,7 +55,7 @@ class Theme:
         self.on_acc = QColor("#1c1838") if (lum(self.acc) + lum(self.acc2)) / 2 > 0.66 else QColor("#ffffff")
         self.icon = hsl(h, 0.28 * self.sk_acc, 0.46, 0.9) if not self.dark else hsl(h, 0.35 * self.sk_acc, 0.80, 0.9)
         # Textfarben
-        self.text = QColor(236, 237, 252) if self.dark else QColor(42, 40, 72)
+        self.text = QColor(246, 243, 236) if self.dark else QColor(17, 17, 17)
         self.k_white = 0.2 if self.dark else 1.0           # Glas-Weiss ist im Dunkeln viel schwaecher
         self.err = QColor("#ff8a9b") if self.dark else QColor("#d6334f")
         self.okc = QColor("#5fe3b5") if self.dark else QColor("#1f9d73")
@@ -90,14 +90,14 @@ class Theme:
         """Fuellfarbe einer Karte; a ist die alte Glas-Staerke (110..170) und steuert nur die Helligkeit leicht."""
         k = max(0.0, min(1.0, (a - 90) / 120.0))
         if self.dark:
-            return QColor(255, 255, 255, int(7 + 9 * k))         # ganz leicht aufgehellte Flaeche auf fast Schwarz
-        return QColor(255, 255, 255, int(150 + 85 * k))
+            return QColor(23, 23, 22, int(215 + 35 * k))          # #171716 - leicht abgesetzte Flaeche
+        return QColor(245, 247, 250, int(220 + 35 * k))
 
     def line(self, k=1.0):
         """Feine Randfarbe (heller Strich im Dunkeln, dunkler im Hellen)."""
         if self.dark:
-            return QColor(255, 255, 255, int(min(255, 24 * k)))
-        return QColor(30, 30, 50, int(min(255, 22 * k)))
+            return QColor(255, 248, 230, int(min(255, 20 * k)))
+        return QColor(17, 24, 39, int(min(255, 20 * k)))
 
     def tab_fill(self, a=1.0):
         """Hinterlegung des aktiven Reiters (dezent, nicht bunt)."""
@@ -167,15 +167,23 @@ class Theme:
         return 0.45 if self.dark else 0.30
 
     def glass_veil(self, k=1.0):
-        """Schleier ueber dem weichgezeichneten Hintergrund: dunkles Rauchglas bzw. helles Milchglas."""
+        """Kartenflaeche (kein Glas mehr): ruhiges, fast deckendes Dunkel bzw. Weiss."""
         if self.dark:
-            return QColor(14, 16, 22, int(max(0, min(255, 70 * k))))
-        return QColor(255, 255, 255, int(max(0, min(255, 120 * k))))
+            return QColor(17, 17, 17, int(max(0, min(255, 200 + 30 * k))))
+        return QColor(255, 255, 255, int(max(0, min(255, 215 + 25 * k))))
 
     def glass_edge(self, k=1.0):
+        """Kartenrand (#2b2a25 im Dunkeln, #e3e7ec im Hellen)."""
         if self.dark:
-            return QColor(255, 255, 255, int(max(0, min(255, 72 * k))))
-        return QColor(255, 255, 255, int(max(0, min(255, 240 * k))))
+            return QColor(43, 42, 37, int(max(0, min(255, 255 * min(1.0, 0.6 + 0.4 * k)))))
+        return QColor(227, 231, 236, int(max(0, min(255, 255 * min(1.0, 0.6 + 0.4 * k)))))
+
+    def glow(self):
+        """Farbe des Lichts am unteren Rand des Hintergrunds (Standard: Violett wie im Vorbild)."""
+        h, s, l = _hsl(self.acc)
+        if s < 0.25:
+            return QColor(74, 37, 168) if self.dark else QColor(196, 182, 255)
+        return hsl(h, min(0.8, s + 0.1), 0.42) if self.dark else hsl(h, 0.7, 0.85)
 
     # ---- Globales Stylesheet
     def qss(self):
@@ -197,9 +205,12 @@ QLabel[role="onvideo2"] {{ color: {r['onvideo2']}; }}
 QLabel[role="badge"] {{ background: {acc_soft}; color: {r['acc']}; border-radius: 10px; padding: 2px 10px; }}
 QLabel[role="thumbbg"] {{ background: {rgba(T.ink(40))}; border-radius: 12px; }}
 QLabel[role="ctaicon"] {{ background: rgba(255,255,255,40); border-radius: 42px; }}
-QLineEdit {{ background: {field}; border: 1px solid {rgba(self.alpha_of(T.acc, 90))}; border-radius: 13px;
+QLineEdit {{ background: {rgba(T.card_fill(150))}; border: 1px solid {rgba(T.glass_edge(1.0))}; border-radius: 12px;
             padding: 9px 14px; color: {r['text']}; selection-background-color: {acc}; selection-color: white; }}
-QLineEdit:focus {{ border: 1px solid {acc}; background: {field_f}; }}
+QLineEdit:focus {{ border: 1px solid {rgba(T.ink(150))}; }}
+QLineEdit[role="underline"] {{ background: transparent; border: none; border-bottom: 2px solid rgba(255,255,255,150);
+            border-radius: 0px; padding: 8px 4px 8px 4px; color: white; font-size: 11pt; }}
+QLineEdit[role="underline"]:focus {{ border-bottom: 2px solid rgba(255,255,255,240); }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QScrollArea > QWidget {{ background: transparent; }}

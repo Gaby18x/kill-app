@@ -1,5 +1,6 @@
 """ACE - schneidet automatisch Kill-Clips aus GTA/FiveM-Aufnahmen (helle Glas-Oberflaeche, Qt)."""
 import json
+import math
 import os
 import re
 import shutil
@@ -11,10 +12,10 @@ import uuid
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
                            QPolygonF)
-from PySide6.QtWidgets import (QApplication, QColorDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+from PySide6.QtWidgets import (QApplication, QFrame, QColorDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 try:
@@ -419,6 +420,278 @@ class NavBar(Glass):
         hl.setColorAt(1, QColor(255, 255, 255, 0))
         p.setPen(QPen(hl, 1))
         p.drawLine(QPointF(r.left() + 12, r.top() + 1), QPointF(r.right() - 12, r.top() + 1))
+
+
+class Dock(QWidget):
+    """Navigation unten in der Mitte wie ein Apple-Dock: Symbole vergroessern sich weich zur Maus hin,
+    beim Darueberfahren erscheint der Name darueber, der aktive Bereich hat einen Punkt darunter."""
+    BASE, MAG, DIST, PANEL, HEAD = 40.0, 64.0, 150.0, 60, 58
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.items = items                    # Liste von dicts: icon, label, fn, sep(optional)
+        self.mx = None
+        self.active = 0
+        self.disabled = set()
+        self.dots = set()
+        self.w = [self.BASE] * len(items)
+        self.lab = [0.0] * len(items)
+        self.hk = 0.0
+        self.hover_i = -1
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.t = QTimer(self)
+        self.t.setInterval(14)
+        self.t.timeout.connect(self._step)
+        self.t.start()
+
+    # ---- Geometrie
+    def _target(self, i, cx):
+        if self.mx is None:
+            return self.BASE
+        d = abs(self.mx - cx)
+        if d >= self.DIST:
+            return self.BASE
+        k = 1 - d / self.DIST
+        return self.BASE + (self.MAG - self.BASE) * (0.5 - 0.5 * math.cos(math.pi * k))
+
+    def _layout(self):
+        xs, x = [], 16.0
+        for i, it in enumerate(self.items):
+            if it.get("sep"):
+                x += 10
+            xs.append(x)
+            x += self.w[i] + 14
+        return xs, x - 14 + 16
+
+    def total_width(self):
+        return int(16 + sum(self.BASE + 14 for _ in self.items) - 14 + 16 + 10 * sum(1 for it in self.items if it.get("sep")))
+
+    def _step(self):
+        xs, tw = self._layout()
+        moved = False
+        for i in range(len(self.items)):
+            cx = xs[i] + self.w[i] / 2 + (self.width() - tw) / 2
+            tgt = self._target(i, cx)
+            nw = self.w[i] + (tgt - self.w[i]) * 0.22            # weiche Feder
+            if abs(nw - self.w[i]) > 0.05:
+                moved = True
+            self.w[i] = nw
+            lt = 1.0 if i == self.hover_i else 0.0
+            nl = self.lab[i] + (lt - self.lab[i]) * 0.25
+            if abs(nl - self.lab[i]) > 0.003:
+                moved = True
+            self.lab[i] = nl
+        ht = 1.0 if self.mx is not None else 0.0
+        nh = self.hk + (ht - self.hk) * 0.25
+        if abs(nh - self.hk) > 0.003:
+            moved = True
+        self.hk = nh
+        if moved:
+            self.update()
+
+    def _hit(self, x, y):
+        xs, tw = self._layout()
+        off = (self.width() - tw) / 2
+        by = self.height() - 10
+        for i in range(len(self.items)):
+            r = QRectF(off + xs[i], by - self.w[i], self.w[i], self.w[i])
+            if r.adjusted(-6, -6, 6, 6).contains(QPointF(x, y)):
+                return i
+        return -1
+
+    def mouseMoveEvent(self, e):
+        self.mx = e.position().x()
+        self.hover_i = self._hit(e.position().x(), e.position().y())
+
+    def leaveEvent(self, e):
+        self.mx = None
+        self.hover_i = -1
+
+    def mousePressEvent(self, e):
+        i = self._hit(e.position().x(), e.position().y())
+        if i >= 0 and i not in self.disabled:
+            self.items[i]["fn"]()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        xs, tw = self._layout()
+        off = (self.width() - tw) / 2
+        H = self.height()
+        panel = QRectF(off, H - self.PANEL, tw, self.PANEL)
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(T.card_fill(200))
+        p.drawRoundedRect(panel, 18, 18)
+        by = H - 10
+        for i, it in enumerate(self.items):
+            if it.get("sep"):
+                p.setPen(QPen(T.glass_edge(1.0), 1))
+                sx = off + xs[i] - 12
+                p.drawLine(QPointF(sx, H - self.PANEL + 14), QPointF(sx, H - 14))
+            w = self.w[i]
+            r = QRectF(off + xs[i], by - w, w, w)
+            p.setOpacity(0.35 if i in self.disabled else 1.0)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(38, 38, 38) if T.dark else QColor(229, 231, 235))
+            p.drawEllipse(r)
+            s = w / 2
+            col = QColor(212, 212, 212) if T.dark else QColor(82, 82, 82)
+            if i == self.active:
+                col = QColor(255, 255, 255) if T.dark else QColor(17, 17, 17)
+            paint_icon(p, it["icon"], QRectF(r.center().x() - s / 2, r.center().y() - s / 2, s, s), col,
+                       max(1.4, w / 26))
+            if i in self.dots:
+                p.setBrush(RED)
+                p.drawEllipse(QPointF(r.right() - w * 0.16, r.top() + w * 0.16), 4, 4)
+            p.setOpacity(1.0)
+            if i == self.active:
+                p.setBrush(ink(220))
+                p.drawEllipse(QPointF(r.center().x(), by + 5), 2, 2)
+            a = self.lab[i]
+            if a > 0.02:
+                p.setFont(app_font(8.5))
+                fm = QFontMetrics(p.font())
+                lw = fm.horizontalAdvance(it["label"]) + 16
+                lr = QRectF(r.center().x() - lw / 2, r.top() - 30 - 8 * a, lw, 22)
+                p.setOpacity(a)
+                p.setPen(QPen(QColor(23, 23, 23) if T.dark else QColor(229, 231, 235), 1))
+                p.setBrush(QColor(38, 38, 38) if T.dark else QColor(243, 244, 246))
+                p.drawRoundedRect(lr, 6, 6)
+                p.setPen(QColor(255, 255, 255) if T.dark else QColor(64, 64, 64))
+                p.drawText(lr, Qt.AlignCenter, it["label"])
+                p.setOpacity(1.0)
+
+
+class _NavProxy:
+    """Damit der alte Code (self.nav[i].set_selected / set_nav_enabled) weiter funktioniert."""
+
+    def __init__(self, dock, i):
+        self.dock, self.i = dock, i
+
+    def set_selected(self, on):
+        if on:
+            self.dock.active = self.i
+            self.dock.update()
+
+    def set_nav_enabled(self, on):
+        (self.dock.disabled.discard if on else self.dock.disabled.add)(self.i)
+        self.dock.update()
+
+
+class UnsavedBar(QWidget):
+    """Hinweis-Leiste: erscheint mit Feder-Effekt, sobald es Clips gibt, die noch nicht exportiert sind."""
+
+    def __init__(self, parent, on_export):
+        super().__init__(parent)
+        self.k = 0.0
+        self.shake = 0.0
+        self.lay = QHBoxLayout(self)
+        self.lay.setContentsMargins(18, 0, 8, 0)
+        self.lay.setSpacing(8)
+        dot = QLabel()
+        dot.setFixedSize(8, 8)
+        dot.setStyleSheet("background:#f5a524;border-radius:4px;")
+        self.lay.addWidget(dot)
+        self.lbl = label("", 9.5, True)
+        self.lay.addWidget(self.lbl, 1)
+        self.later = PopButton("Später", None, "glass", 32)
+        self.n = 0
+        self.later.clicked.connect(lambda: (setattr(self, "dismissed_for", self.n), self.set_visible(False)))
+        self.lay.addWidget(self.later)
+        self.go = PopButton("Exportieren", "upload", "accent", 32)
+        self.go.clicked.connect(on_export)
+        self.lay.addWidget(self.go)
+        self.setFixedHeight(52)
+        self.hide()
+        self.dismissed_for = None
+
+    def set_count(self, n):
+        if n <= 0:
+            self.dismissed_for = None
+            self.set_visible(False)
+            return
+        self.n = n
+        self.lbl.setText(f"{n} {'Clip' if n == 1 else 'Clips'} noch nicht exportiert")
+        if self.dismissed_for != n:
+            self.set_visible(True)
+
+    def __setattr__(self, n, v):
+        super().__setattr__(n, v)
+        if n == "k":
+            self._place()
+
+    def set_visible(self, on):
+        if on:
+            self.show()
+            self.raise_()
+        tween(self, "k", 1.0 if on else 0.0, 420 if on else 220,
+              QEasingCurve(QEasingCurve.OutBack) if on else None)
+        if not on:
+            QTimer.singleShot(240, lambda: self.k < 0.05 and self.hide())
+
+    def nudge(self):
+        """Kurzes Wackeln, wenn man trotz ungespeicherter Clips etwas verlassen will."""
+        self.set_visible(True)
+        self.shake = 0.0
+        a = QVariantAnimation(self)
+        a.setDuration(420)
+        a.setStartValue(0.0)
+        a.setEndValue(1.0)
+        a.valueChanged.connect(lambda v: (setattr(self, "shake", math.sin(float(v) * math.pi * 6) * (1 - float(v)) * 8),
+                                           self._place()))
+        a.start()
+        self._shake_anim = a
+
+    def _place(self):
+        par = self.parent()
+        if hasattr(par, "place"):
+            par.place()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setOpacity(max(0.0, min(1.0, self.k)))
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(T.glass_edge(1.0), 1))
+        p.setBrush(T.card_fill(220))
+        p.drawRoundedRect(r, 16, 16)
+
+
+class LoginCard(QWidget):
+    """Anmeldekarte wie im Vorbild: halbdurchsichtige Glas-Karte ueber blauen Schwaden."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(500)
+        self.lay = QVBoxLayout(self)
+        self.lay.setContentsMargins(44, 42, 44, 34)
+        self.lay.setSpacing(10)
+
+    def fit(self):
+        self.lay.activate()
+        self.setFixedHeight(self.lay.sizeHint().height())
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        g = QLinearGradient(r.topLeft(), r.bottomRight())
+        g.setColorAt(0, QColor(255, 255, 255, 40))
+        g.setColorAt(0.5, QColor(255, 255, 255, 18))
+        g.setColorAt(1, QColor(255, 255, 255, 28))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(10, 14, 30, 70))
+        p.drawRoundedRect(r, 22, 22)
+        p.setBrush(g)
+        p.drawRoundedRect(r, 22, 22)
+        bg = QLinearGradient(r.topLeft(), r.bottomRight())
+        bg.setColorAt(0, QColor(255, 255, 255, 90))
+        bg.setColorAt(1, QColor(255, 255, 255, 35))
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(bg, 1))
+        p.drawRoundedRect(r, 22, 22)
 
 
 class SideServer(QWidget):
@@ -1000,8 +1273,13 @@ class EditorCanvas(QWidget):
         cl.setGeometry(hx + 20, by, cl.sizeHint().width(), 52)
         cr.setGeometry(hx + hw - 20 - cr.sizeHint().width(), by, cr.sizeHint().width(), 52)
         p["seek"].setGeometry(hx + 26, by - 26, hw - 52, 16)
-        for n in ("left", "right", "tl", "title", "ctrl_l", "ctrl_r", "seek"):
-            if vis(n):
+        ub = p.get("unsaved")
+        if ub is not None:
+            uw = min(520, hw - 40)
+            k_ = max(0.0, min(1.2, ub.k))
+            ub.setGeometry(int(hx + (hw - uw) / 2 + ub.shake), int(by - 26 - 14 - 52 + 18 * (1 - k_)), uw, 52)
+        for n in ("left", "right", "tl", "title", "ctrl_l", "ctrl_r", "seek", "unsaved"):
+            if n in p and vis(n):
                 p[n].raise_()
 
 
@@ -1358,7 +1636,7 @@ class Window(QMainWindow):
         self.bg = Background()
         self.setCentralWidget(self.bg)
         root = QVBoxLayout(self.bg)
-        root.setContentsMargins(20, 12, 20, 20)
+        root.setContentsMargins(20, 12, 20, 84)
         root.setSpacing(10)
         fl = root
         self.sidebar = self.build_sidebar()
@@ -1371,6 +1649,19 @@ class Window(QMainWindow):
         self.page_settings = self.build_settings_page()
         for pg in (self.page_server, self.page_editor, self.page_library, self.page_settings):
             self.stack.add(pg)
+        self.dock = Dock([
+            {"icon": "server", "label": "Server", "fn": lambda: self.nav_clicked(0)},
+            {"icon": "film", "label": "Editor", "fn": lambda: self.nav_clicked(1)},
+            {"icon": "folder", "label": "Bibliothek", "fn": lambda: self.nav_clicked(2)},
+            {"icon": "gear", "label": "Einstellungen", "fn": lambda: self.nav_clicked(3)},
+            {"icon": "upload", "label": "Video öffnen", "fn": self._top_open, "sep": True},
+            {"icon": "refresh", "label": "Updates", "fn": self._top_update},
+            {"icon": "moon", "label": "Hell / Dunkel", "fn": self._toggle_dark},
+        ], self.bg)
+        self.nav = [_NavProxy(self.dock, i) for i in range(4)]
+        self.nav[1].set_nav_enabled(False)
+        self.navbar = self.dock
+        self.dock.select = lambda i, animate=True: self.nav[i].set_selected(True)
         self.overlay = Overlay(self.bg)
         self.toast = Toast(self.bg)
         self.drop_hint = DropHint(self.bg)
@@ -1427,6 +1718,25 @@ class Window(QMainWindow):
             pass
 
     def closeEvent(self, e):
+        n = sum(1 for c in self.clips if not c.last_name)
+        if n and not getattr(self, "_close_ok", False):
+            e.ignore()
+            if self.stack.cur != 1:
+                self.go_page(1)
+            self.unsaved.nudge()
+            card = DialogCard("Ungespeicherte Änderungen", f"{n} {'Clip ist' if n == 1 else 'Clips sind'} noch nicht "
+                              "exportiert. Wenn du ACE jetzt schließt, gehen sie verloren.", 480)
+            no = PopButton("Abbrechen", None, "glass", 40)
+            no.clicked.connect(self.overlay.dismiss)
+            ex = PopButton("Exportieren", "upload", "glass", 40)
+            ex.clicked.connect(lambda: (self.overlay.dismiss(), self.export(False)))
+            yes = PopButton("Trotzdem schließen", None, "danger", 40)
+            yes.clicked.connect(lambda: (setattr(self, "_close_ok", True), self.close()))
+            card.btns.addWidget(no)
+            card.btns.addWidget(ex)
+            card.btns.addWidget(yes)
+            self.overlay.present(card)
+            return
         self.save_settings()
         self.cancel.set()
         if self.player:
@@ -1443,6 +1753,15 @@ class Window(QMainWindow):
         self.toast.show_text(text, color)
 
     # ---- rahmenloses Fenster: Verschieben, Groesse aendern, Maximieren
+    def place_dock(self):
+        d = self.dock
+        w = d.total_width() + 160
+        h = Dock.PANEL + Dock.HEAD + 14
+        d.setGeometry(int((self.bg.width() - w) / 2), self.bg.height() - h - 12, w, h)
+        d.raise_()
+        if hasattr(self, "overlay") and self.overlay.isVisible():
+            self.overlay.raise_()
+
     def toggle_fullscreen(self):
         """Vollbild-Bearbeitung: nur Video, Clips, Zeitleiste und Player-Leiste."""
         if not self.has_video or self.stack.cur != 1:
@@ -1456,7 +1775,9 @@ class Window(QMainWindow):
             self.showMaximized() if self._was_max else self.showNormal()
         for w in (self.sidebar, self.right_col, self.pill, self.left_panel):
             w.setVisible(not on)
-        self.bg.layout().setContentsMargins(*((12, 12, 12, 12) if on else (20, 12, 20, 20)))
+        self.bg.layout().setContentsMargins(*((12, 12, 12, 12) if on else (20, 12, 20, 84)))
+        self.dock.setVisible(not on)
+        self.place_dock()
         self.page_editor.place()
         self.fs_btn.icon_name = "shrink" if on else "expand"
         self.fs_btn.setToolTip("Vollbild beenden (Esc)" if on else "Vollbild (F)")
@@ -1522,6 +1843,8 @@ class Window(QMainWindow):
             if rad != self.bg.radius:
                 self.bg.radius = rad
                 self.bg.update()
+        if hasattr(self, "dock"):
+            self.place_dock()
         if hasattr(self, "controls"):
             self.controls.move(self.bg.width() - self.controls.width() - 26, 9)
             self.controls.maximized = self.isMaximized()
@@ -1596,30 +1919,19 @@ class Window(QMainWindow):
         ll.addWidget(lg)
         lay.addWidget(logo)
         lay.addSpacing(8)
-        self.nav = []
-        self.navbar = NavBar()
-        for i, (ic, tx) in enumerate((("server", "Server"), ("film", "Editor"), ("folder", "Bibliothek"),
-                                      ("gear", "Einstellungen"))):
-            n = NavItem(ic, tx)
-            n.clicked.connect(lambda i=i: self.nav_clicked(i))
-            self.navbar.add(n)
-            self.nav.append(n)
-        self.nav[1].set_nav_enabled(False)
-        lay.addWidget(self.navbar)
+        nm = QLabel("ACE")
+        nm.setFont(display_font(15, QFont.Bold))
+        lay.addWidget(nm)
+        lay.addSpacing(10)
+        self.page_lbl = label("", 10, color=MUT)
+        lay.addWidget(self.page_lbl)
         lay.addStretch(1)
         self.top_chip = ServerChip()
         self.top_chip.clicked.connect(lambda: self.go_page(0))
         lay.addWidget(self.top_chip)
         lay.addSpacing(4)
-        b = IconDot("folder", "Video öffnen")
-        b.clicked.connect(self._top_open)
-        lay.addWidget(b)
         self.upd_dot = IconDot("refresh", "Nach Updates suchen")
-        self.upd_dot.clicked.connect(self._top_update)
-        lay.addWidget(self.upd_dot)
-        b = IconDot("gear", "Einstellungen")
-        b.clicked.connect(lambda: self.go_page(3))
-        lay.addWidget(b)
+        self.upd_dot.hide()
         self.btn_update = PopButton("Update installieren", "upload", "glass", 36)
         self.btn_update.clicked.connect(self.do_update)
         self.btn_update.hide()
@@ -1637,6 +1949,11 @@ class Window(QMainWindow):
             return
         self.go_page(1)
         self.open_video()
+
+    def _toggle_dark(self):
+        self.apply_theme(dark=not self.st["dark"])
+        if hasattr(self, "seg_dark"):
+            self.seg_dark.set_current("Dunkel" if self.st["dark"] else "Hell")
 
     def _top_update(self):
         if self.update_url:
@@ -1679,6 +1996,8 @@ class Window(QMainWindow):
             self.toggle_play()
         for k, n in enumerate(self.nav):
             n.set_selected(k == i)
+        if hasattr(self, "page_lbl"):
+            self.page_lbl.setText("/  " + ("Server", "Editor", "Bibliothek", "Einstellungen")[i])
         self.navbar.select(i, animate)
         if animate:
             self.stack.go(i, 1 if i >= max(cur, 0) else -1)
@@ -2338,8 +2657,9 @@ class Window(QMainWindow):
         rl.addWidget(g)
         rl.addStretch(1)
 
+        self.unsaved = UnsavedBar(cv, lambda: self.export(False))
         cv.parts = {"video": self.video, "title": tb, "left": left, "right": rw, "tl": tlc,
-                    "ctrl_l": ctl, "ctrl_r": ctr, "seek": self.seekbar}
+                    "ctrl_l": ctl, "ctrl_r": ctr, "seek": self.seekbar, "unsaved": self.unsaved}
         self.rebuild_cards()
         return cv
 
@@ -2357,12 +2677,20 @@ class Window(QMainWindow):
         sc.viewport().setAutoFillBackground(False)
         host = QWidget()
         host.setAttribute(Qt.WA_TranslucentBackground)
-        v = QVBoxLayout(host)
-        v.setSpacing(14)
-        v.setContentsMargins(0, 0, 10, 0)
-        v.addWidget(self.build_appearance_panel())
+        cards = {}
+
+        class _Collect:                      # sammelt die Karten, danach werden sie als Bento-Raster angeordnet
+            order = []
+
+            def addWidget(self, w):
+                self.order.append(w)
+
+            def addStretch(self, *a):
+                pass
+        v = _Collect()
+        cards["look"] = self.build_appearance_panel()
         if core.ACCOUNT_URL:
-            v.addWidget(self.build_account_panel())
+            cards["acct"] = self.build_account_panel()
 
         def toggle_row(parent_lay, title, sub, checked):
             r = QHBoxLayout()
@@ -2410,7 +2738,31 @@ class Window(QMainWindow):
             rr.addStretch(1)
             gl.addLayout(rr)
         v.addWidget(g)
-        v.addStretch(1)
+        # Bento-Raster: Karten unterschiedlicher Groesse in drei Spalten
+        allg, kill, exp, upd, keys = v.order
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 0, 10, 0)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        grid.addWidget(cards["look"], 0, 0, 1, 2)
+        grid.addWidget(upd, 0, 2)
+        grid.addWidget(allg, 1, 0)
+        grid.addWidget(kill, 1, 1)
+        if "acct" in cards:
+            grid.addWidget(cards["acct"], 1, 2, 2, 1)
+            grid.addWidget(exp, 2, 0, 1, 2)
+            grid.addWidget(keys, 3, 0, 1, 3)
+            grid.setRowStretch(4, 1)
+        else:
+            grid.addWidget(keys, 1, 2, 2, 1)
+            grid.addWidget(exp, 2, 0, 1, 2)
+            grid.setRowStretch(3, 1)
+        for c_ in range(3):
+            grid.setColumnStretch(c_, 1)
+        for w_ in (cards["look"], upd, allg, kill, exp, keys) + ((cards["acct"],) if "acct" in cards else ()):
+            w_.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            if w_.layout() is not None:
+                w_.layout().addStretch(1)            # Inhalt oben halten, auch wenn die Karte hoeher ist
         sc.setWidget(host)
         lay.addWidget(sc, 1)
         # Schleifen-Schalter in der Player-Leiste mit dem Einstellungs-Schalter koppeln
@@ -2553,52 +2905,119 @@ class Window(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def show_login(self, invite="", note=""):
+        """Anmeldung wie im Vorbild: Glas-Karte ueber blauen Schwaden, Unterstrich-Felder, blauer Knopf."""
         self.login_open = True
         self.gate_theme(True)
-        card = DialogCard("Willkommen bei ACE", "Melde dich an, um die App zu nutzen.", 470)
-        seg = Segmented(["Anmelden", "Neues Konto"])
-        card.body.addWidget(seg)
-        l_inv = label("Einladungscode (steht im Link, den du bekommen hast)", 10.5, True, MUT)
-        inv = QLineEdit(invite)
-        l_user = label("Benutzername", 10.5, True, MUT)
-        user = QLineEdit()
-        l_pw = label("Passwort", 10.5, True, MUT)
-        pw = QLineEdit()
-        pw.setEchoMode(QLineEdit.Password)
+        card = LoginCard()
+        L = card.lay
+        title = QLabel("Willkommen zurück")
+        title.setFont(display_font(25, QFont.Bold))
+        title.setStyleSheet("color: white;")
+        title.setAlignment(Qt.AlignCenter)
+        L.addWidget(title)
+        sub = QLabel("Melde dich an, um weiterzumachen")
+        sub.setFont(app_font(11))
+        sub.setStyleSheet("color: rgba(255,255,255,215);")
+        sub.setAlignment(Qt.AlignCenter)
+        L.addWidget(sub)
+        L.addSpacing(18)
+
+        def field(icon, hint, pwd=False):
+            e = QLineEdit()
+            e.setPlaceholderText(hint)
+            e.setProperty("role", "underline")
+            e.setMinimumHeight(44)
+            if pwd:
+                e.setEchoMode(QLineEdit.Password)
+            from PySide6.QtGui import QIcon
+            e.addAction(QIcon(icon_pixmap(icon, QColor(255, 255, 255, 220), 18, 1.6)), QLineEdit.LeadingPosition)
+            pal = e.palette()
+            from PySide6.QtGui import QPalette
+            pal.setColor(QPalette.PlaceholderText, QColor(255, 255, 255, 200))
+            e.setPalette(pal)
+            return e
+        inv = field("ticket", "Einladungscode")
+        inv.setText(invite)
+        user = field("user", "Benutzername")
+        pw = field("lock", "Passwort", True)
         for w_ in (inv, user, pw):
-            self.style_edit(w_)
-        for w_ in (l_inv, inv, l_user, user, l_pw, pw):
-            card.body.addWidget(w_)
-        if note:
-            card.err.setText(note)
-        go = PopButton("Anmelden", "check", "accent", 44)
-        card.btns.addWidget(go)
+            L.addWidget(w_)
+            L.addSpacing(8)
+        forgot = QLabel("Passwort vergessen?")
+        forgot.setFont(app_font(9.5, True))
+        forgot.setStyleSheet("color: rgba(255,255,255,225);")
+        forgot.setCursor(Qt.PointingHandCursor)
+        L.addWidget(forgot)
+        err = QLabel(note)
+        err.setWordWrap(True)
+        err.setFont(app_font(9.5, True))
+        err.setStyleSheet("color: #ff9aa8;")
+        L.addWidget(err)
+        L.addSpacing(6)
+        go = PopButton("Anmelden", "arrow", "blue", 50)
+        go.icon_right = True
+        L.addWidget(go)
+        L.addSpacing(10)
+        orrow = QHBoxLayout()
+        for _ in range(2):
+            pass
+        ln1, ln2 = QFrame(), QFrame()
+        for ln in (ln1, ln2):
+            ln.setFixedHeight(1)
+            ln.setStyleSheet("background: rgba(255,255,255,60);")
+        orl = QLabel("ODER")
+        orl.setFont(app_font(9))
+        orl.setStyleSheet("color: rgba(255,255,255,170); letter-spacing: 1px;")
+        orrow.addWidget(ln1, 1)
+        orrow.addSpacing(12)
+        orrow.addWidget(orl)
+        orrow.addSpacing(12)
+        orrow.addWidget(ln2, 1)
+        L.addLayout(orrow)
+        L.addSpacing(10)
+        alt = PopButton("Mit Einladungscode registrieren", "ticket", "white", 48)
+        L.addWidget(alt)
+        L.addSpacing(12)
+        bottom = QLabel()
+        bottom.setAlignment(Qt.AlignCenter)
+        bottom.setFont(app_font(9.5))
+        bottom.setCursor(Qt.PointingHandCursor)
+        L.addWidget(bottom)
         mode = {"new": bool(invite)}
 
-        def apply_mode(first=False):
+        def apply_mode():
             new = mode["new"]
-            for w_ in (l_inv, inv):
-                w_.setVisible(new)
+            inv.setVisible(new)
+            title.setText("Konto erstellen" if new else "Willkommen zurück")
+            sub.setText("Mit dem Code aus deinem Einladungslink" if new else "Melde dich an, um weiterzumachen")
             go.setText("Konto erstellen" if new else "Anmelden")
-            card.err.setText("" if first and not note else card.err.text() if first else "")
+            alt.setText("Zurück zur Anmeldung" if new else "Mit Einladungscode registrieren")
+            alt.icon_name = "back" if new else "ticket"
+            forgot.setVisible(not new)
+            bottom.setText(('<span style="color:rgba(255,255,255,190)">Schon ein Konto? </span>'
+                            '<b style="color:#5b8cff">Anmelden</b>') if new else
+                           ('<span style="color:rgba(255,255,255,190)">Noch kein Konto? </span>'
+                            '<b style="color:#5b8cff">Einladung einlösen</b>'))
             card.fit()
             self.overlay._center()
 
-        def on_seg(name):
-            mode["new"] = name == "Neues Konto"
+        def toggle():
+            mode["new"] = not mode["new"]
+            err.setText("")
             apply_mode()
-        seg.changed.connect(on_seg)
-        if invite:
-            seg.set_current("Neues Konto")
-        apply_mode(True)
+        alt.clicked.connect(toggle)
+        bottom.mousePressEvent = lambda e: toggle()
+        forgot.mousePressEvent = lambda e: err.setText("Frag den Admin – er kann dir einen neuen Zugang schicken.")
+        apply_mode()
 
         def submit():
             u, p = user.text().strip(), pw.text()
             if not u or not p:
-                card.err.setText("Bitte Benutzername und Passwort eingeben.")
+                err.setText("Bitte Benutzername und Passwort eingeben.")
+                card.fit()
                 return
             go.setEnabled(False)
-            card.err.setText("")
+            err.setText("")
             new = mode["new"]
 
             def work():
@@ -2609,7 +3028,7 @@ class Window(QMainWindow):
                         r = auth.call("POST", "/login", {"username": u, "password": p})
                     self.ui(self.on_login_ok, r["name"], r["role"], r["token"], False, True)
                 except auth.ApiError as e:
-                    self.ui(lambda m: (card.err.setText(m), go.setEnabled(True)), str(e))
+                    self.ui(lambda m: (err.setText(m), go.setEnabled(True), card.fit(), self.overlay._center()), str(e))
             threading.Thread(target=work, daemon=True).start()
         go.clicked.connect(submit)
         for w_ in (inv, user, pw):
@@ -2945,6 +3364,8 @@ class Window(QMainWindow):
         self.btn_update.setText(f"Update v{version} installieren")
         self.btn_update.show()
         self.upd_dot.set_dot(True)
+        self.dock.dots.add(5)
+        self.dock.update()
         self.say(f"Neue Version v{version} verfügbar")
 
     def do_update(self):
@@ -3335,6 +3756,7 @@ class Window(QMainWindow):
         total = sum(c.end - c.start for c in self.clips)
         self.total_lbl.setText(fmt_short(total) if self.clips else "0:00")
         self.exp_all.setText(f"Alle exportieren ({len(self.clips)})" if self.clips else "Alle exportieren")
+        self.update_unsaved()
         self.timeline.update()
 
     @staticmethod
@@ -3343,6 +3765,10 @@ class Window(QMainWindow):
             tween(row, "appear", 1.0, 240)
         except RuntimeError:                              # Zeile wurde inzwischen ersetzt
             pass
+
+    def update_unsaved(self):
+        if hasattr(self, "unsaved"):
+            self.unsaved.set_count(sum(1 for c in self.clips if not c.last_name))
 
     def clip_changed(self, i):
         if 0 <= i < len(self.rows):
