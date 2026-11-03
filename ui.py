@@ -269,7 +269,7 @@ class Background(QWidget):
         else:
             self._timer.start(90)            # erst nach dem Ziehen neu rendern (bis dahin wird skaliert)
 
-    radius = 34.0               # Eckenradius des Fensters (0 = eckig, z. B. maximiert)
+    radius = 26.0               # Eckenradius des Fensters (0 = eckig, z. B. maximiert)
 
     def clip_path(self):
         path = QPainterPath()
@@ -289,22 +289,12 @@ class Background(QWidget):
             p.drawPixmap(0, 0, self._pm)
         else:
             p.drawPixmap(self.rect(), self._pm)
-        # feine Glasschicht ueber dem Verlauf (wie ein Milchglas-Rahmen)
-        r = QRectF(self.rect()).adjusted(0.6, 0.6, -0.6, -0.6)
-        g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0, white(86))
-        g.setColorAt(1, white(16))
-        p.setPen(Qt.NoPen)
-        p.setBrush(g)
-        p.drawRect(r)
+        # feiner, klarer Rahmen ums Fenster (flaches Kartendesign)
         if self.radius > 0:
+            r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             p.setClipping(False)
-            bg = QLinearGradient(r.topLeft(), r.bottomRight())
-            bg.setColorAt(0, white(235))
-            bg.setColorAt(0.5, white(120))
-            bg.setColorAt(1, white(190))
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(bg, 1.2))
+            p.setPen(QPen(T.line(1.3), 1.0))
             p.drawRoundedRect(r, self.radius, self.radius)
 
 
@@ -318,36 +308,21 @@ class Glass(QFrame):
         self.setAttribute(Qt.WA_StyledBackground, False)
 
     def paintEvent(self, e):
+        """Flache Karte im Bento-Stil: ruhige Flaeche, 1-px-Rand, kein Glanz."""
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        rad = min(self.radius, 28) * 0.78
         p.setPen(Qt.NoPen)
         if self.dialog:
             p.setBrush(T.dialog_fill)
         else:
-            g = QLinearGradient(r.topLeft(), r.bottomRight())
-            g.setColorAt(0, white(self.alpha + 50))
-            g.setColorAt(1, white(self.alpha - 20))
-            p.setBrush(g)
-        p.drawRoundedRect(r, self.radius, self.radius)
+            p.setBrush(T.card_fill(self.alpha))
+        p.drawRoundedRect(r, rad, rad)
         if self.border:
-            bg = QLinearGradient(r.topLeft(), r.bottomRight())
-            bg.setColorAt(0, white(235))
-            bg.setColorAt(0.5, white(120))
-            bg.setColorAt(1, white(190))
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(bg, 1.2))
-            p.drawRoundedRect(r, self.radius, self.radius)
-            if self.radius >= 14 and r.width() > 60:
-                # feine Lichtkante direkt unter dem oberen Rand: wirkt wie geschliffenes Glas
-                x0, x1, y = r.left() + self.radius * 0.7, r.right() - self.radius * 0.7, r.top() + 2.2
-                hl = QLinearGradient(x0, 0, x1, 0)
-                hl.setColorAt(0, white(0))
-                hl.setColorAt(0.2, white(95))
-                hl.setColorAt(0.8, white(95))
-                hl.setColorAt(1, white(0))
-                p.setPen(QPen(hl, 1))
-                p.drawLine(QPointF(x0, y), QPointF(x1, y))
+            p.setPen(QPen(T.line(1.6 if self.dialog else 1.0), 1.0))
+            p.drawRoundedRect(r, rad, rad)
 
 
 # ------------------------------------------------------------------ Buttons
@@ -417,17 +392,17 @@ class PopButton(QAbstractButton):
         p.scale(s, s)
         p.translate(-c)
         p.setOpacity(1.0 if self.isEnabled() else 0.4)
-        rad = min(r.height() / 2, 16)
+        rad = min(r.height() / 2, 13)
         hv = max(0.0, min(1.0, self.pop))
         k = self.kind
         if k == "accent":
-            g = QLinearGradient(r.topLeft(), r.topRight())
-            g.setColorAt(0, T.acc)
-            g.setColorAt(1, T.acc2)
+            g = QLinearGradient(r.topLeft(), r.bottomLeft())
+            g.setColorAt(0, T.acc.lighter(112))
+            g.setColorAt(1, T.acc)
             p.setBrush(g)
-            p.setPen(Qt.NoPen)
+            p.setPen(QPen(with_alpha(QColor(255, 255, 255), 34), 1))
             p.drawRoundedRect(r, rad, rad)
-            fg = QColor("#ffffff")
+            fg = QColor(T.on_acc)
         elif k == "danger":
             p.setBrush(with_alpha(RED, 50))
             p.setPen(QPen(with_alpha(RED, 140), 1))
@@ -435,11 +410,11 @@ class PopButton(QAbstractButton):
             fg = QColor(T.err)
         elif k == "flat":
             fg = ink(150 + 90 * hv)
-        else:                                            # glass
-            p.setBrush(white(150))
-            p.setPen(QPen(white(240), 1.1))
+        else:                                            # glass = ruhige Flaeche mit Rand
+            p.setBrush(T.card_fill(150 + 60 * hv))
+            p.setPen(QPen(T.line(1.4), 1.0))
             p.drawRoundedRect(r, rad, rad)
-            fg = ink(230)
+            fg = ink(235)
         if self._kfocus and self.hasFocus():            # sichtbarer Tastatur-Fokus
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(T.acc, 2))
@@ -547,11 +522,8 @@ class Toggle(QAbstractButton):
         def mixc(c):
             return QColor(int(off.red() + (c.red() - off.red()) * k), int(off.green() + (c.green() - off.green()) * k),
                           int(off.blue() + (c.blue() - off.blue()) * k), int(off.alpha() + (255 - off.alpha()) * k))
-        g = QLinearGradient(r.topLeft(), r.topRight())
-        g.setColorAt(0, mixc(T.acc))
-        g.setColorAt(1, mixc(T.acc2))
         p.setPen(Qt.NoPen)
-        p.setBrush(g)
+        p.setBrush(mixc(T.acc))
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         d = r.height() - 6
         x = r.left() + 3 + (r.width() - d - 6) * self.k
@@ -586,10 +558,7 @@ class Bar(QWidget):
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         if self.v > 0.003:
             fr = QRectF(r.left(), r.top(), max(r.height(), r.width() * self.v), r.height())
-            g = QLinearGradient(fr.topLeft(), fr.topRight())
-            g.setColorAt(0, T.acc)
-            g.setColorAt(1, T.acc2)
-            p.setBrush(g)
+            p.setBrush(T.acc_bar())
             p.drawRoundedRect(fr, r.height() / 2, r.height() / 2)
 
 

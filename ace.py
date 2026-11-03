@@ -358,10 +358,10 @@ class NavItem(QWidget):
         p.setBrush(T.sel_fill(a))
         p.drawRoundedRect(r, 16, 16)
         if a > 0.02:
-            p.setPen(QPen(with_alpha(T.acc, 55 * a), 1))
+            p.setPen(QPen(with_alpha(T.acc_text, 85 * a), 1))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(r, 16, 16)
-        paint_icon(p, self.icon, QRectF(r.left() + 16, r.center().y() - 10, 20, 20), T.acc if a > 0.5 else T.icon, 1.8)
+        paint_icon(p, self.icon, QRectF(r.left() + 16, r.center().y() - 10, 20, 20), T.acc_text if a > 0.5 else T.icon, 1.8)
         p.setPen(ink(235 if a > 0.5 else 175))
         p.setFont(app_font(10.5, a > 0.5))
         p.drawText(QRectF(r.left() + 50, r.top(), r.width() - 56, r.height()), Qt.AlignVCenter, self.text)
@@ -1201,7 +1201,7 @@ class Window(QMainWindow):
     def load_settings(self):
         d = {"pre": 4.0, "post": 2.0, "sens": 6, "mode": "Genau", "open": True, "loop": True,
              "autoupd": True, "gpu": True, "servers": [], "names": {}, "last_server": "bruder",
-             "hidden": [], "export_dir": "", "thorough": False, "dark": False, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
+             "hidden": [], "export_dir": "", "thorough": False, "dark": True, "acc": DEFAULT["acc"], "acc2": DEFAULT["acc2"], "bg": DEFAULT["bg"]}
         try:
             with open(SETTINGS) as f:
                 d.update(json.load(f))
@@ -1319,7 +1319,7 @@ class Window(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if hasattr(self, "bg"):
-            rad = 0.0 if (self.isMaximized() or self.isFullScreen()) else 34.0
+            rad = 0.0 if (self.isMaximized() or self.isFullScreen()) else 26.0
             if rad != self.bg.radius:
                 self.bg.radius = rad
                 self.bg.update()

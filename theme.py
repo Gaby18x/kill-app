@@ -84,6 +84,23 @@ class Theme:
     def toggle_off(self):
         return QColor(255, 255, 255, 70) if self.dark else QColor(196, 194, 216)
 
+    # ---- Kartenstil (flach, ruhig, 1-px-Rand)
+    def card_fill(self, a=120):
+        """Fuellfarbe einer Karte; a ist die alte Glas-Staerke (110..170) und steuert nur die Helligkeit leicht."""
+        k = max(0.0, min(1.0, (a - 90) / 120.0))
+        if self.dark:
+            return QColor(255, 255, 255, int(9 + 11 * k))
+        return QColor(255, 255, 255, int(150 + 85 * k))
+
+    def line(self, k=1.0):
+        """Feine Randfarbe (heller Strich im Dunkeln, dunkler im Hellen)."""
+        if self.dark:
+            return QColor(255, 255, 255, int(min(255, 24 * k)))
+        return QColor(30, 30, 50, int(min(255, 22 * k)))
+
+    def acc_bar(self):
+        return QColor(self.acc_text) if self.dark else QColor(self.acc)
+
     def role(self, name):
         """Farbe fuer eine Textrolle (wird auch fuer das QSS benutzt)."""
         t = {
@@ -111,20 +128,17 @@ class Theme:
         h, s, l = _hsl(self.bg)
         k = self.sk_bg
         if self.dark:
-            return (hsl(h, 0.55 * k, 0.075), hsl(h + 0.04, 0.55 * k, 0.115), hsl(h - 0.05, 0.50 * k, 0.085))
-        return (hsl(h - 0.03, 0.55 * k, 0.86), hsl(h + 0.05, 0.60 * k, 0.90), hsl(h - 0.08, 0.55 * k, 0.87))
+            return (hsl(h, 0.16 * k, 0.062), hsl(h, 0.16 * k, 0.07), hsl(h, 0.14 * k, 0.058))
+        return (hsl(h, 0.10 * k, 0.935), hsl(h, 0.10 * k, 0.95), hsl(h, 0.10 * k, 0.93))
 
     def bg_blobs(self):
-        """(x, y, radius, Farbe, Alpha) - weiche Farbflecken."""
+        """(x, y, radius, Farbe, Alpha) - nur zwei sehr dezente Lichtflecken, kein buntes Glas mehr."""
         h, s, l = _hsl(self.bg)
-        a2 = _hsl(self.acc2)
         a1 = _hsl(self.acc)
         k = self.sk_bg
         if self.dark:
-            return [(0.06, 0.98, 0.55, hsl(a2[0], 0.75 * k, 0.50), 80), (0.95, 0.04, 0.60, hsl(a1[0], 0.8 * k, 0.52), 95),
-                    (0.80, 0.98, 0.45, hsl(h + 0.08, 0.7 * k, 0.45), 70), (0.28, 0.12, 0.40, hsl(h - 0.06, 0.7 * k, 0.50), 55)]
-        return [(0.05, 0.98, 0.55, hsl(a2[0] + 0.02, 0.85 * k, 0.80), 150), (0.95, 0.04, 0.60, hsl(a1[0], 0.85 * k, 0.74), 150),
-                (0.80, 0.98, 0.45, hsl(h + 0.10, 0.85 * k, 0.80), 140), (0.28, 0.12, 0.40, hsl(h - 0.06, 0.80 * k, 0.78), 110)]
+            return [(0.98, 0.0, 0.55, hsl(a1[0], 0.7 * k, 0.45), 34), (0.0, 1.0, 0.45, hsl(h, 0.6 * k, 0.40), 22)]
+        return [(0.98, 0.0, 0.55, hsl(a1[0], 0.8 * k, 0.80), 70), (0.0, 1.0, 0.45, hsl(h, 0.7 * k, 0.82), 50)]
 
     # ---- Globales Stylesheet
     def qss(self):
