@@ -1,4 +1,4 @@
-// Kill App - Konto-Server (Cloudflare Worker + KV)
+// ACE - Konto-Server (Cloudflare Worker + KV)
 // Bindings: KV (KV-Namespace "KV"), Variable ADMIN_KEY (geheim), optional INSTALLER_URL
 const enc = new TextEncoder();
 const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json; charset=utf-8" } });
@@ -58,17 +58,17 @@ async function createUser(env, name, pw, role, label) {
 function page(code, valid, installer) {
   const body = valid
     ? `<p>Dein Zugang ist bereit.</p>
-       <a class="b" href="${installer}">1. Kill App herunterladen</a>
+       <a class="b" href="${installer}">1. ACE herunterladen</a>
        <p class="s">Installieren (Windows blendet evtl. eine Warnung ein: „Weitere Informationen“, dann „Trotzdem ausführen“).</p>
-       <a class="b g" href="killapp://invite/${code}">2. Zugang in der App aktivieren</a>
+       <a class="b g" href="ace://invite/${code}">2. Zugang in der App aktivieren</a>
        <p class="s">Oder in der App den Einladungscode eingeben:</p><div class="c">${code}</div>`
     : `<p>Dieser Link ist ungültig oder wurde schon benutzt. Bitte frag nach einem neuen.</p>`;
-  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Kill App</title>
+  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>ACE</title>
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px system-ui,sans-serif;background:linear-gradient(135deg,#dfe1e8,#c9ccd6);color:#2a2848}
 main{background:#ffffffcc;border-radius:28px;padding:36px;max-width:420px;box-shadow:0 20px 60px #0002;text-align:center}
 h1{margin:0 0 8px}a.b{display:block;margin:14px 0 6px;padding:14px;border-radius:14px;background:#5f6575;color:#fff;text-decoration:none;font-weight:600}
 a.g{background:#fff;color:#2a2848;border:1px solid #0002}.s{font-size:13px;opacity:.7}.c{font:700 20px ui-monospace,monospace;letter-spacing:1px;margin-top:6px;user-select:all}</style>
-<main><h1>Kill App</h1>${body}</main>`;
+<main><h1>ACE</h1>${body}</main>`;
 }
 
 export default {
@@ -82,7 +82,7 @@ export default {
       if (m === "GET" && path.startsWith("/d/")) {
         const code = path.slice(3).replace(/[^A-Za-z0-9]/g, "");
         const inv = await env.KV.get("inv:" + code, "json");
-        const inst = env.INSTALLER_URL || "https://github.com/Gaby18x/kill-app/releases/latest/download/KillApp-Setup.exe";
+        const inst = env.INSTALLER_URL || "https://github.com/Gaby18x/kill-app/releases/latest/download/ACE-Setup.exe";
         return new Response(page(code, !!inv && !inv.used, inst), { headers: { "content-type": "text/html; charset=utf-8" } });
       }
 

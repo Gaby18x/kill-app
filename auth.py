@@ -1,4 +1,4 @@
-"""Kill App - Konto-Client (kein GUI). Spricht mit dem Cloudflare-Worker."""
+"""ACE - Konto-Client (kein GUI). Spricht mit dem Cloudflare-Worker."""
 import base64
 import json
 import os
@@ -20,7 +20,7 @@ class Offline(ApiError):
 
 def call(method, path, data=None, token=None, timeout=15):
     url = core.ACCOUNT_URL.rstrip("/") + path
-    h = {"content-type": "application/json", "user-agent": "KillApp"}
+    h = {"content-type": "application/json", "user-agent": "ACE"}
     if token:
         h["authorization"] = "Bearer " + token
     req = urllib.request.Request(url, method=method, headers=h,

@@ -1,4 +1,4 @@
-"""Kill App - schneidet automatisch Kill-Clips aus GTA/FiveM-Aufnahmen (helle Glas-Oberflaeche, Qt)."""
+"""ACE - schneidet automatisch Kill-Clips aus GTA/FiveM-Aufnahmen (helle Glas-Oberflaeche, Qt)."""
 import json
 import os
 import re
@@ -1053,7 +1053,7 @@ class DropHint(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Kill App")
+        self.setWindowTitle("ACE")
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)        # keine Windows-Titelleiste
         self.setAttribute(Qt.WA_TranslucentBackground)                # das Fenster selbst ist der abgerundete Kasten
         self.setMinimumSize(1280, 820)
@@ -1316,7 +1316,7 @@ class Window(QMainWindow):
         lg.setPixmap(QPixmap(resource("assets", "logo.png")).scaled(36, 36, Qt.KeepAspectRatio,
                                                                       Qt.SmoothTransformation))
         logo.addWidget(lg)
-        logo.addWidget(label("Kill App", 15, True))
+        logo.addWidget(label("ACE", 15, True))
         logo.addStretch(1)
         lay.addLayout(logo)
         lay.addSpacing(26)
@@ -1403,7 +1403,7 @@ class Window(QMainWindow):
         lay = QVBoxLayout(main)
         lay.setContentsMargins(30, 26, 22, 22)
         lay.addWidget(self.page_header("Server", "Wähle den Server, auf dem du aufgenommen hast – "
-                                       "Kill App nutzt dann die passende Kill-Erkennung."))
+                                       "ACE nutzt dann die passende Kill-Erkennung."))
         lay.addSpacing(14)
         self.srv_scroll = QScrollArea()
         self.srv_scroll.setWidgetResizable(True)
@@ -1544,7 +1544,7 @@ class Window(QMainWindow):
 
     def open_add_server(self, state=None):
         st = state or {"name": "", "kind": "Roter Kill-X", "result": None, "avatar": None}
-        card = DialogCard("Neuer Server", "Lege fest, woran Kill App auf diesem Server einen Kill erkennt.")
+        card = DialogCard("Neuer Server", "Lege fest, woran ACE auf diesem Server einen Kill erkennt.")
         card.body.addWidget(label("Name", 10.5, True, MUT))
         name = QLineEdit(st["name"])
         name.setPlaceholderText("z. B. Mein Server")
@@ -2177,7 +2177,7 @@ class Window(QMainWindow):
 
     def show_login(self, invite="", note=""):
         self.login_open = True
-        card = DialogCard("Willkommen bei Kill App", "Melde dich an, um die App zu nutzen.", 470)
+        card = DialogCard("Willkommen bei ACE", "Melde dich an, um die App zu nutzen.", 470)
         seg = Segmented(["Anmelden", "Neues Konto"])
         card.body.addWidget(seg)
         l_inv = label("Einladungscode (steht im Link, den du bekommen hast)", 10.5, True, MUT)
@@ -3259,7 +3259,7 @@ def main():
         pass
     w = Window()
     for a in sys.argv[1:]:
-        m = re.match(r"killapp:(?://)?invite/([A-Za-z0-9]+)", a)
+        m = re.match(r"ace:(?://)?invite/([A-Za-z0-9]+)", a)
         if m:
             w.pending_invite = m.group(1)
     if sys.platform.startswith("win"):

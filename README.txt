@@ -1,7 +1,7 @@
-Kill App - Installation (Windows)
+ACE - Installation (Windows)
 1. Python 3.10+ installieren (python.org, Haken bei "Add to PATH").
 2. In diesem Ordner: pip install -r requirements.txt
-3. Starten: start.bat (oder: python killclip.py)
+3. Starten: start.bat (oder: python ace.py)
 
 Bedienung: Video oeffnen -> Kills suchen -> Clips links anklicken, Vorschau,
 Start/Ende anpassen -> Export-Modus waehlen -> exportieren.

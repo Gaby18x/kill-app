@@ -1,4 +1,4 @@
-"""Kill App - Kern: Kill-Erkennung, Export, Updates, Video-Player (ohne Oberflaeche).
+"""ACE - Kern: Kill-Erkennung, Export, Updates, Video-Player (ohne Oberflaeche).
 
 Erkennt den roten Kill-Hitmarker in der Bildmitte, legt pro Kill einen Clip
 (Standard: 4 s davor, 2 s danach) an und exportiert mit FFmpeg.
@@ -30,7 +30,7 @@ def parse_ver(v):
 def check_update():
     """Gibt (version, download_url) zurueck, wenn es ein neueres Release gibt, sonst None."""
     req = urllib.request.Request(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
-                                 headers={"User-Agent": "KillApp", "Accept": "application/vnd.github+json"})
+                                 headers={"User-Agent": "ACE", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=10) as r:
         data = json.loads(r.read().decode("utf-8"))
     tag = data.get("tag_name", "")
@@ -42,8 +42,8 @@ def check_update():
 
 
 def download_file(url, progress=None):
-    dst = os.path.join(tempfile.gettempdir(), "KillApp-Setup.exe")
-    req = urllib.request.Request(url, headers={"User-Agent": "KillApp"})
+    dst = os.path.join(tempfile.gettempdir(), "ACE-Setup.exe")
+    req = urllib.request.Request(url, headers={"User-Agent": "ACE"})
     with urllib.request.urlopen(req, timeout=30) as r, open(dst, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         got = 0

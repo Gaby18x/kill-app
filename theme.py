@@ -1,4 +1,4 @@
-"""Kill App - Farbsystem: heller/dunkler Modus und frei waehlbare Akzent-/Hintergrundfarben."""
+"""ACE - Farbsystem: heller/dunkler Modus und frei waehlbare Akzent-/Hintergrundfarben."""
 from PySide6.QtGui import QColor
 
 RED = QColor("#f0506e")

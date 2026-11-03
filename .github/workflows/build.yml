@@ -21,17 +21,17 @@ jobs:
           (Get-Content core.py -Raw) -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$env:APP_VER`"" | Set-Content core.py -Encoding utf8 -NoNewline
           Select-String -Path core.py -Pattern 'APP_VERSION = '
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconfirm --windowed --name KillApp --icon assets/icon.ico --collect-all imageio_ffmpeg --exclude-module tkinter --add-data "profiles;profiles" --add-data "assets;assets" killclip.py
+      - run: pyinstaller --noconfirm --windowed --name ACE --icon assets/icon.ico --collect-all imageio_ffmpeg --exclude-module tkinter --add-data "profiles;profiles" --add-data "assets;assets" ace.py
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyVer=$env:APP_VER installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: KillApp-Setup
-          path: installer/KillApp-Setup.exe
+          name: ACE-Setup
+          path: installer/ACE-Setup.exe
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.APP_VER }}
-          name: Kill App v${{ env.APP_VER }}
+          name: ACE v${{ env.APP_VER }}
           make_latest: true
-          files: installer/KillApp-Setup.exe
+          files: installer/ACE-Setup.exe

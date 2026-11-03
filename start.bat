@@ -1,3 +1,3 @@
 @echo off
-python killclip.py
+python ace.py
 pause

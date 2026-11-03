@@ -1,4 +1,4 @@
-"""Kill App - Oberflaechen-Bausteine im Glas-Design (Qt / PySide6)."""
+"""ACE - Oberflaechen-Bausteine im Glas-Design (Qt / PySide6)."""
 import math
 
 from PySide6.QtCore import (QEasingCurve, QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal)
