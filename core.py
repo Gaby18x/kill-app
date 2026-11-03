@@ -20,7 +20,7 @@ import numpy as np
 
 APP_VERSION = "1.0"                 # wird beim Build automatisch gesetzt
 UPDATE_REPO = "Gaby18x/kill-app"    # oeffentliches Repo mit den Releases
-ACCOUNT_URL = ""                    # Adresse des Konto-Servers (Cloudflare Worker); leer = ohne Konten
+ACCOUNT_URL = "https://ace.sendreagaby.workers.dev"                    # Adresse des Konto-Servers (Cloudflare Worker); leer = ohne Konten
 
 
 def parse_ver(v):
