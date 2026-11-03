@@ -352,6 +352,7 @@ class PopButton(QAbstractButton):
         super().__init__(parent)
         self.setText(text)
         self.icon_name, self.kind, self.h, self.icon_only = icon, kind, height, icon_only
+        self.on_dark = False                          # True: sitzt auf dem Video (Schrift immer hell)
         self.pop = 0.0
         self.press = 0.0
         self.setCursor(Qt.PointingHandCursor)
@@ -424,7 +425,16 @@ class PopButton(QAbstractButton):
             p.drawRoundedRect(r, rad, rad)
             fg = QColor(T.err)
         elif k == "flat":
-            fg = ink(150 + 90 * hv)
+            if hv > 0.01:
+                p.setBrush(QColor(255, 255, 255, int(22 * hv)))
+                p.setPen(Qt.NoPen)
+                p.drawRoundedRect(r, rad, rad)
+            fg = QColor(255, 255, 255, int(170 + 85 * hv)) if self.on_dark else ink(150 + 90 * hv)
+        elif k == "dark":                                # auf dem Video: dunkle Pille, immer lesbar
+            p.setBrush(QColor(8, 9, 10, int(205 + 30 * hv)))
+            p.setPen(QPen(QColor(255, 255, 255, int(40 + 30 * hv)), 1))
+            p.drawRoundedRect(r, rad, rad)
+            fg = QColor(255, 255, 255, 235)
         else:                                            # glass = ruhige Flaeche mit Rand
             p.setBrush(T.card_fill(150 + 60 * hv))
             p.setPen(QPen(T.line(1.4), 1.0))
@@ -481,18 +491,22 @@ class Segmented(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(white(200), 1))
-        p.setBrush(ink(16))
-        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        if not getattr(self, "on_dark", False):
+            p.setPen(QPen(T.line(1.4), 1))
+            p.setBrush(ink(10))
+            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         n = len(self.items)
         w = (self.width() - 8) / n
         hr = QRectF(4 + self.pos * w, 4, w, self.height() - 8)
         pf, pfg = T.pill()
+        base = ink(150)
+        if getattr(self, "on_dark", False):              # auf dem Video: immer helle Darstellung
+            pf, pfg, base = QColor(255, 255, 255, 230), QColor("#14161a"), QColor(255, 255, 255, 170)
         p.setPen(Qt.NoPen)
         p.setBrush(pf)
         p.drawRoundedRect(hr, hr.height() / 2, hr.height() / 2)
         p.setFont(self.font())
-        base, hi = ink(150), pfg
+        hi = pfg
         for i, t in enumerate(self.items):
             sel = max(0.0, 1 - abs(self.pos - i))
             c = QColor(int(base.red() + (hi.red() - base.red()) * sel), int(base.green() + (hi.green() - base.green()) * sel),

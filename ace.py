@@ -12,7 +12,8 @@ import uuid
 import cv2
 import numpy as np
 from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+                           QPolygonF)
 from PySide6.QtWidgets import (QApplication, QColorDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
@@ -119,6 +120,13 @@ class Bridge(QObject):
         self.call.connect(lambda fn, args: fn(*args))
 
 
+def hero_font(size):
+    """Grosse, ruhige Ueberschrift (mittleres Gewicht, wie im Vorbild)."""
+    f = app_font(size)
+    f.setWeight(QFont.Medium)
+    return f
+
+
 def label(text="", size=10.5, bold=False, color=None, wrap=False):
     """color ist eine Textrolle (z. B. "muted", "dim", "acc", "err"), keine feste Farbe."""
     lb = QLabel(text)
@@ -211,10 +219,10 @@ class ServerCard(QWidget):
         self.setFixedSize(self.W + 2 * self.M, self.H + 2 * self.M)
 
     def _edit_rect(self):
-        return QRectF(self.M + self.W - 46, self.M + 14, 32, 32)
+        return QRectF(self.M + self.W - 48, self.M + 18, 32, 32)
 
     def _del_rect(self):
-        return QRectF(self.M + self.W - 84, self.M + 14, 32, 32)
+        return QRectF(self.M + self.W - 86, self.M + 18, 32, 32)
 
     def enterEvent(self, e):
         tween(self, "pop", 1.0, 160)
@@ -240,6 +248,7 @@ class ServerCard(QWidget):
             self.clicked.emit()
 
     def paintEvent(self, e):
+        """Karte wie im Vorbild: Profilbild, graue Zeile, fetter Name, gruener Status, kleine Pillen."""
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
@@ -247,75 +256,73 @@ class ServerCard(QWidget):
         hv = max(0.0, min(1.0, self.pop))
         c = r.center()
         p.translate(c)
-        p.scale(1 + 0.018 * self.pop, 1 + 0.018 * self.pop)
+        p.scale(1 + 0.012 * self.pop, 1 + 0.012 * self.pop)
         p.translate(-c)
-        g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0, white(220))
-        g.setColorAt(1, white(150))
-        p.setPen(Qt.NoPen)
-        p.setBrush(g)
-        p.drawRoundedRect(r, 24, 24)
-        bp = QPen(white(240), 1.2)
+        rad = 20
+        p.setBrush(T.card_fill(140 + 50 * hv))
+        pen = QPen(T.line(1.3 + 0.8 * hv), 1)
         if self.add:
-            bp = QPen(with_alpha(T.acc, 150 + 90 * hv), 1.4)
-            bp.setStyle(Qt.DashLine)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(bp)
-        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 24, 24)
+            pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
         if self.add:
-            d = 48
-            cr = QRectF(c.x() - d / 2, c.y() - 36, d, d)
-            p.setPen(Qt.NoPen)
-            p.setBrush(with_alpha(T.acc, 40))
+            d = 44
+            cr = QRectF(c.x() - d / 2, c.y() - 34, d, d)
+            p.setPen(QPen(T.line(1.6), 1))
+            p.setBrush(T.card_fill(170))
             p.drawEllipse(cr)
-            paint_icon(p, "plus", cr.adjusted(12, 12, -12, -12), T.acc, 2.2)
+            paint_icon(p, "plus", cr.adjusted(13, 13, -13, -13), ink(220), 1.8)
             p.setPen(ink(235))
-            p.setFont(app_font(11.5, True))
-            p.drawText(QRectF(r.left(), c.y() + 18, r.width(), 28), Qt.AlignCenter, "Neuer Server")
+            p.setFont(app_font(10.5, True))
+            p.drawText(QRectF(r.left(), c.y() + 16, r.width(), 24), Qt.AlignCenter, "Neuer Server")
             p.setPen(ink(130))
-            p.setFont(app_font(9.5))
-            p.drawText(QRectF(r.left(), c.y() + 42, r.width(), 22), Qt.AlignCenter, "Eigene Kill-Erkennung anlegen")
+            p.setFont(app_font(9))
+            p.drawText(QRectF(r.left(), c.y() + 38, r.width(), 20), Qt.AlignCenter, "Eigene Kill-Erkennung anlegen")
             return
-        paint_avatar(p, QRectF(r.left() + 22, r.top() + 22, 54, 54), self.name, 18, 20, self.sid)
-        p.setPen(ink(240))
-        p.setFont(app_font(15, True))
-        fm = QFontMetrics(p.font())
-        p.drawText(QRectF(r.left() + 90, r.top() + 24, r.width() - 180, 26), Qt.AlignVCenter,
-                   fm.elidedText(self.name, Qt.ElideRight, int(r.width() - 180)))
+        paint_avatar(p, QRectF(r.left() + 18, r.top() + 18, 42, 42), self.name, 21, 16, self.sid)
+        tx = r.left() + 72
+        avail = r.width() - 72 - (96 if not self.locked else 18)
         p.setPen(ink(130))
-        p.setFont(app_font(9.5))
-        p.drawText(QRectF(r.left() + 90, r.top() + 50, r.width() - 110, 40),
-                   int(Qt.AlignTop.value) | int(Qt.TextWordWrap.value), self.sub)
+        p.setFont(app_font(8.5))
+        p.drawText(QRectF(tx, r.top() + 19, avail, 16), Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(self.sub, Qt.ElideRight, int(avail)))
+        p.setPen(ink(240))
+        p.setFont(app_font(12, True))
+        p.drawText(QRectF(tx, r.top() + 36, avail, 24), Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(self.name, Qt.ElideRight, int(avail)))
         if not self.locked:
-            dr = self._del_rect()
-            p.setPen(Qt.NoPen)
-            p.setBrush(with_alpha(RED, 40 + 50 * self.dhov) if self.dhov > 0.05 else white(150))
-            p.drawEllipse(dr)
-            paint_icon(p, "trash", dr.adjusted(8 - 2 * self.dhov, 8 - 2 * self.dhov, -8 + 2 * self.dhov, -8 + 2 * self.dhov),
-                       QColor(T.err) if self.dhov > 0.3 else T.icon)
-            er = self._edit_rect()
-            p.setPen(Qt.NoPen)
-            p.setBrush(white(150))
-            p.drawEllipse(er)
-            paint_icon(p, "edit", er.adjusted(8 - 2 * self.ehov, 8 - 2 * self.ehov, -8 + 2 * self.ehov, -8 + 2 * self.ehov), T.icon)
-        p.setPen(T.acc_text)
-        p.setFont(app_font(10.5, True))
-        p.drawText(QRectF(r.left() + 22, r.bottom() - 46, 120, 26), Qt.AlignVCenter, "Auswählen")
-        paint_icon(p, "chevron", QRectF(r.left() + 100, r.bottom() - 43, 18, 18), T.acc_text)
+            for rr, icon, h, col in ((self._del_rect(), "trash", self.dhov, T.err), (self._edit_rect(), "edit", self.ehov, T.icon)):
+                p.setPen(QPen(T.line(1.2 + h), 1))
+                p.setBrush(T.card_fill(120 + 60 * h))
+                p.drawEllipse(rr)
+                paint_icon(p, icon, rr.adjusted(9, 9, -9, -9), col if h > 0.4 else ink(170), 1.5)
         if self.tag:
-            fm = QFontMetrics(app_font(9, True))
-            tw = fm.horizontalAdvance(self.tag) + 20
-            tr = QRectF(r.right() - 18 - tw, r.bottom() - 46, tw, 24)
-            p.setPen(Qt.NoPen)
-            p.setBrush(with_alpha(T.acc, 40))
-            p.drawRoundedRect(tr, 12, 12)
-            p.setPen(T.acc_text)
-            p.setFont(app_font(9, True))
-            p.drawText(tr, Qt.AlignCenter, self.tag)
+            p.setPen(T.okc)
+            p.setFont(app_font(9))
+            p.drawText(QRectF(r.left() + 18, r.top() + 74, r.width() - 36, 18), Qt.AlignVCenter, self.tag)
+        # Pillen unten
+        p.setFont(app_font(9))
+        fm = QFontMetrics(p.font())
+        sel_txt = "Auswählen"
+        w = fm.horizontalAdvance(sel_txt) + 46
+        pr = QRectF(r.left() + 18, r.bottom() - 46, w, 30)
+        pf, pfg = T.pill()
+        p.setPen(Qt.NoPen)
+        p.setBrush(with_alpha(pf, 255 * hv) if hv > 0.02 else Qt.NoBrush)
+        if hv <= 0.02:
+            p.setPen(QPen(T.line(1.5), 1))
+        p.drawRoundedRect(pr, 15, 15)
+        fgc = pfg if hv > 0.5 else ink(215)
+        p.setPen(fgc)
+        p.drawText(QRectF(pr.left() + 14, pr.top(), w - 30, pr.height()), Qt.AlignVCenter, sel_txt)
+        ax, ay = pr.right() - 18, pr.center().y()
+        p.setPen(QPen(fgc, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawLine(QPointF(ax - 4, ay + 4), QPointF(ax + 4, ay - 4))
+        p.drawPolyline(QPolygonF([QPointF(ax - 2, ay - 4), QPointF(ax + 4, ay - 4), QPointF(ax + 4, ay + 2)]))
 
 
 class NavItem(QWidget):
-    """Reiter in der oberen Leiste: Pille, der aktive Reiter ist in der Akzentfarbe gefuellt."""
+    """Reiter oben: nur Text, der aktive Reiter liegt auf einer dezenten dunklen Pille."""
     clicked = Signal()
 
     def __init__(self, icon, text, parent=None):
@@ -324,23 +331,22 @@ class NavItem(QWidget):
         self.sel = 0.0
         self.pop = 0.0
         self.enabled_nav = True
-        self.setFixedHeight(44)
+        self.setFixedHeight(40)
         self.setCursor(Qt.PointingHandCursor)
-        fm = QFontMetrics(app_font(10.5, True))
-        self.setFixedWidth(fm.horizontalAdvance(text) + 62)
+        self.setFixedWidth(QFontMetrics(app_font(9.5, False)).horizontalAdvance(text) + 38)
 
     def set_selected(self, on):
-        tween(self, "sel", 1.0 if on else 0.0, 240)
+        tween(self, "sel", 1.0 if on else 0.0, 220)
 
     def set_nav_enabled(self, on):
         self.enabled_nav = on
         self.update()
 
     def enterEvent(self, e):
-        tween(self, "pop", 1.0, 150)
+        tween(self, "pop", 1.0, 140)
 
     def leaveEvent(self, e):
-        tween(self, "pop", 0.0, 150)
+        tween(self, "pop", 0.0, 140)
 
     def mousePressEvent(self, e):
         self.clicked.emit()
@@ -349,24 +355,19 @@ class NavItem(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        p.setOpacity(1.0 if self.enabled_nav else 0.4)
-        r = QRectF(self.rect()).adjusted(2, 4, -2, -4)
+        p.setOpacity(1.0 if self.enabled_nav else 0.35)
+        r = QRectF(self.rect()).adjusted(1, 3, -1, -3)
         a = max(0.0, min(1.0, self.sel))
-        pf, pfg = T.pill()
         p.setPen(Qt.NoPen)
-        p.setBrush(with_alpha(pf, 255 * a))
+        p.setBrush(T.tab_fill(a))
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        if a < 0.98 and self.pop > 0.02:
-            p.setBrush(with_alpha(ink(255), 14 * self.pop * (1 - a)))
+        if a > 0.02:
+            p.setPen(QPen(T.line(1.1 * a), 1))
+            p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        def mixc(c0, c1):
-            return QColor(int(c0.red() + (c1.red() - c0.red()) * a), int(c0.green() + (c1.green() - c0.green()) * a),
-                          int(c0.blue() + (c1.blue() - c0.blue()) * a))
-        fg = mixc(ink(185), pfg)
-        paint_icon(p, self.icon, QRectF(r.left() + 14, r.center().y() - 9, 18, 18), fg, 1.8)
-        p.setPen(fg)
-        p.setFont(app_font(10.5, True))
-        p.drawText(QRectF(r.left() + 40, r.top(), r.width() - 44, r.height()), Qt.AlignVCenter, self.text)
+        p.setPen(ink(int(140 + 50 * self.pop + 65 * a)))
+        p.setFont(app_font(9.5, False))
+        p.drawText(r, Qt.AlignCenter, self.text)
 
 
 class SideServer(QWidget):
@@ -426,15 +427,15 @@ class ClipRow(QWidget):
         self.ehov = 0.0
         self.title_text = None
         self.appear = 1.0                 # 0 -> 1: Einblenden (Deckkraft + leichtes Aufsteigen)
-        self.setFixedHeight(66)
+        self.setFixedHeight(126)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
 
     def _xr(self):
-        return QRectF(self.width() - 40, (self.height() - 28) / 2, 28, 28)
+        return QRectF(self.width() - 15 - 30, 17, 30, 30)
 
     def _er(self):
-        return QRectF(self.width() - 72, (self.height() - 28) / 2, 28, 28)
+        return QRectF(self.width() - 15 - 64, 17, 30, 30)
 
     def enterEvent(self, e):
         tween(self, "hov", 1.0, 130)
@@ -464,56 +465,67 @@ class ClipRow(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        r = QRectF(self.rect()).adjusted(2, 3, -2, -3)
+        r = QRectF(self.rect()).adjusted(1, 4, -1, -4)
         if self.appear < 1.0:
             p.setOpacity(max(0.0, self.appear))
             p.translate(0, (1 - self.appear) * 8)
-        c0 = r.center()
-        p.translate(c0)
-        p.scale(1 + 0.008 * self.hov, 1 + 0.008 * self.hov)
-        p.translate(-c0)
-        p.setPen(QPen(with_alpha(T.acc, 90), 1.2) if self.selected else Qt.NoPen)
-        p.setBrush(T.sel_fill() if self.selected else Qt.NoBrush)
-        p.drawRoundedRect(r, 18, 18)
-        p.setPen(ink(110))
-        p.setFont(app_font(10))
-        p.drawText(QRectF(r.left() + 6, r.top(), 28, r.height()), Qt.AlignCenter, str(self.i + 1))
-        t = QRectF(r.left() + 40, r.top() + 8, 70, r.height() - 16)
-        if self.c.thumb:
-            path = QPainterPath()
-            path.addRoundedRect(t, 9, 9)
-            p.save()
-            p.setClipPath(path)
-            pw, ph = self.c.thumb.width(), self.c.thumb.height()
-            ta = t.width() / t.height()
-            sw, sh = (ph * ta, ph) if pw / ph > ta else (pw, pw / ta)
-            p.drawPixmap(t, self.c.thumb, QRectF((pw - sw) / 2, (ph - sh) / 2, sw, sh))
-            p.restore()
-        tx = t.right() + 14
-        avail = max(40, self.width() - 160 - tx)
+        sel = 1.0 if self.selected else 0.0
+        p.setPen(QPen(T.line(1.2 + 0.8 * self.hov + 1.6 * sel), 1))
+        p.setBrush(T.card_fill(150 + 30 * self.hov + 50 * sel))
+        p.drawRoundedRect(r, 16, 16)
+        c = self.c
+        # Vorschaubild rund wie ein Profilbild
+        t = QRectF(r.left() + 14, r.top() + 14, 34, 34)
+        path = QPainterPath()
+        path.addEllipse(t)
+        p.save()
+        p.setClipPath(path)
+        if c.thumb:
+            pw, ph = c.thumb.width(), c.thumb.height()
+            s = min(pw, ph)
+            p.drawPixmap(t, c.thumb, QRectF((pw - s) / 2, (ph - s) / 2, s, s))
+        else:
+            p.fillRect(t, ink(30))
+        p.restore()
+        tx = t.right() + 12
+        avail = max(40, r.right() - 84 - tx)
+        p.setPen(ink(135))
+        p.setFont(app_font(8.5))
+        cap = (self.title_text or f"Clip {self.i + 1}") + ("  ·  exportiert" if c.last_name else "")
+        p.drawText(QRectF(tx, r.top() + 12, avail, 16), Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(cap, Qt.ElideRight, int(avail)))
         p.setPen(ink(240))
         p.setFont(app_font(10.5, True))
-        name = self.title_text or f"Clip {self.i + 1}"
-        p.drawText(QRectF(tx, r.top() + 11, avail, 20), Qt.AlignVCenter,
+        name = f"{fmt_short(c.start)} – {fmt_short(c.end)}"
+        p.drawText(QRectF(tx, r.top() + 29, avail, 20), Qt.AlignVCenter,
                    QFontMetrics(p.font()).elidedText(name, Qt.ElideRight, int(avail)))
-        c = self.c
-        p.setPen(ink(150))
+        er, xr = self._er(), self._xr()
+        for rr, icon, hv, col in ((er, "edit", self.ehov, T.icon), (xr, "close", self.xhov, T.err)):
+            p.setPen(QPen(T.line(1.2 + hv), 1))
+            p.setBrush(T.card_fill(120 + 60 * hv))
+            p.drawEllipse(rr)
+            paint_icon(p, icon, rr.adjusted(8, 8, -8, -8), col if hv > 0.4 else ink(170), 1.5)
+        # Kill-Zeitpunkt (gruen, wie "Good Match")
+        p.setPen(T.okc)
         p.setFont(app_font(9))
-        sub = f"{fmt_short(c.start)} – {fmt_short(c.end)}" + ("  ·  exportiert" if c.last_name else "")
-        p.drawText(QRectF(tx, r.top() + 32, avail, 18), Qt.AlignVCenter, sub)
-        p.setPen(ink(150))
-        p.setFont(app_font(9.5))
-        p.drawText(QRectF(r.right() - 150, r.top(), 66, r.height()), Qt.AlignVCenter | Qt.AlignRight,
-                   f"{c.end - c.start:.1f} s")
-        er = self._er()
-        p.setPen(Qt.NoPen)
-        p.setBrush(white(160 * self.ehov))
-        p.drawEllipse(er)
-        paint_icon(p, "edit", er.adjusted(7, 7, -7, -7), with_alpha(T.icon, int(120 + 110 * self.ehov)), 1.6)
-        xr = self._xr()
-        p.setBrush(with_alpha(RED, 55 * self.xhov))
-        p.drawEllipse(xr)
-        paint_icon(p, "close", xr.adjusted(9, 9, -9, -9), with_alpha(T.icon, int(120 + 110 * self.xhov)), 1.7)
+        p.drawText(QRectF(r.left() + 14, r.top() + 56, r.width() - 28, 18), Qt.AlignVCenter,
+                   f"Kill bei {fmt_short(c.kill)}")
+        # kleine Pillen unten
+        x = r.left() + 14
+        p.setFont(app_font(8.5))
+        fm = QFontMetrics(p.font())
+        for txt in (f"{c.end - c.start:.1f} s", f"Start {fmt_short(c.start)}"):
+            w = fm.horizontalAdvance(txt) + 22
+            pr = QRectF(x, r.bottom() - 34, w, 24)
+            p.setPen(QPen(T.line(1.4), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(pr, 12, 12)
+            p.setPen(ink(190))
+            p.drawText(pr, Qt.AlignCenter, txt)
+            x += w + 6
+        p.setPen(ink(110))
+        p.drawText(QRectF(r.right() - 90, r.bottom() - 34, 76, 24), Qt.AlignVCenter | Qt.AlignRight,
+                   f"#{self.i + 1:02d}")
 
 
 class LibRow(QWidget):
@@ -695,11 +707,13 @@ class VideoWidget(QWidget):
             dpr = self.devicePixelRatioF()
             iw, ih = self.img.width() / dpr, self.img.height() / dpr
             p.drawImage(QPointF(a.x() + (a.width() - iw) / 2, a.y() + (a.height() - ih) / 2), self.img)
-            # weiche Abdunklung unten, damit Zeitleiste und Knoepfe gut lesbar bleiben
-            sh = QLinearGradient(0, r.bottom() - 90, 0, r.bottom())
-            sh.setColorAt(0, QColor(0, 0, 0, 0))
-            sh.setColorAt(1, QColor(0, 0, 0, 110))
-            p.fillRect(r, sh)
+        # weiche Abdunklung oben (Titel) und unten (Bedienung), damit alles auf jedem Bild lesbar bleibt
+        sh = QLinearGradient(0, r.top(), 0, r.bottom())
+        sh.setColorAt(0, QColor(0, 0, 0, 150))
+        sh.setColorAt(0.28, QColor(0, 0, 0, 0))
+        sh.setColorAt(0.72, QColor(0, 0, 0, 0))
+        sh.setColorAt(1, QColor(0, 0, 0, 160))
+        p.fillRect(r, sh)
         p.setClipping(False)
         p.setPen(QPen(T.line(1.6), 1.0))
         p.setBrush(Qt.NoBrush)
@@ -707,14 +721,14 @@ class VideoWidget(QWidget):
         if self.has_video:
             p.setFont(app_font(10, True))
             tw = QFontMetrics(p.font()).horizontalAdvance(self.time_text) + 24
-            tr = QRectF(a.x() + 16, a.y() + 16, tw, 28)
+            tr = QRectF(a.right() - 22 - tw, a.y() + 24, tw, 28)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(10, 10, 14, 170))
             p.drawRoundedRect(tr, 14, 14)
             p.setPen(QColor("white"))
             p.drawText(tr, Qt.AlignCenter, self.time_text)
             if self.kill:
-                kr = QRectF(a.right() - 16 - 92, a.y() + 16, 92, 28)
+                kr = QRectF(tr.left() - 8 - 92, a.y() + 24, 92, 28)
                 p.setPen(Qt.NoPen)
                 p.setBrush(RED)
                 p.drawRoundedRect(kr, 14, 14)
@@ -722,15 +736,19 @@ class VideoWidget(QWidget):
                 p.drawText(kr, Qt.AlignCenter, "\u25cf  KILL")
 
 
-def panel(title, sub="", radius=26, alpha=120):
-    """Glas-Karte mit Titel; gibt (Karte, Layout) zurueck."""
+def panel(title, sub="", radius=30, alpha=130):
+    """Karte mit Titel und grauer Unterzeile; gibt (Karte, Layout) zurueck."""
     g = Glass(None, radius=radius, alpha=alpha)
     lay = QVBoxLayout(g)
-    lay.setContentsMargins(22, 20, 22, 20)
+    lay.setContentsMargins(20, 18, 20, 18)
     lay.setSpacing(10)
-    lay.addWidget(label(title, 14.5, True))
+    head = QVBoxLayout()
+    head.setSpacing(2)
+    head.addWidget(label(title, 12.5, True))
     if sub:
-        lay.addWidget(ElidedLabel(sub, 9.5, False, MUT))
+        head.addWidget(ElidedLabel(sub, 9, False, MUT))
+    lay.addLayout(head)
+    lay.addSpacing(2)
     return g, lay
 
 
@@ -884,9 +902,11 @@ class PickCanvas(QWidget):
 
 
 class EditorCanvas(QWidget):
-    """Seite des Editors: Video als Hintergrund, Karten schweben darueber (Quantis-Stil)."""
-    G = 14
-    LW, RW = 300, 304
+    """Editor-Seite: links Clip-Spalte, Mitte grosse Video-Buehne mit Titel und Bedienung darauf,
+    unten die Zeitleiste, rechts Suche und Export (Aufbau wie im Vorbild)."""
+    G = 12
+    LW, RW = 304, 312
+    TL = 236
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -900,30 +920,96 @@ class EditorCanvas(QWidget):
         if not p:
             return
         W, H, g = self.width(), self.height(), self.G
-        p["video"].setGeometry(0, 0, W, H)
         vis = lambda n: not p[n].isHidden()
-        x0 = g + (self.LW + g if vis("left") else 0)
-        x1 = W - g - (self.RW + g if vis("right") else 0)
+        x0 = self.LW + g if vis("left") else 0
+        x1 = W - (self.RW + g if vis("right") else 0)
+        cw = max(240, x1 - x0)
         if vis("left"):
-            p["left"].setGeometry(g, g, self.LW, H - 2 * g)
+            p["left"].setGeometry(0, 0, self.LW, H)
         if vis("right"):
-            p["right"].setGeometry(W - g - self.RW, g, self.RW, H - 2 * g)
-        cw = max(200, x1 - x0)
-        if vis("header"):
-            p["header"].setGeometry(x0, g, cw, 52)
-        bar = p["bar"]
-        bar.setGeometry(x0, H - g - bar.height(), cw, bar.height())
-        tl_h = 214
-        tl_y = H - g - bar.height() - g - tl_h
-        p["tl"].setGeometry(x0, tl_y, cw, tl_h)
-        top = g + (52 + 12 if vis("header") else 0)
+            p["right"].setGeometry(W - self.RW, 0, self.RW, H)
+        p["tl"].setGeometry(x0, H - self.TL, cw, self.TL)
+        hero = QRectF(x0, 0, cw, H - self.TL - g)
         v = p["video"]
-        v.view = QRectF(x0, top, cw, max(120, tl_y - 12 - top))
+        v.setGeometry(0, 0, W, H)
+        v.view = hero
         v.sync_cover()
         v.update()
-        for n in ("left", "right", "header", "tl", "bar"):
+        hx, hy, hw, hh = int(hero.x()), int(hero.y()), int(hero.width()), int(hero.height())
+        if vis("title"):
+            p["title"].setGeometry(hx + 26, hy + 22, min(620, hw - 200), 112)
+        cl, cr = p["ctrl_l"], p["ctrl_r"]
+        cl.adjustSize()
+        cr.adjustSize()
+        by = hy + hh - 20 - 52
+        cl.setGeometry(hx + 20, by, cl.sizeHint().width(), 52)
+        cr.setGeometry(hx + hw - 20 - cr.sizeHint().width(), by, cr.sizeHint().width(), 52)
+        p["seek"].setGeometry(hx + 26, by - 26, hw - 52, 16)
+        for n in ("left", "right", "tl", "title", "ctrl_l", "ctrl_r", "seek"):
             if vis(n):
                 p[n].raise_()
+
+
+class HeroCluster(QWidget):
+    """Dunkle Pille auf dem Video, in der Bedienknoepfe sitzen (bleibt auf jedem Bild lesbar)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.lay = QHBoxLayout(self)
+        self.lay.setContentsMargins(6, 0, 6, 0)
+        self.lay.setSpacing(2)
+
+    def childEvent(self, e):
+        super().childEvent(e)
+        w = e.child()
+        if isinstance(w, (PopButton, Segmented)):
+            w.on_dark = True
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 2.5, -0.5, -2.5)
+        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
+        p.setBrush(QColor(8, 9, 10, 175))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+
+
+class IconDot(QWidget):
+    """Runder Icon-Knopf der oberen Leiste; dot=True zeigt einen kleinen roten Punkt (z. B. Update da)."""
+    clicked = Signal()
+
+    def __init__(self, icon, tip="", parent=None):
+        super().__init__(parent)
+        self.icon, self.dot, self.pop = icon, False, 0.0
+        self.setFixedSize(40, 40)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(tip)
+
+    def set_dot(self, on):
+        self.dot = on
+        self.update()
+
+    def enterEvent(self, e):
+        tween(self, "pop", 1.0, 140)
+
+    def leaveEvent(self, e):
+        tween(self, "pop", 0.0, 140)
+
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        p.setPen(QPen(T.line(1.3 + 0.6 * self.pop), 1))
+        p.setBrush(T.card_fill(120 + 40 * self.pop))
+        p.drawEllipse(r)
+        paint_icon(p, self.icon, QRectF(r.center().x() - 8, r.center().y() - 8, 16, 16), ink(int(170 + 60 * self.pop)), 1.6)
+        if self.dot:
+            p.setPen(QPen(T.bg_stops()[0], 2))
+            p.setBrush(RED)
+            p.drawEllipse(QPointF(r.right() - 7, r.top() + 7), 4.5, 4.5)
 
 
 class ServerChip(QWidget):
@@ -934,8 +1020,8 @@ class ServerChip(QWidget):
         super().__init__(parent)
         self.name = ""
         self.pop = 0.0
-        self.setFixedHeight(48)
-        self.setFixedWidth(200)
+        self.setFixedHeight(44)
+        self.setFixedWidth(230)
         self.setCursor(Qt.PointingHandCursor)
 
     def set_server(self, name, sid=None):
@@ -956,24 +1042,25 @@ class ServerChip(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        r = QRectF(self.rect()).adjusted(3, 2, -3, -2)
-        c = r.center()
-        p.translate(c)
-        p.scale(1 + 0.012 * self.pop, 1 + 0.012 * self.pop)
-        p.translate(-c)
-        p.setPen(QPen(white(240), 1.1))
-        p.setBrush(white(190))
-        p.drawRoundedRect(r, 22, 22)
+        r = QRectF(self.rect()).adjusted(1, 4, -1, -4)
+        p.setPen(QPen(T.line(1.3 + 0.6 * self.pop), 1))
+        p.setBrush(T.card_fill(120 + 40 * self.pop))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        x = r.left() + 6
         if self.name:
-            paint_avatar(p, QRectF(r.left() + 8, r.center().y() - 15, 30, 30), self.name, 15, 12, getattr(self, 'sid', None))
-            p.setPen(ink(235))
-            p.setFont(app_font(10.5, True))
-            p.drawText(QRectF(r.left() + 48, r.top(), r.width() - 56, r.height()), Qt.AlignVCenter,
-                       QFontMetrics(p.font()).elidedText(self.name, Qt.ElideRight, int(r.width() - 60)))
+            paint_avatar(p, QRectF(x, r.center().y() - 12, 24, 24), self.name, 12, 10, getattr(self, "sid", None))
+            p.setPen(ink(225))
+            p.setFont(app_font(9.5))
+            p.drawText(QRectF(x + 32, r.top(), r.width() - 70, r.height()), Qt.AlignVCenter,
+                       QFontMetrics(p.font()).elidedText(self.name, Qt.ElideRight, int(r.width() - 72)))
         else:
-            p.setPen(ink(130))
-            p.setFont(app_font(10))
-            p.drawText(r, Qt.AlignCenter, "Kein Server")
+            paint_icon(p, "server", QRectF(x + 6, r.center().y() - 8, 16, 16), ink(120), 1.6)
+            p.setPen(ink(120))
+            p.setFont(app_font(9.5))
+            p.drawText(QRectF(x + 32, r.top(), r.width() - 70, r.height()), Qt.AlignVCenter, "Server wählen")
+        cx, cy = r.right() - 18, r.center().y()
+        p.setPen(QPen(ink(150), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPolyline(QPolygonF([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)]))
 
 
 class ColorDot(QWidget):
@@ -1220,8 +1307,8 @@ class Window(QMainWindow):
         self.bg = Background()
         self.setCentralWidget(self.bg)
         root = QVBoxLayout(self.bg)
-        root.setContentsMargins(22, 14, 22, 22)
-        root.setSpacing(12)
+        root.setContentsMargins(20, 12, 20, 20)
+        root.setSpacing(10)
         fl = root
         self.sidebar = self.build_sidebar()
         fl.addWidget(self.sidebar)
@@ -1318,7 +1405,7 @@ class Window(QMainWindow):
             self.showMaximized() if self._was_max else self.showNormal()
         for w in (self.sidebar, self.right_col, self.pill, self.left_panel):
             w.setVisible(not on)
-        self.bg.layout().setContentsMargins(*((12, 12, 12, 12) if on else (22, 14, 22, 22)))
+        self.bg.layout().setContentsMargins(*((12, 12, 12, 12) if on else (20, 12, 20, 20)))
         self.page_editor.place()
         self.fs_btn.icon_name = "shrink" if on else "expand"
         self.fs_btn.setToolTip("Vollbild beenden (Esc)" if on else "Vollbild (F)")
@@ -1442,49 +1529,63 @@ class Window(QMainWindow):
 
     # ------------------------------------------------------------ Seitenleiste
     def build_sidebar(self):
-        """Obere Leiste: Logo, Reiter als Pillen, aktueller Server. (Name bleibt, damit alles andere gleich funktioniert.)"""
+        """Obere Leiste wie im Vorbild: Logo, Text-Reiter, rechts Server-Auswahl und runde Icon-Knoepfe."""
         sb = QWidget()
-        sb.setFixedHeight(56)
+        sb.setFixedHeight(52)
         lay = QHBoxLayout(sb)
-        lay.setContentsMargins(0, 0, 150, 0)
-        lay.setSpacing(12)
-        logo = Glass(radius=40, alpha=130)
-        logo.setFixedSize(52, 52)
-        ll = QHBoxLayout(logo)
-        ll.setContentsMargins(0, 0, 0, 0)
-        lg = QLabel()
-        lg.setPixmap(QPixmap(resource("assets", "logo.png")).scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        lg.setAlignment(Qt.AlignCenter)
-        ll.addWidget(lg)
+        lay.setContentsMargins(4, 0, 150, 0)
+        lay.setSpacing(6)
+        logo = QLabel()
+        logo.setPixmap(QPixmap(resource("assets", "logo.png")).scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        logo.setFixedWidth(44)
+        logo.setAlignment(Qt.AlignCenter)
         lay.addWidget(logo)
-        grp = Glass(radius=40, alpha=130)
-        grp.setFixedHeight(52)
-        gl = QHBoxLayout(grp)
-        gl.setContentsMargins(5, 0, 5, 0)
-        gl.setSpacing(2)
+        lay.addSpacing(14)
         self.nav = []
         for i, (ic, tx) in enumerate((("server", "Server"), ("film", "Editor"), ("folder", "Bibliothek"),
                                       ("gear", "Einstellungen"))):
             n = NavItem(ic, tx)
             n.clicked.connect(lambda i=i: self.nav_clicked(i))
-            gl.addWidget(n)
+            lay.addWidget(n)
             self.nav.append(n)
         self.nav[1].set_nav_enabled(False)
-        lay.addWidget(grp)
+        lay.addStretch(1)
         self.top_chip = ServerChip()
         self.top_chip.clicked.connect(lambda: self.go_page(0))
         lay.addWidget(self.top_chip)
-        lay.addStretch(1)
-        self.btn_update = PopButton("Update installieren", "upload", "glass", 40)
+        lay.addSpacing(4)
+        b = IconDot("folder", "Video öffnen")
+        b.clicked.connect(self._top_open)
+        lay.addWidget(b)
+        self.upd_dot = IconDot("refresh", "Nach Updates suchen")
+        self.upd_dot.clicked.connect(self._top_update)
+        lay.addWidget(self.upd_dot)
+        b = IconDot("gear", "Einstellungen")
+        b.clicked.connect(lambda: self.go_page(3))
+        lay.addWidget(b)
+        self.btn_update = PopButton("Update installieren", "upload", "glass", 36)
         self.btn_update.clicked.connect(self.do_update)
         self.btn_update.hide()
         lay.addWidget(self.btn_update)
         self.ver = label(f"v{core.APP_VERSION}", 9, color=DIM)
-        lay.addWidget(self.ver)
-        # (alter Seitenleisten-Kram bleibt unsichtbar bestehen, damit keine Funktion bricht)
+        self.ver.hide()
         self.side_scroll = QScrollArea(sb)
         self.side_scroll.hide()
         return sb
+
+    def _top_open(self):
+        if self.server is None:
+            self.say("Wähle zuerst einen Server", AMBER)
+            self.go_page(0)
+            return
+        self.go_page(1)
+        self.open_video()
+
+    def _top_update(self):
+        if self.update_url:
+            self.do_update()
+        else:
+            self.start_update_check(True)
 
     def caption(self, text):
         lb = label(text, 10, True, MUT)
@@ -1534,10 +1635,12 @@ class Window(QMainWindow):
     def page_header(self, title, sub):
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(2)
-        v.addWidget(label(title, 24, True))
-        v.addWidget(label(sub, 10.5, color=MUT))
+        v.setContentsMargins(4, 0, 0, 0)
+        v.setSpacing(4)
+        t = label(title, 22, False)
+        t.setFont(hero_font(22))
+        v.addWidget(t)
+        v.addWidget(label(sub, 9.5, color=MUT))
         return w
 
     def build_server_page(self):
@@ -1569,6 +1672,10 @@ class Window(QMainWindow):
         avail = self.srv_scroll.viewport().width() or 900
         return max(1, min(4, (avail - 10) // (ServerCard.W + 2 * ServerCard.M + 4)))
 
+    def _sync_left_srv(self):
+        if hasattr(self, "left_srv"):
+            self.left_srv.setText(self.server["name"] if self.server else "–")
+
     def render_servers(self):
         host = QWidget()
         host.setAttribute(Qt.WA_TranslucentBackground)
@@ -1597,6 +1704,7 @@ class Window(QMainWindow):
         grid.setRowStretch(len(items) // cols + 1, 1)
         self.srv_scroll.setWidget(host)
         self.srv_host = host
+        self._sync_left_srv()
         self.render_side_servers()
 
     def enter_server(self, s):
@@ -1951,109 +2059,188 @@ class Window(QMainWindow):
 
     # ------------------------------------------------------------ Seite: Editor
     def build_editor_page(self):
-        """Quantis-Stil: das Video fuellt die ganze Seite, alle Bedienfelder schweben als Glas-Karten darueber."""
         cv = EditorCanvas()
         self.ed_chip = self.top_chip
+        self.pill_icon = QLabel()            # (nur noch intern genutzt)
 
-        # ---- Video (Hintergrund der Seite)
+        # ---- Video-Buehne
         self.video = VideoWidget(cv)
-        self.video.setMinimumSize(320, 220)
         self.video.double.connect(self.toggle_fullscreen)
         cta = QWidget(self.video)
         cl = QVBoxLayout(cta)
         cl.setAlignment(Qt.AlignCenter)
         ib = QLabel()
-        ib.setPixmap(icon_pixmap("film", QColor(255, 255, 255, 235), 42, 1.6))
-        ib.setFixedSize(84, 84)
+        ib.setPixmap(icon_pixmap("film", QColor(255, 255, 255, 220), 36, 1.5))
+        ib.setFixedSize(76, 76)
         ib.setAlignment(Qt.AlignCenter)
         ib.setProperty("role", "ctaicon")
         cl.addWidget(ib, 0, Qt.AlignHCenter)
+        cl.addSpacing(8)
+        cl.addWidget(label("Ziehe eine Aufnahme hierher", 12, True, "onvideo"), 0, Qt.AlignHCenter)
+        cl.addWidget(label("oder öffne sie über den Knopf.", 9.5, False, "onvideo2"), 0, Qt.AlignHCenter)
         cl.addSpacing(10)
-        cl.addWidget(label("Los geht\u2019s", 18, True, "onvideo"), 0, Qt.AlignHCenter)
-        cl.addWidget(label("Wähle deine Aufnahme aus.", 10.5, False, "onvideo2"), 0, Qt.AlignHCenter)
-        cl.addSpacing(10)
-        ob = PopButton("Video öffnen", "folder", "accent", 44)
+        ob = PopButton("Video öffnen", "folder", "accent", 40)
         ob.clicked.connect(self.open_video)
         cl.addWidget(ob, 0, Qt.AlignHCenter)
         self.cta = cta
         self.video.cover = cta
 
-        # ---- Kopfzeile oben in der Mitte: Datei
-        pill = self.pill = Glass(cv, radius=40, alpha=135)
-        pill.setFixedHeight(52)
-        pl = QHBoxLayout(pill)
-        pl.setContentsMargins(18, 0, 8, 0)
-        pl.setSpacing(10)
-        ic = QLabel()
-        ic.setPixmap(icon_pixmap("film", T.icon, 20))
-        self.pill_icon = ic
-        pl.addWidget(ic)
-        self.file_lbl = ElidedLabel("Noch kein Video geladen", 10.5, True)
-        self.meta_lbl = ElidedLabel("", 9.5, False, MUT)
-        self.meta_lbl.hide()
-        pl.addWidget(self.file_lbl, 1)
-        self.open_btn = PopButton("Video öffnen", "folder", "accent", 36)
+        # Titel oben links auf der Buehne
+        tb = QWidget(cv)
+        self.pill = tb
+        tv = QVBoxLayout(tb)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(4)
+        self.file_lbl = ElidedLabel("Noch kein Video", 22, False, "onvideo")
+        self.file_lbl.setFont(hero_font(23))
+        tv.addWidget(self.file_lbl)
+        self.meta_lbl = ElidedLabel("Wähle eine Aufnahme aus · OBS oder NVIDIA", 9.5, False, "onvideo2")
+        tv.addWidget(self.meta_lbl)
+        tv.addSpacing(6)
+        pr = QHBoxLayout()
+        pr.setSpacing(6)
+        self.open_btn = PopButton("Video öffnen", "folder", "dark", 32)
         self.open_btn.clicked.connect(self.open_video)
-        pl.addWidget(self.open_btn)
-        self.close_btn = PopButton("", "close", "flat", 36, icon_only=True)
+        pr.addWidget(self.open_btn)
+        self.close_btn = PopButton("", "close", "dark", 32, icon_only=True)
         self.close_btn.setToolTip("Video entfernen")
         self.close_btn.clicked.connect(self.ask_unload)
         self.close_btn.hide()
-        pl.addWidget(self.close_btn)
+        pr.addWidget(self.close_btn)
+        pr.addStretch(1)
+        tv.addLayout(pr)
+        tv.addStretch(1)
 
-        # ---- links: Clips
-        left = Glass(cv, radius=34, alpha=135)
-        left.tint = True
+        # Bedienung unten auf der Buehne
+        self.seekbar = SeekBar(self)
+        self.seekbar.setParent(cv)
+        self.seekbar.seek.connect(self.seek)
+        ctl = HeroCluster(cv)
+        b = PopButton("", "prev", "flat", 40, icon_only=True)
+        b.clicked.connect(lambda: self.step_clip(-1))
+        ctl.lay.addWidget(b)
+        b = PopButton("\u22121 s", None, "flat", 40)
+        b.clicked.connect(lambda: self.seek(self.pos - 1))
+        ctl.lay.addWidget(b)
+        self.play_btn = PopButton("", "play", "accent", 40, icon_only=True)
+        self.play_btn.clicked.connect(self.toggle_play)
+        ctl.lay.addWidget(self.play_btn)
+        b = PopButton("+1 s", None, "flat", 40)
+        b.clicked.connect(lambda: self.seek(self.pos + 1))
+        ctl.lay.addWidget(b)
+        b = PopButton("", "next", "flat", 40, icon_only=True)
+        b.clicked.connect(lambda: self.step_clip(1))
+        ctl.lay.addWidget(b)
+        ctr = HeroCluster(cv)
+        self.loop_btn = PopButton("", "refresh", "flat", 40, icon_only=True)
+        self.loop_btn.setToolTip("Clip in der Vorschau wiederholen")
+        ctr.lay.addWidget(self.loop_btn)
+        self.fs_btn = PopButton("", "expand", "flat", 40, icon_only=True)
+        self.fs_btn.setToolTip("Vollbild (F)")
+        self.fs_btn.clicked.connect(self.toggle_fullscreen)
+        ctr.lay.addWidget(self.fs_btn)
+        self.speed_seg = Segmented(["0.5\u00d7", "1\u00d7", "2\u00d7"], height=34)
+        self.speed_seg.setFixedWidth(138)
+        self.speed_seg.set_current("1\u00d7")
+        self.speed_seg.changed.connect(self.set_speed)
+        ctr.lay.addWidget(self.speed_seg)
+        # Datei-Infos fuer die Leiste (nur intern)
+        self.bar_thumb = QLabel(cv)
+        self.bar_title = ElidedLabel("", 10, True)
+        self.bar_sub = ElidedLabel("", 9, False, MUT)
+        for w_ in (self.bar_thumb, self.bar_title, self.bar_sub):
+            w_.hide()
+
+        # ---- linke Spalte: Kennzahlen + Clips
+        left = Glass(cv, radius=30, alpha=120)
         self.left_panel = left
         ml = QVBoxLayout(left)
-        ml.setContentsMargins(22, 20, 14, 16)
-        ml.setSpacing(6)
-        tr = QHBoxLayout()
-        self.ed_title = label("Deine Clips", 17, True)
-        tr.addWidget(self.ed_title)
-        self.count_lbl = label("0", 9.5, True, "badge")
-        tr.addWidget(self.count_lbl)
-        tr.addStretch(1)
-        ml.addLayout(tr)
-        self.total_lbl = label("", 10, color=MUT)
-        ml.addWidget(self.total_lbl)
+        ml.setContentsMargins(14, 14, 10, 12)
+        ml.setSpacing(10)
+        tiles = QHBoxLayout()
+        tiles.setSpacing(8)
+
+        def tile(caption, value_lbl):
+            t = Glass(radius=24, alpha=150)
+            t.setFixedHeight(84)
+            tl = QVBoxLayout(t)
+            tl.setContentsMargins(14, 12, 14, 12)
+            tl.setSpacing(2)
+            tl.addWidget(label(caption, 8.5, color=MUT))
+            value_lbl.setFont(hero_font(18))
+            tl.addWidget(value_lbl)
+            return t
+        self.count_lbl = label("0")
+        self.total_lbl = label("0:00")
+        tiles.addWidget(tile("Clips", self.count_lbl))
+        tiles.addWidget(tile("Gesamtlänge", self.total_lbl))
+        ml.addLayout(tiles)
+        st = Glass(radius=24, alpha=150)
+        st.setFixedHeight(64)
+        sl = QHBoxLayout(st)
+        sl.setContentsMargins(14, 8, 8, 8)
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        col.addWidget(label("Aktueller Server", 8.5, color=MUT))
+        self.left_srv = ElidedLabel("–", 10.5, True)
+        col.addWidget(self.left_srv)
+        sl.addLayout(col, 1)
+        sb_ = PopButton("Wechseln", "chevron", "glass", 30)
+        sb_.clicked.connect(lambda: self.go_page(0))
+        sl.addWidget(sb_)
+        ml.addWidget(st)
+        hr = QHBoxLayout()
+        hr.setContentsMargins(4, 6, 4, 0)
+        self.ed_title = label("Deine Clips", 11.5, True)
+        hr.addWidget(self.ed_title)
+        hr.addStretch(1)
+        hr.addWidget(label("Doppelklick = umbenennen", 8.5, color=DIM))
+        ml.addLayout(hr)
         self.clip_scroll = QScrollArea()
         self.clip_scroll.setWidgetResizable(True)
         self.clip_scroll.setFrameShape(QScrollArea.NoFrame)
         self.clip_scroll.viewport().setAutoFillBackground(False)
         ml.addWidget(self.clip_scroll, 1)
 
-        # ---- Mitte unten: Zeitleiste
-        tlc = Glass(cv, radius=30, alpha=135)
+        # ---- unten Mitte: Zeitleiste
+        tlc = Glass(cv, radius=30, alpha=120)
         self.timeline_panel = tlc
-        tv = QVBoxLayout(tlc)
-        tv.setContentsMargins(14, 10, 14, 10)
-        tv.setSpacing(4)
+        tlv = QVBoxLayout(tlc)
+        tlv.setContentsMargins(18, 14, 18, 12)
+        tlv.setSpacing(8)
+        th = QHBoxLayout()
+        th.setSpacing(10)
+        ic = QLabel()
+        ic.setPixmap(icon_pixmap("crosshair", T.icon, 18))
+        ic.setFixedSize(34, 34)
+        ic.setAlignment(Qt.AlignCenter)
+        ic.setProperty("role", "thumbbg")
+        th.addWidget(ic)
+        hc = QVBoxLayout()
+        hc.setSpacing(0)
+        hc.addWidget(label("Zeitleiste", 11.5, True))
+        hc.addWidget(ElidedLabel("Ränder ziehen = Clip anpassen · Scrollen = Zoom", 9, False, MUT))
+        th.addLayout(hc, 1)
+        for tx, ic_, fn in (("Start  I", None, lambda: self.set_edge(0)),
+                            ("Ende  O", None, lambda: self.set_edge(1)),
+                            ("Clip hier", "plus", self.add_clip)):
+            b = PopButton(tx, ic_, "glass", 30)
+            b.clicked.connect(fn)
+            th.addWidget(b)
+        tlv.addLayout(th)
         self.timeline = Timeline(self)
         self.timeline.seek.connect(self.seek)
         self.timeline.pick.connect(lambda i: self.select(i, seek=False))
         self.timeline.edited.connect(self.clip_changed)
-        tv.addWidget(self.timeline)
-        er = QHBoxLayout()
-        er.setContentsMargins(6, 0, 0, 0)
-        er.setSpacing(6)
-        for tx, ic_, fn in (("Start hier  [I]", None, lambda: self.set_edge(0)),
-                            ("Ende hier  [O]", None, lambda: self.set_edge(1)),
-                            ("Clip hier", "plus", self.add_clip)):
-            b = PopButton(tx, ic_, "glass", 34)
-            b.clicked.connect(fn)
-            er.addWidget(b)
-        er.addStretch(1)
-        tv.addLayout(er)
+        tlv.addWidget(self.timeline, 1)
 
-        # ---- rechts: Suche + Export
+        # ---- rechte Spalte: Suche + Export
         rw = QWidget(cv)
         self.right_col = rw
         rl = QVBoxLayout(rw)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(12)
-
-        g, lay = panel("Kills suchen", radius=34, alpha=135)
+        g, lay = panel("Kills suchen", "Findet die Kill-Meldungen automatisch")
         self.s_pre = SliderRow("Vor dem Kill", 0, 10, 100, self.st["pre"], lambda v: f"{v:.1f} s")
         self.s_post = SliderRow("Nach dem Kill", 0, 10, 100, self.st["post"], lambda v: f"{v:.1f} s")
         names = ["", "sehr niedrig", "niedrig", "niedrig", "mittel", "mittel", "mittel+", "hoch", "hoch", "sehr hoch",
@@ -2061,89 +2248,40 @@ class Window(QMainWindow):
         self.s_sens = SliderRow("Empfindlichkeit", 1, 10, 0, self.st["sens"], lambda v: names[int(round(v))])
         for s_ in (self.s_pre, self.s_post, self.s_sens):
             lay.addWidget(s_)
-        self.scan_btn = PopButton("Kills suchen", "crosshair", "accent", 46)
+        self.scan_btn = PopButton("Kills suchen", "crosshair", "accent", 42)
         self.scan_btn.clicked.connect(self.start_scan)
         lay.addWidget(self.scan_btn)
-        self.scan_bar = Bar()
+        self.scan_bar = Bar(height=4)
         lay.addWidget(self.scan_bar)
-        self.status = ElidedLabel("Bereit", 9.5, False, MUT)
+        self.status = ElidedLabel("Bereit", 9, False, MUT)
         lay.addWidget(self.status)
         rl.addWidget(g)
-
-        g, lay = panel("Export", radius=34, alpha=135)
-        self.seg_mode = Segmented(list(MODES), height=36)
+        g, lay = panel("Export", "Speichert die Clips in deinen Ordner")
+        self.seg_mode = Segmented(list(MODES), height=34)
         self.seg_mode.set_current(self.st["mode"] if self.st["mode"] in MODES else "Genau")
         self.mode_desc = QLabel()
         self.mode_desc.setWordWrap(True)
-        self.mode_desc.setFont(app_font(9))
+        self.mode_desc.setFont(app_font(8.5))
         self.mode_desc.setProperty("role", "muted")
-        self.mode_desc.setMinimumHeight(30)
+        self.mode_desc.setMinimumHeight(28)
         self.seg_mode.changed.connect(lambda v: self.mode_desc.setText(MODES[v][1]))
         self.mode_desc.setText(MODES[self.seg_mode.current()][1])
         lay.addWidget(self.seg_mode)
         lay.addWidget(self.mode_desc)
         lay.addWidget(self.make_dir_row())
-        self.exp_all = PopButton("Alle exportieren", "upload", "accent", 44)
+        self.exp_all = PopButton("Alle exportieren", "upload", "accent", 42)
         self.exp_all.clicked.connect(lambda: self.export(False))
         lay.addWidget(self.exp_all)
-        b = PopButton("Nur ausgewählten Clip", None, "glass", 40)
+        b = PopButton("Nur ausgewählten Clip", None, "glass", 36)
         b.clicked.connect(lambda: self.export(True))
         lay.addWidget(b)
-        self.exp_bar = Bar()
+        self.exp_bar = Bar(height=4)
         lay.addWidget(self.exp_bar)
         rl.addWidget(g)
         rl.addStretch(1)
 
-        # ---- Mitte ganz unten: Player-Leiste
-        bar = Glass(cv, radius=34, alpha=135)
-        bar.setFixedHeight(96)
-        bv = QVBoxLayout(bar)
-        bv.setContentsMargins(22, 8, 22, 10)
-        bv.setSpacing(2)
-        self.seekbar = SeekBar(self)
-        self.seekbar.seek.connect(self.seek)
-        bv.addWidget(self.seekbar)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        bv.addLayout(row, 1)
-        # Datei-Infos (nur noch intern genutzt, die Datei steht in der Kopfzeile)
-        self.bar_thumb = QLabel(bar)
-        self.bar_title = ElidedLabel("Kein Video", 10.5, True)
-        self.bar_sub = ElidedLabel("", 9.5, False, MUT)
-        for w_ in (self.bar_thumb, self.bar_title, self.bar_sub):
-            w_.hide()
-        self._bar_sub_text = ""
-        row.addStretch(1)
-        b = PopButton("", "prev", "flat", 42, icon_only=True)
-        b.clicked.connect(lambda: self.step_clip(-1))
-        row.addWidget(b)
-        b = PopButton("\u22121 s", None, "flat", 42)
-        b.clicked.connect(lambda: self.seek(self.pos - 1))
-        row.addWidget(b)
-        self.play_btn = PopButton("", "play", "accent", 50, icon_only=True)
-        self.play_btn.clicked.connect(self.toggle_play)
-        row.addWidget(self.play_btn)
-        b = PopButton("+1 s", None, "flat", 42)
-        b.clicked.connect(lambda: self.seek(self.pos + 1))
-        row.addWidget(b)
-        b = PopButton("", "next", "flat", 42, icon_only=True)
-        b.clicked.connect(lambda: self.step_clip(1))
-        row.addWidget(b)
-        row.addStretch(1)
-        self.fs_btn = PopButton("", "expand", "glass", 38, icon_only=True)
-        self.fs_btn.setToolTip("Vollbild (F)")
-        self.fs_btn.clicked.connect(self.toggle_fullscreen)
-        row.addWidget(self.fs_btn)
-        self.loop_btn = PopButton("", "refresh", "glass", 38, icon_only=True)
-        self.loop_btn.setToolTip("Clip in der Vorschau wiederholen")
-        row.addWidget(self.loop_btn)
-        self.speed_seg = Segmented(["0.5\u00d7", "1\u00d7", "2\u00d7"], height=36)
-        self.speed_seg.setFixedWidth(150)
-        self.speed_seg.set_current("1\u00d7")
-        self.speed_seg.changed.connect(self.set_speed)
-        row.addWidget(self.speed_seg)
-
-        cv.parts = {"video": self.video, "header": pill, "left": left, "right": rw, "tl": tlc, "bar": bar}
+        cv.parts = {"video": self.video, "title": tb, "left": left, "right": rw, "tl": tlc,
+                    "ctrl_l": ctl, "ctrl_r": ctr, "seek": self.seekbar}
         self.rebuild_cards()
         return cv
 
@@ -2172,8 +2310,8 @@ class Window(QMainWindow):
             r = QHBoxLayout()
             col = QVBoxLayout()
             col.setSpacing(1)
-            col.addWidget(label(title, 11, True))
-            col.addWidget(label(sub, 9.5, color=DIM))
+            col.addWidget(label(title, 10.5, True))
+            col.addWidget(label(sub, 9, color=MUT))
             r.addLayout(col, 1)
             t = Toggle(checked)
             r.addWidget(t)
@@ -2748,6 +2886,7 @@ class Window(QMainWindow):
         self.update_url = url
         self.btn_update.setText(f"Update v{version} installieren")
         self.btn_update.show()
+        self.upd_dot.set_dot(True)
         self.say(f"Neue Version v{version} verfügbar")
 
     def do_update(self):
@@ -2808,7 +2947,7 @@ class Window(QMainWindow):
         self._thumb_pending = True
         self.open_btn.setText("Wechseln")
         self.close_btn.show()
-        self.open_btn.set_kind("glass")
+        self.open_btn.set_kind("dark")
         self.clips, self.sel = [], None
         self.mark_in = self.mark_out = None
         self.rebuild_cards()
@@ -2857,9 +2996,10 @@ class Window(QMainWindow):
         self.fps, self.duration, self.pos = 60.0, 0.0, 0.0
         self.clips, self.sel, self.play_clip = [], None, None
         self.mark_in = self.mark_out = None
-        self.file_lbl.setText("Noch kein Video geladen")
+        self.file_lbl.setText("Noch kein Video")
+        self.meta_lbl.setText("Wähle eine Aufnahme aus · OBS oder NVIDIA")
         self.open_btn.setText("Video öffnen")
-        self.open_btn.set_kind("accent")
+        self.open_btn.set_kind("dark")
         self.close_btn.hide()
         self.bar_title.setText("Kein Video")
         self.bar_sub.setText("")
@@ -3135,7 +3275,7 @@ class Window(QMainWindow):
         self.refresh_names()
         self.count_lbl.setText(str(len(self.clips)))
         total = sum(c.end - c.start for c in self.clips)
-        self.total_lbl.setText(f"Gesamt {fmt_short(total)}" if self.clips else "")
+        self.total_lbl.setText(fmt_short(total) if self.clips else "0:00")
         self.exp_all.setText(f"Alle exportieren ({len(self.clips)})" if self.clips else "Alle exportieren")
         self.timeline.update()
 

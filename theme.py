@@ -90,7 +90,7 @@ class Theme:
         """Fuellfarbe einer Karte; a ist die alte Glas-Staerke (110..170) und steuert nur die Helligkeit leicht."""
         k = max(0.0, min(1.0, (a - 90) / 120.0))
         if self.dark:
-            return QColor(30, 31, 37, int(150 + 55 * k))        # rauchiges Dunkelglas: bleibt lesbar, auch ueber dem Video
+            return QColor(255, 255, 255, int(7 + 9 * k))         # ganz leicht aufgehellte Flaeche auf fast Schwarz
         return QColor(255, 255, 255, int(150 + 85 * k))
 
     def line(self, k=1.0):
@@ -98,6 +98,12 @@ class Theme:
         if self.dark:
             return QColor(255, 255, 255, int(min(255, 24 * k)))
         return QColor(30, 30, 50, int(min(255, 22 * k)))
+
+    def tab_fill(self, a=1.0):
+        """Hinterlegung des aktiven Reiters (dezent, nicht bunt)."""
+        if self.dark:
+            return QColor(255, 255, 255, int(20 * a))
+        return QColor(30, 30, 50, int(16 * a))
 
     def pill(self):
         """(Fuellung, Schriftfarbe) fuer die hervorgehobene Pille (aktiver Reiter, Haupt-Knopf)."""
@@ -136,7 +142,7 @@ class Theme:
         h, s, l = _hsl(self.bg)
         k = self.sk_bg
         if self.dark:
-            return (hsl(h, 0.14 * k, 0.040), hsl(h, 0.14 * k, 0.050), hsl(h, 0.12 * k, 0.036))
+            return (hsl(h, 0.10 * k, 0.052), hsl(h, 0.10 * k, 0.060), hsl(h, 0.08 * k, 0.046))
         return (hsl(h, 0.10 * k, 0.935), hsl(h, 0.10 * k, 0.95), hsl(h, 0.10 * k, 0.93))
 
     def bg_blobs(self):
@@ -145,7 +151,7 @@ class Theme:
         a1 = _hsl(self.acc)
         k = self.sk_bg
         if self.dark:
-            return [(0.98, 0.0, 0.55, hsl(a1[0], 0.7 * k, 0.45), 34), (0.0, 1.0, 0.45, hsl(h, 0.6 * k, 0.40), 22)]
+            return [(0.55, 0.35, 0.55, hsl(a1[0], 0.25 * k, 0.40), 26), (0.0, 1.0, 0.45, hsl(h, 0.3 * k, 0.35), 14)]
         return [(0.98, 0.0, 0.55, hsl(a1[0], 0.8 * k, 0.80), 70), (0.0, 1.0, 0.45, hsl(h, 0.7 * k, 0.82), 50)]
 
     # ---- Globales Stylesheet
