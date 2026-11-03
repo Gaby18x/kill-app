@@ -129,6 +129,8 @@ def load_notify_assets(profile):
 
 # Suchbereich fuer den Text relativ zur Header-Ecke (1080p): y von +6 bis +80, x von -8 bis +200
 TEXT_REGION = (6, 80, -8, 200)
+# Breiter Bereich: lange Namen + Waffe ("... mit der Waffe Pistole .50 getoetet") brechen auf 2-3 Zeilen um
+TEXT_REGION_WIDE = (0, 104, -24, 300)
 
 
 def verify_text(frame, anchor_xy, ks, words, thr, region=TEXT_REGION):
@@ -264,7 +266,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             pad = max(1, int(8 * k))               # nicht-lila Rand: lila Flaechen sind keine Ueberschrift
             tpl = cv2.copyMakeBorder(tpl, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
             thr = min(0.85, max(0.5, 0.95 - 0.05 * sens))
-            ks, region = h / 1080.0, TEXT_REGION
+            ks, region = h / 1080.0, TEXT_REGION_WIDE
         else:
             ow = 1280
             d = os.path.join(DATA_DIR, "servers", server["id"])
@@ -331,10 +333,16 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                 return best_f
             return 1.0
 
+        good_scale = [1.0]
+
         def verify(fr, loc):
-            """Text-Pruefung, etwas tolerant gegenueber kleinen Groessenunterschieden."""
-            for s_ in (1.0, 0.95, 1.05, 0.9, 1.1):
+            """Text-Pruefung ("Du hast" UND "getoetet" muessen da sein). Probiert mehrere Groessen, damit auch
+            Aufnahmen mit anderer Aufloesung / HUD-Groesse sicher erkannt werden; die passende Groesse wird gemerkt."""
+            order = [good_scale[0]] + [s for s in (1.0, 0.95, 1.05, 0.9, 1.1, 0.85, 1.15, 0.8, 1.2, 0.75, 1.27)
+                                       if abs(s - good_scale[0]) > 1e-6]
+            for s_ in order:
                 if verify_text(fr, loc, ks * s_, words, text_thr, region)[0]:
+                    good_scale[0] = s_
                     return True
             return False
 
@@ -403,9 +411,10 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                 times, khits = fast_pass()
         elif not (cancel is not None and cancel.is_set()):
             # gruendliche Suche: vorher auf Keyframes Beispiele sammeln, um die Groesse anzupassen
+            t_cal = time.time()
             for t_, fr_ in keyframes_from_ffmpeg(ffmpeg, path, scale_vf, ow, oh, cancel):
                 detect(fr_)
-                if len(samples) >= 12:
+                if len(samples) >= 12 or time.time() - t_cal > 5.0:   # hoechstens ein paar Sekunden
                     break
             scale_f = calibrate()
             if scale_f != 1.0:
