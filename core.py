@@ -621,18 +621,69 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
     return out, info
 
 
+_HW = {}
+
+
+def _hw_encoder(ffmpeg, codec):
+    """Sucht einmalig einen Hardware-Encoder der Grafikkarte (NVIDIA, AMD, Intel). None = keiner nutzbar."""
+    if codec in _HW:
+        return _HW[codec]
+    names = {"h264": ["h264_nvenc", "h264_amf", "h264_qsv"], "hevc": ["hevc_nvenc", "hevc_amf", "hevc_qsv"]}[codec]
+    found = None
+    for enc in names:
+        try:
+            r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                "color=c=black:s=256x144:d=0.2", "-c:v", enc, "-f", "null", "-"],
+                               capture_output=True, timeout=15, creationflags=NOWIN)
+            if r.returncode == 0:
+                found = enc
+                break
+        except Exception:
+            pass
+    _HW[codec] = found
+    return found
+
+
+def _enc_args(enc, quality):
+    """Gleichwertige, sehr hohe Qualitaet fuer die Hardware-Encoder."""
+    if enc.endswith("_nvenc"):
+        return ["-c:v", enc, "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
+    if enc.endswith("_amf"):
+        return ["-c:v", enc, "-quality", "quality", "-rc", "cqp", "-qp_i", str(quality - 1),
+                "-qp_p", str(quality), "-qp_b", str(quality + 1)]
+    return ["-c:v", enc, "-global_quality", str(quality), "-preset", "slower"]
+
+
 def export_clip(ffmpeg, src, start, end, dst, mode):
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-           "-ss", f"{start:.3f}", "-i", src, "-t", f"{end - start:.3f}"]
+    """Schneidet einen Clip. Nutzt die Grafikkarte, wenn moeglich (schnell, PC bleibt bedienbar);
+    sonst den Prozessor mit niedriger Prioritaet und nicht allen Kernen."""
+    base = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", src,
+            "-t", f"{end - start:.3f}"]
+    audio = ["-c:a", "aac", "-b:a", "320k"]
+    threads = ["-threads", str(max(1, (os.cpu_count() or 4) - 2))]
+    flags = NOWIN | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+    attempts = []
     if mode == "copy":
-        cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+        attempts.append(["-c", "copy", "-avoid_negative_ts", "make_zero"])
     elif mode == "h265":
-        cmd += ["-c:v", "libx265", "-crf", "18", "-preset", "medium",
-                "-tag:v", "hvc1", "-x265-params", "log-level=error", "-c:a", "aac", "-b:a", "320k"]
-    else:  # exact: bildgenauer Schnitt, neu kodiert in sehr hoher Qualitaet (kaum sichtbarer Unterschied), zuegig
-        cmd += ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-c:a", "aac", "-b:a", "320k"]
-    cmd.append(dst)
-    subprocess.run(cmd, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        hw = _hw_encoder(ffmpeg, "hevc")
+        if hw:
+            attempts.append(_enc_args(hw, 22) + ["-tag:v", "hvc1"] + audio)
+        attempts.append(["-c:v", "libx265", "-crf", "20", "-preset", "fast", "-tag:v", "hvc1",
+                         "-x265-params", f"log-level=error:pools={max(1, (os.cpu_count() or 4) - 2)}"] + audio)
+    else:  # exact: bildgenau, sehr hohe Qualitaet
+        hw = _hw_encoder(ffmpeg, "h264")
+        if hw:
+            attempts.append(_enc_args(hw, 19) + audio)
+        attempts.append(["-c:v", "libx264", "-crf", "17", "-preset", "faster"] + threads + audio)
+    err = None
+    for args in attempts:
+        try:
+            subprocess.run(base + args + [dst], check=True, creationflags=flags, capture_output=True)
+            return
+        except subprocess.CalledProcessError as e:
+            err = e                       # Hardware-Encoder klappt nicht -> naechste Moeglichkeit
+    raise err
 
 
 class Player(threading.Thread):
