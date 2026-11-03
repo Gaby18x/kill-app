@@ -61,7 +61,7 @@ def pack_catalog(st, avatar_path, builtin_ids=()):
         if b:
             avatars[sid] = b
     return {"servers": st.get("servers", []), "names": st.get("names", {}), "hidden": st.get("hidden", []),
-            "files": files, "avatars": avatars}
+            "themes": st.get("themes", {}), "files": files, "avatars": avatars}
 
 
 def unpack_catalog(data, st, avatar_path, builtin_ids=()):
@@ -97,3 +97,4 @@ def unpack_catalog(data, st, avatar_path, builtin_ids=()):
     st["servers"] = data.get("servers", [])
     st["names"] = data.get("names", {})
     st["hidden"] = data.get("hidden", [])
+    st["themes"] = data.get("themes", {})

@@ -723,6 +723,56 @@ def icon_pixmap(name, color, size=20, lw=1.8):
     return pm
 
 
+class ColorChoice(QWidget):
+    """Reihe runder Farben zum Anklicken (leer = Standard). Nur der Admin sieht sie im Server-Dialog."""
+    changed = Signal(str)
+
+    def __init__(self, current="", parent=None):
+        super().__init__(parent)
+        self.cur = current if current in PRESETS else ""
+        self.names = [""] + list(PRESETS)
+        self.setFixedHeight(66)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def _rect(self, i):
+        return QRectF(2 + i * 40, 4, 30, 30)
+
+    def mousePressEvent(self, e):
+        for i, n in enumerate(self.names):
+            if self._rect(i).adjusted(-5, -5, 5, 5).contains(e.position()):
+                self.cur = n
+                self.changed.emit(n)
+                self.update()
+                return
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        for i, n in enumerate(self.names):
+            r = self._rect(i)
+            if n:
+                pr = PRESETS[n]
+                g = QLinearGradient(r.topLeft(), r.bottomRight())
+                g.setColorAt(0, QColor(pr["acc2"]))
+                g.setColorAt(1, QColor(pr["acc"]))
+                p.setPen(Qt.NoPen)
+                p.setBrush(g)
+                p.drawEllipse(r)
+            else:
+                p.setPen(QPen(ink(110), 1.6))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(r.adjusted(1, 1, -1, -1))
+                p.drawLine(r.bottomLeft() + QPointF(7, -7), r.topRight() + QPointF(-7, 7))
+            if n == self.cur:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(ink(230), 2))
+                p.drawEllipse(r.adjusted(-4, -4, 4, 4))
+        p.setPen(ink(150))
+        p.setFont(app_font(9.5))
+        p.drawText(QRectF(0, 40, self.width(), 22), Qt.AlignLeft | Qt.AlignVCenter,
+                   self.cur or "Standard – wie in den Einstellungen")
+
+
 class DialogCard(Glass):
     """Karte fuer Overlays: Titel, Untertitel, Inhalt, Knopfleiste."""
 
@@ -1065,6 +1115,7 @@ class Window(QMainWindow):
         self.ffmpeg = find_ffmpeg()
         self.server = None
         self.path = None
+        self.theme_override = None
         self.role = None                       # None = ohne Konto-Server (alles erlaubt), "admin" oder "user"
         self.login_open = False
         self.pending_invite = ""
@@ -1373,6 +1424,8 @@ class Window(QMainWindow):
 
     def go_page(self, i, animate=True):
         cur = self.stack.cur
+        if i == 0 and self.theme_override:
+            self.set_override(None)
         if cur == 1 and i != 1 and self.playing:
             self.toggle_play()
         for k, n in enumerate(self.nav):
@@ -1459,6 +1512,7 @@ class Window(QMainWindow):
         self.st["last_server"] = s["id"]
         self.ed_chip.set_server(s["name"], s["id"])
         self.nav[1].set_nav_enabled(True)
+        self.set_override(self.st.get("themes", {}).get(s["id"]))
         self.save_settings()
         self.render_servers()
         self.go_page(1)
@@ -1546,6 +1600,10 @@ class Window(QMainWindow):
         ap = self.avatar_picker(st, name.text)
         name.textChanged.connect(lambda _: ap.refresh())
         card.body.addWidget(ap)
+        card.body.addWidget(label("Farbe dieses Servers", 10.5, True, MUT))
+        cc = ColorChoice(st.get("theme", ""))
+        cc.changed.connect(lambda n: st.__setitem__("theme", n))
+        card.body.addWidget(cc)
         card.body.addWidget(label("Erkennung", 10.5, True, MUT))
         seg = Segmented(["Roter Kill-X", "Kill-Meldung"])
         seg.set_current(st["kind"])
@@ -1599,6 +1657,7 @@ class Window(QMainWindow):
             if st.get("avatar"):
                 save_avatar(sid, st["avatar"])
             self.st["servers"].append(srv)
+            self.set_server_theme(sid, st.get("theme", ""))
             self.save_settings()
             self.sync_catalog()
             self.render_servers()
@@ -1631,10 +1690,14 @@ class Window(QMainWindow):
         name = QLineEdit(s["name"])
         self.style_edit(name)
         card.body.addWidget(name)
-        ast = {"avatar": None, "removed": False}
+        ast = {"avatar": None, "removed": False, "theme": self.st.get("themes", {}).get(s["id"], "")}
         ap = self.avatar_picker(ast, name.text, s["id"])
         name.textChanged.connect(lambda _: ap.refresh())
         card.body.addWidget(ap)
+        card.body.addWidget(label("Farbe dieses Servers", 10.5, True, MUT))
+        cc = ColorChoice(self.st.get("themes", {}).get(s["id"], ""))
+        cc.changed.connect(lambda n: ast.__setitem__("theme", n))
+        card.body.addWidget(cc)
         if s["kind"] == "notify":
             pick = PopButton("Kill-Meldung neu markieren …", "crosshair", "glass", 42)
 
@@ -1660,6 +1723,7 @@ class Window(QMainWindow):
                 save_avatar(s["id"], ast["avatar"])
             elif ast["removed"]:
                 remove_avatar(s["id"])
+            self.set_server_theme(s["id"], ast["theme"])
             self.rename_server(s, nm)
             self.overlay.dismiss()
         dl = PopButton("Löschen", "trash", "danger", 40)
@@ -1719,6 +1783,7 @@ class Window(QMainWindow):
             self.st["servers"] = [x for x in self.st["servers"] if x["id"] != s["id"]]
             shutil.rmtree(os.path.join(core.DATA_DIR, "servers", s["id"]), ignore_errors=True)
         remove_avatar(s["id"])
+        self.st.get("themes", {}).pop(s["id"], None)
         if self.st.get("last_server") == s["id"]:
             self.st["last_server"] = ""
         if self.server and self.server["id"] == s["id"]:
@@ -2095,25 +2160,74 @@ class Window(QMainWindow):
     def apply_theme(self, **kw):
         """Aendert Modus/Farben sofort in der ganzen App und merkt sie sich."""
         self.st.update(kw)
-        T.configure(self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"])
-        QApplication.instance().setStyleSheet(T.qss())
+        T.configure(*self.theme_colors())
+        self._repaint_theme()
+        self.save_settings()
+
+    def set_server_theme(self, sid, name):
+        d = self.st.setdefault("themes", {})
+        if name in PRESETS:
+            d[sid] = name
+        else:
+            d.pop(sid, None)
+        if self.server and self.server["id"] == sid:
+            self.set_override(d.get(sid))
+
+    def theme_colors(self):
+        if self.theme_override in PRESETS:
+            p = PRESETS[self.theme_override]
+            return self.st["dark"], p["acc"], p["acc2"], p["bg"]
+        return self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"]
+
+    def _repaint_theme(self, qss=True):
+        if qss:
+            QApplication.instance().setStyleSheet(T.qss())
         self.bg.refresh()
         self.pill_icon.setPixmap(icon_pixmap("film", T.icon, 20))
         for w in self.findChildren(QWidget):
             w.update()
-        self.save_settings()
+
+    def set_override(self, name):
+        """Serverfarbe weich einblenden (name leer = Farbe aus den Einstellungen)."""
+        name = name if name in PRESETS else None
+        if name == self.theme_override:
+            return
+        self.theme_override = name
+        dark, acc, acc2, bg = self.theme_colors()
+        a0 = (QColor(T.acc), QColor(T.acc2), QColor(T.bg))
+        a1 = (QColor(acc), QColor(acc2), QColor(bg))
+        if getattr(self, "_theme_anim", None):
+            self._theme_anim.stop()
+        from PySide6.QtCore import QVariantAnimation
+        an = self._theme_anim = QVariantAnimation(self)
+        an.setStartValue(0.0)
+        an.setEndValue(1.0)
+        an.setDuration(480)
+        an.setEasingCurve(QEasingCurve(QEasingCurve.OutCubic))
+
+        def mix(c0, c1, t):
+            return QColor(int(c0.red() + (c1.red() - c0.red()) * t), int(c0.green() + (c1.green() - c0.green()) * t),
+                          int(c0.blue() + (c1.blue() - c0.blue()) * t))
+
+        def step(v):
+            t = float(v)
+            T.configure(dark, *(mix(x, y, t).name() for x, y in zip(a0, a1)))
+            self._repaint_theme(qss=False)
+
+        def done():
+            T.configure(dark, acc, acc2, bg)
+            self._repaint_theme()
+        an.valueChanged.connect(step)
+        an.finished.connect(done)
+        an.start()
 
     def gate_theme(self, on):
         """Anmelde- und Update-Fenster immer im Standard-Grau zeigen; danach wieder das gewaehlte Thema."""
         if on:
             T.configure(False, DEFAULT["acc"], DEFAULT["acc2"], DEFAULT["bg"])
         else:
-            T.configure(self.st["dark"], self.st["acc"], self.st["acc2"], self.st["bg"])
-        QApplication.instance().setStyleSheet(T.qss())
-        self.bg.refresh()
-        self.pill_icon.setPixmap(icon_pixmap("film", T.icon, 20))
-        for w in self.findChildren(QWidget):
-            w.update()
+            T.configure(*self.theme_colors())
+        self._repaint_theme()
 
     def pick_color(self, key, title):
         c = QColorDialog.getColor(QColor(self.st[key]), self, title)
@@ -2132,6 +2246,7 @@ class Window(QMainWindow):
         lay.addLayout(r)
         lay.addSpacing(4)
         lay.addWidget(label("Farbthema", 10.5, True, MUT))
+        lay.addWidget(label("Server mit eigener Farbe (vom Admin gesetzt) nutzen stattdessen ihre Farbe.", 9.5, color=DIM))
         pr = QHBoxLayout()
         pr.setSpacing(8)
         for name, pre in PRESETS.items():
