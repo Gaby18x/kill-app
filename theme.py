@@ -5,15 +5,15 @@ RED = QColor("#f0506e")
 AMBER = QColor("#e8a23a")
 
 PRESETS = {
+    "Grau": {"acc": "#5f6575", "acc2": "#8b91a3", "bg": "#8b909c"},
     "Flieder": {"acc": "#8c79ee", "acc2": "#b49cf8", "bg": "#8c79ee"},
     "Ozean": {"acc": "#3b8df0", "acc2": "#6fd0f5", "bg": "#3b8df0"},
     "Mint": {"acc": "#1fb98c", "acc2": "#6fe3c0", "bg": "#2fb98a"},
     "Sunset": {"acc": "#f0703c", "acc2": "#f7b267", "bg": "#f06a8c"},
     "Rosé": {"acc": "#e8589a", "acc2": "#f7a1c8", "bg": "#e8589a"},
     "Gold": {"acc": "#d99a1e", "acc2": "#f5d06f", "bg": "#e0a03a"},
-    "Grau": {"acc": "#5f6575", "acc2": "#8b91a3", "bg": "#8b909c"},
 }
-DEFAULT = PRESETS["Flieder"]
+DEFAULT = PRESETS["Grau"]
 
 
 def _hsl(c):
