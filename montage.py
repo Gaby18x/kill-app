@@ -60,7 +60,7 @@ class PcmAudio:
         if self.sink is None:
             dev = QMediaDevices.defaultAudioOutput()
             self.sink = QAudioSink(dev, self.fmt)
-            self.sink.setBufferSize(RATE * 4 // 5)          # 0,2 s Puffer: kurze Verzögerung
+            self.sink.setBufferSize(RATE * 4 // 10)         # 0,1 s Puffer: kaum Verzögerung
         self.io = self.sink.start()
 
     def play(self):
@@ -110,6 +110,18 @@ class PcmAudio:
         if self.playing and self.sink is not None:
             return self.base_ms + self.sink.processedUSecs() / 1000.0
         return self.base_ms
+
+    def clock_ok(self):
+        """Läuft der Ton wirklich (Soundkarte vorhanden und spielt)? Nur dann gibt er den Takt vor."""
+        if not self.playing or self.sink is None:
+            return False
+        try:
+            from PySide6.QtMultimedia import QAudio
+            if self.sink.error() != QAudio.Error.NoError:
+                return False
+        except Exception:
+            pass
+        return self.sink.processedUSecs() > 0
 
 import core
 from theme import RED, T, ink, with_alpha
@@ -764,6 +776,93 @@ def blend(a, b, p, kind):
     return cv2.addWeighted(a, 1 - p, b, p, 0)
 
 
+class ClipStream(threading.Thread):
+    """Liest einen Clip fortlaufend über FFmpeg (mehrere Kerne, ggf. Grafikkarte): genau 60 Bilder pro Sekunde in
+    Vorschau-Größe, Geschwindigkeit bereits eingerechnet. Läuft voraus und puffert -> gleichmäßige Wiedergabe."""
+    FPS = 60.0
+
+    def __init__(self, it, t_tl, W, H):
+        super().__init__(daemon=True)
+        import queue as q_
+        off = max(0.0, t_tl - it.start)
+        self.sig = (it.id, it.path, round(it.src_in, 3), round(it.src_out, 3), round(it.speed, 3), round(it.start, 3), W, H)
+        self.t0 = it.start + off
+        self.end = it.end
+        self.W, self.H = W, H
+        self.q = q_.Queue(maxsize=40)
+        self.idx = -1
+        self.cur = None
+        self.stop_flag = False
+        src = it.src_in + off * it.speed
+        dur = max(0.05, (it.src_out - src))
+        vf = (f"setpts=(PTS-STARTPTS)/{it.speed:.4f},fps={self.FPS:g},scale={W}:{H}:force_original_aspect_ratio=decrease:"
+              f"flags=bilinear,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2")
+        self.cmd = [core.find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{src:.3f}", "-t", f"{dur:.3f}",
+                    "-i", it.path, "-an", "-sn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+        self.proc = None
+        self.start()
+
+    def run(self):
+        n = self.W * self.H * 3
+        try:
+            self.proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         creationflags=core.NOWIN, bufsize=n * 2)
+            k = 0
+            while not self.stop_flag:
+                buf = self.proc.stdout.read(n)
+                if len(buf) < n:
+                    break
+                fr = np.frombuffer(buf, np.uint8).reshape(self.H, self.W, 3)
+                while not self.stop_flag:
+                    try:
+                        self.q.put((k, fr), timeout=0.1)
+                        break
+                    except Exception:
+                        pass
+                k += 1
+        except Exception:
+            pass
+        finally:
+            try:
+                self.q.put_nowait(None)                 # Ende markieren
+            except Exception:
+                pass
+            self.close()
+
+    def frame(self, t, wait=0.012):
+        """Bild zum Zeitpunkt t (Zeitleiste). Überspringt alte Bilder, wartet kurz auf neue."""
+        want = int(round((t - self.t0) * self.FPS))
+        if want <= self.idx and self.cur is not None:
+            return self.cur
+        deadline = time.perf_counter() + wait
+        while self.idx < want:
+            rem = deadline - time.perf_counter()
+            if rem <= 0:
+                break
+            try:
+                item = self.q.get(timeout=rem)
+            except Exception:
+                break
+            if item is None:
+                try:
+                    self.q.put_nowait(None)
+                except Exception:
+                    pass
+                break
+            self.idx, self.cur = item
+        return self.cur
+
+    def close(self):
+        self.stop_flag = True
+        p = self.proc
+        if p is not None:
+            try:
+                p.kill()
+                p.wait(timeout=1)
+            except Exception:
+                pass
+
+
 class MontagePlayer(threading.Thread):
     def __init__(self, page):
         super().__init__(daemon=True)
@@ -779,6 +878,7 @@ class MontagePlayer(threading.Thread):
         self.latest = None
         self.want_src = None
         self.tcache = {}
+        self.streams = {}
         self.stop_flag = False
 
     def seek(self, t):
@@ -791,7 +891,7 @@ class MontagePlayer(threading.Thread):
         fr = self.cached(path, t)
         if fr is not None:
             with self.lock:
-                self.latest = (None, _fit(fr, *self.size))
+                self.latest = (None, cv2.cvtColor(_fit(fr, *self.size), cv2.COLOR_BGR2RGB))
             return
         with self.lock:
             self.want_src = (path, t)
@@ -851,35 +951,85 @@ class MontagePlayer(threading.Thread):
         threading.Thread(target=work, daemon=True).start()
 
     def play(self, on):
+        self.started = not on
+        if on:
+            try:
+                self._streams_for(self.t)            # Streams schon vor dem ersten Bild starten
+            except Exception:
+                pass
+            self._warm_until = time.perf_counter() + 0.6
         with self.lock:
             self.playing = on
             self.t0, self.p0 = time.perf_counter(), self.t
         self.ev.set()
+
+    def sync_clock(self, t_audio):
+        """Der Ton gibt den Takt vor: Bild läuft exakt zum Ton (nur sanft nachstellen)."""
+        with self.lock:
+            if not self.playing:
+                return
+            now = time.perf_counter()
+            cur = self.p0 + (now - self.t0)
+            if abs(cur - t_audio) > 0.03:
+                self.t0, self.p0 = now, t_audio
+
+    def _streams_for(self, t):
+        """Sorgt dafür, dass für alle gerade (und gleich) sichtbaren Clips ein Stream läuft."""
+        proj = self.page.proj
+        W, H = self.size
+        need = {}
+        for it in proj.videos() + proj.overlays():
+            if it.start - 1.5 <= t < it.end:                # sichtbar oder beginnt in den nächsten 1,5 s
+                need[it.id] = it
+        for sid in list(self.streams):
+            s = self.streams[sid]
+            it = need.get(sid)
+            sig = None if it is None else (it.id, it.path, round(it.src_in, 3), round(it.src_out, 3),
+                                           round(it.speed, 3), round(it.start, 3), W, H)
+            # neu starten, wenn der Clip geändert wurde oder wir vor den Anfang des Streams zurückgesprungen sind
+            if it is None or s.sig != sig or max(t, it.start) < s.t0 - 0.02 or \
+                    (s.stop_flag and s.q.empty() and s.idx < 0 and t >= it.start):
+                s.close()
+                del self.streams[sid]
+        for sid, it in need.items():
+            if sid not in self.streams:
+                self.streams[sid] = ClipStream(it, max(t, it.start), W, H)
+
+    def stop_streams(self):
+        for s in self.streams.values():
+            s.close()
+        self.streams = {}
 
     def take(self):
         with self.lock:
             f, self.latest = self.latest, None
         return f
 
-    def frame_at(self, t):
+    def frame_at(self, t, live=False):
         proj = self.page.proj
         W, H = self.size
+
+        def raw(it):
+            if live and it.id in self.streams:
+                fr = self.streams[it.id].frame(t)
+                if fr is not None and fr.shape[1] == W and fr.shape[0] == H:
+                    return fr
+            fr = self.src.get(it.id, it.path, it.src_in + (t - it.start) * it.speed)
+            return None if fr is None else _fit(fr, W, H)
         top = [o for o in sorted(proj.overlays(), key=lambda x: x.track) if o.start - 1e-6 <= t < o.end]
         if top:                                      # weitere Video-Spur deckt alles darunter ab
-            o = top[0]
-            fr = self.src.get(o.id, o.path, o.src_in + (t - o.start) * o.speed)
+            fr = raw(top[0])
             if fr is not None:
-                return _fit(fr, W, H)
+                return fr
         vs = proj.videos()
         act = [v for v in vs if v.start - 1e-6 <= t < v.end]
         if not act:
             return np.zeros((H, W, 3), np.uint8)
 
         def img(it):
-            fr = self.src.get(it.id, it.path, it.src_in + (t - it.start) * it.speed)
+            fr = raw(it)
             if fr is None:
                 return np.zeros((H, W, 3), np.uint8)
-            fr = _fit(fr, W, H)
             k = 1.0                                      # Ein-/Ausblenden (aus/zu Schwarz)
             if it.fade_in > 0.01 and t - it.start < it.fade_in:
                 k = min(k, (t - it.start) / it.fade_in)
@@ -908,7 +1058,7 @@ class MontagePlayer(threading.Thread):
                     fr = self.src.get("trim:" + wsrc[0], wsrc[0], wsrc[1])
                     if fr is not None:
                         with self.lock:
-                            self.latest = (None, _fit(fr, *self.size))
+                            self.latest = (None, cv2.cvtColor(_fit(fr, *self.size), cv2.COLOR_BGR2RGB))
                 except Exception:
                     pass
             if want is not None:
@@ -918,7 +1068,7 @@ class MontagePlayer(threading.Thread):
                 try:
                     fr = self.frame_at(self.t)
                     with self.lock:
-                        self.latest = (self.t, fr)
+                        self.latest = (self.t, cv2.cvtColor(fr, cv2.COLOR_BGR2RGB) if fr is not None else None)
                 except Exception:
                     pass
             if playing:
@@ -933,19 +1083,37 @@ class MontagePlayer(threading.Thread):
                     continue
                 self.t = t
                 tick = time.perf_counter()
-                for it in self.page.proj.videos() + self.page.proj.overlays():     # nächster Clip vorbereiten
-                    if t < it.start < t + 2.0:
-                        self.src.warm(it.id, it.path, it.src_in)
+                # Start: warten, bis die Streams das erste Bild haben (max. 0,6 s) - Bild & Ton starten gemeinsam
+                if getattr(self, "_warm_until", 0) > tick:
+                    self._streams_for(t)
+                    act = [it for it in self.page.proj.videos() + self.page.proj.overlays() if it.start <= t < it.end]
+                    if any(it.id in self.streams and self.streams[it.id].q.empty() and self.streams[it.id].idx < 0
+                           for it in act):
+                        with self.lock:
+                            self.t0, self.p0 = time.perf_counter(), self.t if False else self.p0
+                        time.sleep(0.005)
+                        continue
+                    self._warm_until = 0
+                    with self.lock:
+                        self.t0 = time.perf_counter()
+                    self.started = True
+                    t = self.p0
                 try:
-                    fr = self.frame_at(t)
+                    self._streams_for(t)
+                    fr = self.frame_at(t, live=True)
+                    fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB) if fr is not None else None
                 except Exception:
                     fr = None
                 with self.lock:
                     self.latest = (t, fr)
                 time.sleep(max(0.0, 1 / 60 - (time.perf_counter() - tick)))   # gleichmäßig 60 Bilder/s
-            elif want is None:
-                self.ev.wait(0.05)
-                self.ev.clear()
+            else:
+                if self.streams:
+                    self.stop_streams()
+                if want is None:
+                    self.ev.wait(0.05)
+                    self.ev.clear()
+        self.stop_streams()
         self.src.close()
 
 
@@ -1318,15 +1486,24 @@ class MTimeline(QWidget):
                     w = np.zeros(10)
                 p.setPen(QPen(with_alpha(col, 220), 1))
                 cy, hh = r.center().y(), r.height() / 2 - 4
-                xs = int(r.width())
+                key = (it.id, round(self.pps, 3), round(it.src_in, 3), round(it.src_out, 3), round(it.speed, 3),
+                       round(it.vol, 2), int(r.height()), len(w))
+                cache = self.__dict__.setdefault("_wcache", {})
+                lines = cache.get(key)
+                if lines is None:                            # nur bei Änderung neu berechnen
+                    from PySide6.QtCore import QLineF
+                    xs = np.arange(0, int(r.width()), 2, dtype=np.float64)
+                    st = it.src_in + xs / self.pps * it.speed
+                    idx = np.clip((st / dur * (len(w) - 1)).astype(int), 0, len(w) - 1)
+                    amp = w[idx] * hh * min(1.5, it.vol)
+                    lines = [QLineF(float(x), -float(a_), float(x), float(a_)) for x, a_ in zip(xs, amp) if a_ > 0.3]
+                    if len(cache) > 200:
+                        cache.clear()
+                    cache[key] = lines
                 p.save()
                 p.setClipPath(path)
-                for px in range(0, xs, 2):
-                    st = it.src_in + px / self.pps * it.speed
-                    idx = int(st / dur * (len(w) - 1))
-                    if 0 <= idx < len(w):
-                        a = w[idx] * hh * min(1.5, it.volume)
-                        p.drawLine(QPointF(r.left() + px, cy - a), QPointF(r.left() + px, cy + a))
+                p.translate(r.left(), cy)
+                p.drawLines(lines)
                 p.restore()
                 p.setPen(QColor(255, 255, 255, 230))
                 p.setFont(app_font(8, True))
@@ -2667,9 +2844,9 @@ class MontagePage(QWidget):
         self.play_btn.update()
         if self.audio and self._aud_file:
             if self.playing:
-                self.audio.setPosition(int(self.tl.ph * 1000))
-                self.audio.play()
+                self._audio_pending = True                    # startet mit dem ersten Bild (siehe _poll)
             else:
+                self._audio_pending = False
                 self.audio.pause()
 
     def stop(self):
@@ -2693,7 +2870,14 @@ class MontagePage(QWidget):
         if getattr(self, "_tp", None):                     # Übergangs-Vorschau läuft gerade
             return
         if fr is not None:
-            self.preview.set_frame(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
+            self.preview.set_frame(fr)
+        if self.playing and getattr(self, "_audio_pending", False) and getattr(self.player, "started", False) \
+                and t is not None and self.audio is not None:
+            self._audio_pending = False
+            self.audio.setPosition(int(t * 1000))
+            self.audio.play()
+        if self.playing and self.audio is not None and self._aud_file and self.audio.clock_ok():
+            self.player.sync_clock(self.audio.position() / 1000.0)
         if self.playing:
             self.tl.ph = t
             self.tl.scroll_to(t)
@@ -2706,8 +2890,8 @@ class MontagePage(QWidget):
                 self.play_btn.update()
                 if self.audio:
                     self.audio.pause()
-            elif self.audio and self._aud_file and abs(self.audio.position() / 1000 - t) > 0.25:
-                self.audio.setPosition(int(t * 1000))
+            elif self.audio and self._aud_file and not self.audio.playing:
+                pass
 
     # ---- Export
     def export(self):
