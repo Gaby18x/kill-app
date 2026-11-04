@@ -25,6 +25,7 @@ except Exception:          # Ton ist optional - ohne Multimedia laeuft die App t
 
 import auth
 import core
+import montage
 from core import Player, check_update, download_file, export_clip, find_ffmpeg, resource, scan_video
 from theme import AMBER, DEFAULT, PRESETS, RED, T, ink, white, with_alpha
 from ui import (Background, Bar, ElidedLabel, FadeStack, Glass, Overlay, PopButton, SeekBar, Segmented, SliderRow,
@@ -2497,12 +2498,14 @@ class Window(QMainWindow):
         self.page_editor = self.build_editor_page()
         self.page_library = self.build_library_page()
         self.page_settings = self.build_settings_page()
-        for pg in (self.page_server, self.page_editor, self.page_library, self.page_settings):
+        self.page_montage = montage.MontagePage(self)
+        for pg in (self.page_server, self.page_editor, self.page_library, self.page_settings, self.page_montage):
             self.stack.add(pg)
         self.dock = Dock([
             {"icon": "server", "label": "Server", "fn": lambda: self.nav_clicked(0)},
             {"icon": "film", "label": "Editor", "fn": lambda: self.nav_clicked(1)},
             {"icon": "folder", "label": "Bibliothek", "fn": lambda: self.nav_clicked(2)},
+            {"icon": "layers", "label": "Montage", "fn": lambda: self.nav_clicked(4)},
             {"icon": "gear", "label": "Einstellungen", "fn": lambda: self.nav_clicked(3)},
             {"icon": "upload", "label": "Video öffnen", "fn": self._top_open, "sep": True},
         ], self.bg)
@@ -2510,7 +2513,8 @@ class Window(QMainWindow):
         self.dock.hovered.connect(self._dock_hover)
         self.theme_pop = ThemePopover(self.bg, self.set_mode)
         self.theme_pop.hide()
-        self.nav = [_NavProxy(self.dock, i) for i in range(4)]
+        # Seite -> Platz im Dock (Montage steht im Dock vor den Einstellungen)
+        self.nav = [_NavProxy(self.dock, j) for j in (0, 1, 2, 4, 3)]
         self.nav[1].set_nav_enabled(False)
         self.navbar = self.dock
         self.dock.select = lambda i, animate=True: self.nav[i].set_selected(True)
@@ -2598,6 +2602,7 @@ class Window(QMainWindow):
             self.player.stop()
         if self.audio:
             self.audio.stop()
+        self.page_montage.shutdown()
         super().closeEvent(e)
 
     def check_ffmpeg(self):
@@ -2910,12 +2915,16 @@ class Window(QMainWindow):
         want = self.st.get("themes", {}).get(self.server["id"]) if (self.server and i in (1, 2)) else None
         if want != self.theme_override:
             self.set_override(want)
+        if cur == 4 and i != 4:
+            self.page_montage.stop()
+        if i == 4:
+            QTimer.singleShot(50, self.page_montage.refresh_media)
         if cur == 1 and i != 1 and self.playing:
             self.toggle_play()
         for k, n in enumerate(self.nav):
             n.set_selected(k == i)
         if hasattr(self, "page_lbl"):
-            self.page_lbl.setText("/  " + ("Server", "Editor", "Bibliothek", "Einstellungen")[i])
+            self.page_lbl.setText("/  " + ("Server", "Editor", "Bibliothek", "Einstellungen", "Montage")[i])
         self.navbar.select(i, animate)
         if animate:
             self.stack.go(i, 1 if i >= max(cur, 0) else -1)
@@ -5724,6 +5733,10 @@ class Window(QMainWindow):
         if self.overlay.isVisible():
             if e.key() == Qt.Key_Escape and not self.login_open:
                 self.overlay.dismiss()
+            return
+        if self.stack.cur == 4:
+            if not self.page_montage.key(e):
+                super().keyPressEvent(e)
             return
         if self.stack.cur != 1:
             return super().keyPressEvent(e)

@@ -1,0 +1,1628 @@
+"""ACE - Montage: Clips aneinanderreihen, Musik/Sounds darunter, Übergänge, Export ohne Qualitätsverlust.
+
+Aufbau wie in bekannten Schnittprogrammen: Medien links, Vorschau in der Mitte, Eigenschaften rechts,
+mehrspurige Zeitleiste unten (Video-Spur + zwei Ton-Spuren)."""
+import copy
+import json
+import math
+import os
+import re
+import subprocess
+import tempfile
+import threading
+import time
+import uuid
+
+import cv2
+import numpy as np
+from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+except Exception:
+    QAudioOutput = QMediaPlayer = None
+
+import core
+from theme import RED, T, ink, with_alpha
+from ui import (ElidedLabel, Glass, PopButton, Segmented, SliderRow, app_font, display_font, paint_icon, tween)
+
+VIDEO_EXT = (".mp4", ".mkv", ".mov", ".flv", ".ts", ".avi", ".webm")
+AUDIO_EXT = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus", ".wma")
+
+# Übergänge: (Anzeigename, FFmpeg-xfade-Name)
+TRANSITIONS = [("Keiner", "none"), ("Überblenden", "fade"), ("Schwarzblende", "fadeblack"), ("Blitz", "fadewhite"),
+               ("Wischen", "wipeleft"), ("Schieben", "slideleft"), ("Zoom", "zoomin"), ("Kreis", "circleopen"),
+               ("Auflösen", "dissolve"), ("Pixel", "pixelize"), ("Radial", "radial"), ("Unschärfe", "hblur")]
+TRANS_NAME = {v: n for n, v in TRANSITIONS}
+
+
+def lbl(text="", size=10.0, bold=False, role=None, wrap=False):
+    q = QLabel(text)
+    q.setFont(app_font(size, bold))
+    if role:
+        q.setProperty("role", role)
+    q.setWordWrap(wrap)
+    return q
+
+
+def fmt(t):
+    t = max(0.0, t)
+    m, s = divmod(t, 60)
+    return f"{int(m)}:{s:05.2f}"
+
+
+def fmt_s(t):
+    t = max(0.0, t)
+    m, s = divmod(int(round(t)), 60)
+    return f"{m}:{s:02d}"
+
+
+# ------------------------------------------------------------------ Medien-Infos
+_INFO = {}
+
+
+def media_info(path):
+    """Dauer, Größe, fps und ob Ton vorhanden ist (über FFmpeg gelesen, zwischengespeichert)."""
+    if path in _INFO:
+        return _INFO[path]
+    ff = core.find_ffmpeg()
+    info = {"dur": 0.0, "w": 0, "h": 0, "fps": 0.0, "audio": False, "video": False}
+    try:
+        r = subprocess.run([ff, "-hide_banner", "-i", path], capture_output=True, text=True, errors="ignore",
+                           creationflags=core.NOWIN, timeout=20)
+        e = r.stderr
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", e)
+        if m:
+            info["dur"] = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        mv = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", e)
+        if mv:
+            info["video"], info["w"], info["h"] = True, int(mv.group(1)), int(mv.group(2))
+        mf = re.search(r"([\d.]+) fps", e)
+        if mf:
+            info["fps"] = float(mf.group(1))
+        info["audio"] = "Audio:" in e
+    except Exception:
+        pass
+    _INFO[path] = info
+    return info
+
+
+_THUMB = {}
+
+
+def thumb(path, t=None):
+    key = (path, round(t or -1, 1))
+    if key in _THUMB:
+        return _THUMB[key]
+    pm = None
+    cap = cv2.VideoCapture(path)
+    if cap.isOpened():
+        if t is None:
+            t = media_info(path)["dur"] / 2
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+        ok, fr = cap.read()
+        if ok:
+            h, w = fr.shape[:2]
+            fr = cv2.resize(fr, (160, max(2, int(160 * h / w))), interpolation=cv2.INTER_AREA)
+            rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            pm = QPixmap.fromImage(QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3 * rgb.shape[1],
+                                          QImage.Format_RGB888).copy())
+    cap.release()
+    _THUMB[key] = pm
+    return pm
+
+
+_WAVE = {}
+
+
+def waveform(path, n=600):
+    """Lautstärke-Verlauf für die Ton-Spur (n Werte 0..1)."""
+    if path in _WAVE:
+        return _WAVE[path]
+    ff = core.find_ffmpeg()
+    try:
+        p = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-i", path, "-ac", "1", "-ar", "2000", "-f", "s16le",
+                            "-"], capture_output=True, creationflags=core.NOWIN, timeout=60)
+        a = np.abs(np.frombuffer(p.stdout, np.int16).astype(np.float32))
+        if len(a) < n:
+            w = np.zeros(n)
+        else:
+            w = a[: len(a) // n * n].reshape(n, -1).max(axis=1)
+            w = w / max(1.0, w.max())
+    except Exception:
+        w = np.zeros(n)
+    _WAVE[path] = w
+    return w
+
+
+# ------------------------------------------------------------------ Datenmodell
+class MItem:
+    """Ein Stück auf der Zeitleiste. track 0 = Video, 1/2 = Ton."""
+
+    def __init__(self, path, track=0, start=0.0, src_in=0.0, src_out=None):
+        self.id = uuid.uuid4().hex[:8]
+        self.path = path
+        self.track = track
+        self.start = start
+        info = media_info(path)
+        self.src_in = src_in
+        self.src_out = src_out if src_out is not None else max(0.2, info["dur"])
+        self.speed = 1.0
+        self.volume = 1.0
+        self.trans = "none"          # Übergang zum nächsten Clip
+        self.tdur = 0.5
+        self.fade_in = 0.0
+        self.fade_out = 0.0
+
+    @property
+    def dur(self):
+        return max(0.05, (self.src_out - self.src_in) / self.speed)
+
+    @property
+    def end(self):
+        return self.start + self.dur
+
+    def to_dict(self):
+        return {k: getattr(self, k) for k in ("id", "path", "track", "start", "src_in", "src_out", "speed", "volume",
+                                               "trans", "tdur", "fade_in", "fade_out")}
+
+    @staticmethod
+    def from_dict(d):
+        it = MItem.__new__(MItem)
+        it.id = d.get("id") or uuid.uuid4().hex[:8]
+        for k in ("path", "track", "start", "src_in", "src_out", "speed", "volume", "trans", "tdur", "fade_in", "fade_out"):
+            setattr(it, k, d.get(k, {"speed": 1.0, "volume": 1.0, "trans": "none", "tdur": 0.5, "fade_in": 0.0,
+                                     "fade_out": 0.0, "track": 0, "start": 0.0, "src_in": 0.0}.get(k)))
+        return it
+
+
+class Project:
+    def __init__(self):
+        self.items = []
+        self.magnet = True
+        self.res = "Original"        # Original / 1080p / 1440p
+        self.fps = "Original"        # Original / 60 / 30
+
+    def videos(self):
+        return sorted([i for i in self.items if i.track == 0], key=lambda x: x.start)
+
+    def audios(self):
+        return [i for i in self.items if i.track > 0]
+
+    def pack(self):
+        """Einrasten: Clips kleben aneinander (Übergänge überlappen um ihre Dauer)."""
+        if not self.magnet:
+            return
+        t = 0.0
+        vs = self.videos()
+        for k, it in enumerate(vs):
+            it.start = t
+            ov = 0.0
+            if it.trans != "none" and k + 1 < len(vs):
+                ov = min(it.tdur, it.dur * 0.45, vs[k + 1].dur * 0.45)
+            t = it.end - ov
+
+    def length(self):
+        ends = [i.end for i in self.items]
+        return max(ends) if ends else 0.0
+
+    def to_dict(self):
+        return {"items": [i.to_dict() for i in self.items], "magnet": self.magnet, "res": self.res, "fps": self.fps}
+
+    def load(self, d):
+        self.items = [MItem.from_dict(x) for x in (d or {}).get("items", []) if os.path.exists(x.get("path", ""))]
+        self.magnet = (d or {}).get("magnet", True)
+        self.res = (d or {}).get("res", "Original")
+        self.fps = (d or {}).get("fps", "Original")
+
+
+# ------------------------------------------------------------------ Export (FFmpeg)
+def _atempo(speed):
+    out, s = [], speed
+    while s > 2.0:
+        out.append("atempo=2.0")
+        s /= 2.0
+    while s < 0.5:
+        out.append("atempo=0.5")
+        s /= 0.5
+    out.append(f"atempo={s:.4f}")
+    return ",".join(out)
+
+
+def build_graph(proj, audio_only=False):
+    """Baut den FFmpeg-Befehl (Eingänge + filter_complex). Gibt (inputs, filter, vlabel, alabel, W, H, fps, length)."""
+    vs = proj.videos()
+    aus = sorted(proj.audios(), key=lambda x: x.start)
+    first = media_info(vs[0].path) if vs else {"w": 1920, "h": 1080, "fps": 60}
+    W, H = first.get("w") or 1920, first.get("h") or 1080
+    if proj.res == "1080p":
+        W, H = int(round(1080 * W / H / 2)) * 2, 1080
+    elif proj.res == "1440p":
+        W, H = int(round(1440 * W / H / 2)) * 2, 1440
+    W, H = W // 2 * 2, H // 2 * 2
+    fps = first.get("fps") or 60
+    if proj.fps in ("60", "30"):
+        fps = float(proj.fps)
+    fps = min(144.0, max(24.0, fps))
+    inputs, f = [], []
+    vlab, alab = None, None
+    pos = 0.0                            # Länge der bisherigen Kette
+    cursor = 0.0                         # Zeitleisten-Position am Ende der Kette
+    n = 0
+
+    def add_input(args):
+        nonlocal n
+        inputs.extend(args)
+        n += 1
+        return n - 1
+
+    prev = None
+    for k, it in enumerate(vs):
+        info = media_info(it.path)
+        i = add_input(["-ss", f"{it.src_in:.3f}", "-t", f"{(it.src_out - it.src_in):.3f}", "-i", it.path])
+        d = it.dur
+        vl, al = f"v{k}", f"a{k}"
+        if not audio_only:
+            f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{it.speed:.4f},fps={fps:.3f},scale={W}:{H}:force_original_aspect_ratio="
+                     f"decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,settb=AVTB[{vl}]")
+        if info["audio"]:
+            f.append(f"[{i}:a]asetpts=PTS-STARTPTS,{_atempo(it.speed)},volume={it.volume:.3f},aresample=48000,"
+                     f"aformat=channel_layouts=stereo:sample_rates=48000,apad=whole_dur={d:.3f},atrim=0:{d:.3f}[{al}]")
+        else:
+            f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{d:.3f}[{al}]")
+        if vlab is None:
+            gap = it.start
+            if gap > 0.04:                                    # schwarzer Anfang
+                if not audio_only:
+                    f.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:d={gap:.3f},format=yuv420p,settb=AVTB[g{k}]")
+                    f.append(f"[g{k}][{vl}]concat=n=2:v=1:a=0[c{k}]")
+                    vl = f"c{k}"
+                f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{gap:.3f}[ga{k}]")
+                f.append(f"[ga{k}][{al}]concat=n=2:v=0:a=1[ca{k}]")
+                al = f"ca{k}"
+                pos = gap
+            vlab, alab, pos, cursor = vl, al, pos + d, it.start + d
+            prev = it
+            continue
+        gap = it.start - cursor
+        ov = cursor - it.start
+        if prev.trans != "none" and ov > 0.05:
+            ov = min(ov, prev.dur * 0.45, d * 0.45)
+            off = pos - ov
+            if not audio_only:
+                f.append(f"[{vlab}][{vl}]xfade=transition={prev.trans}:duration={ov:.3f}:offset={off:.3f}[x{k}]")
+                vlab = f"x{k}"
+            f.append(f"[{alab}][{al}]acrossfade=d={ov:.3f}[xa{k}]")
+            alab = f"xa{k}"
+            pos = pos - ov + d
+        else:
+            if gap > 0.04:
+                if not audio_only:
+                    f.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:d={gap:.3f},format=yuv420p,settb=AVTB[g{k}]")
+                    f.append(f"[{vlab}][g{k}]concat=n=2:v=1:a=0[gv{k}]")
+                    vlab = f"gv{k}"
+                f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{gap:.3f}[ga{k}]")
+                f.append(f"[{alab}][ga{k}]concat=n=2:v=0:a=1[gav{k}]")
+                alab = f"gav{k}"
+                pos += gap
+            if not audio_only:
+                f.append(f"[{vlab}][{vl}]concat=n=2:v=1:a=0[j{k}]")
+                vlab = f"j{k}"
+            f.append(f"[{alab}][{al}]concat=n=2:v=0:a=1[ja{k}]")
+            alab = f"ja{k}"
+            pos += d
+        cursor = it.start + d
+        prev = it
+    length = max(pos, max((a.end for a in aus), default=0.0))
+    # Musik / Sounds
+    mix = [alab] if alab else []
+    for k, a in enumerate(aus):
+        i = add_input(["-ss", f"{a.src_in:.3f}", "-t", f"{(a.src_out - a.src_in):.3f}", "-i", a.path])
+        d = a.dur
+        fx = [f"asetpts=PTS-STARTPTS", _atempo(a.speed), f"volume={a.volume:.3f}", "aresample=48000",
+              "aformat=channel_layouts=stereo:sample_rates=48000"]
+        if a.fade_in > 0.01:
+            fx.append(f"afade=t=in:st=0:d={min(a.fade_in, d):.3f}")
+        if a.fade_out > 0.01:
+            fx.append(f"afade=t=out:st={max(0.0, d - a.fade_out):.3f}:d={min(a.fade_out, d):.3f}")
+        ms = int(round(a.start * 1000))
+        fx.append(f"adelay={ms}|{ms}")
+        f.append(f"[{i}:a]{','.join(fx)}[m{k}]")
+        mix.append(f"m{k}")
+    if not mix:
+        f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{max(0.1, length):.3f}[aout]")
+    elif len(mix) == 1:
+        f.append(f"[{mix[0]}]apad=whole_dur={length:.3f},atrim=0:{length:.3f}[aout]")
+    else:
+        f.append("".join(f"[{m}]" for m in mix) + f"amix=inputs={len(mix)}:duration=longest:normalize=0,"
+                                                   f"atrim=0:{length:.3f}[aout]")
+    if not audio_only:
+        if vlab is None:
+            f.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:d={max(0.1, length):.3f},format=yuv420p[vout]")
+        elif length > pos + 0.04:                             # Musik länger als die Clips: schwarz auffüllen
+            f.append(f"[{vlab}]tpad=stop_mode=add:stop_duration={length - pos:.3f}:color=black[vout]")
+        else:
+            f.append(f"[{vlab}]null[vout]")
+    return inputs, ";".join(f), "vout", "aout", W, H, fps, length
+
+
+def export_montage(proj, dst, progress=None, cancel=None):
+    ff = core.find_ffmpeg()
+    inputs, graph, vl, al, W, H, fps, length = build_graph(proj)
+    gfile = os.path.join(tempfile.gettempdir(), f"ace_montage_{uuid.uuid4().hex[:6]}.txt")
+    with open(gfile, "w", encoding="utf-8") as fh:
+        fh.write(graph)
+    base = [ff, "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"] + inputs + \
+           ["-filter_complex_script", gfile, "-map", f"[{vl}]", "-map", f"[{al}]"]
+    audio = ["-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart"]
+    attempts = []
+    hw = core._hw_encoder(ff, "h264")
+    if hw:
+        attempts.append(core._enc_args(hw, 18) + ["-pix_fmt", "yuv420p"] + audio)
+    attempts.append(["-c:v", "libx264", "-crf", "16", "-preset", "fast", "-pix_fmt", "yuv420p",
+                     "-threads", str(max(1, (os.cpu_count() or 4) - 2))] + audio)
+    flags = core.NOWIN | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+    err = ""
+    try:
+        for args in attempts:
+            p = subprocess.Popen(base + args + [dst], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 errors="ignore", creationflags=flags)
+            for line in p.stdout:
+                if cancel is not None and cancel.is_set():
+                    p.kill()
+                    p.wait()
+                    raise RuntimeError("Abgebrochen")
+                m = re.match(r"out_time_us=(\d+)", line.strip())
+                if m and progress and length > 0:
+                    progress(min(1.0, int(m.group(1)) / 1e6 / length))
+            p.wait()
+            err = p.stderr.read()
+            if p.returncode == 0:
+                return dst
+        raise RuntimeError(err.strip().splitlines()[-1] if err.strip() else "Export fehlgeschlagen")
+    finally:
+        try:
+            os.remove(gfile)
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------ Vorschau (Bilder berechnen)
+class FrameSource:
+    """Liefert Bilder aus den Quellvideos; liest beim Abspielen fortlaufend (schnell), springt nur wenn nötig."""
+
+    def __init__(self):
+        self.caps = {}
+
+    def get(self, path, t):
+        c = self.caps.get(path)
+        if c is None:
+            cap = cv2.VideoCapture(path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
+            c = self.caps[path] = [cap, fps, -1.0, None]
+        cap, fps, last, lastf = c
+        if lastf is not None and abs(t - last) < 0.5 / fps:
+            return lastf
+        if last < t < last + 0.6:
+            n = int(round((t - last) * fps)) - 1
+            for _ in range(max(0, n)):
+                cap.grab()
+        else:
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+        ok, fr = cap.read()
+        if not ok:
+            return lastf
+        c[2] = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 - 1.0 / fps
+        c[3] = fr
+        return fr
+
+    def close(self):
+        for c in self.caps.values():
+            c[0].release()
+        self.caps = {}
+
+
+def _fit(fr, W, H):
+    h, w = fr.shape[:2]
+    s = min(W / w, H / h)
+    nw, nh = max(2, int(w * s)), max(2, int(h * s))
+    out = np.zeros((H, W, 3), np.uint8)
+    r = cv2.resize(fr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    y, x = (H - nh) // 2, (W - nw) // 2
+    out[y:y + nh, x:x + nw] = r
+    return out
+
+
+def blend(a, b, p, kind):
+    """Vorschau eines Übergangs (Annäherung an die FFmpeg-Übergänge beim Export)."""
+    H, W = a.shape[:2]
+    p = max(0.0, min(1.0, p))
+    if kind in ("fadeblack", "fadewhite"):
+        c = np.zeros_like(a) if kind == "fadeblack" else np.full_like(a, 255)
+        return cv2.addWeighted(a, 1 - p * 2, c, p * 2, 0) if p < 0.5 else cv2.addWeighted(c, 2 - p * 2, b, p * 2 - 1, 0)
+    if kind == "wipeleft":
+        x = int(W * (1 - p))
+        out = a.copy()
+        out[:, x:] = b[:, x:]
+        return out
+    if kind == "slideleft":
+        x = int(W * p)
+        out = np.empty_like(a)
+        out[:, :W - x] = a[:, x:]
+        out[:, W - x:] = b[:, :x]
+        return out
+    if kind == "zoomin":
+        z = 1 + p
+        za = cv2.resize(a, None, fx=z, fy=z, interpolation=cv2.INTER_LINEAR)
+        y0, x0 = (za.shape[0] - H) // 2, (za.shape[1] - W) // 2
+        za = za[y0:y0 + H, x0:x0 + W]
+        return cv2.addWeighted(za, 1 - p, b, p, 0)
+    if kind == "circleopen":
+        m = np.zeros((H, W), np.uint8)
+        cv2.circle(m, (W // 2, H // 2), int(math.hypot(W, H) / 2 * p), 255, -1)
+        out = a.copy()
+        out[m > 0] = b[m > 0]
+        return out
+    if kind == "pixelize":
+        k = max(1, int(40 * (1 - abs(p - 0.5) * 2)))
+        src = a if p < 0.5 else b
+        sm = cv2.resize(src, (max(1, W // k), max(1, H // k)), interpolation=cv2.INTER_AREA)
+        return cv2.resize(sm, (W, H), interpolation=cv2.INTER_NEAREST)
+    if kind == "hblur":
+        k = int(1 + 60 * (1 - abs(p - 0.5) * 2)) | 1
+        mix = cv2.addWeighted(a, 1 - p, b, p, 0)
+        return cv2.blur(mix, (k, 1))
+    return cv2.addWeighted(a, 1 - p, b, p, 0)
+
+
+class MontagePlayer(threading.Thread):
+    def __init__(self, page):
+        super().__init__(daemon=True)
+        self.page = page
+        self.src = FrameSource()
+        self.lock = threading.Lock()
+        self.ev = threading.Event()
+        self.want = None
+        self.playing = False
+        self.t = 0.0
+        self.t0 = self.p0 = 0.0
+        self.size = (960, 540)
+        self.latest = None
+        self.stop_flag = False
+
+    def seek(self, t):
+        with self.lock:
+            self.want = max(0.0, t)
+        self.ev.set()
+
+    def play(self, on):
+        with self.lock:
+            self.playing = on
+            self.t0, self.p0 = time.perf_counter(), self.t
+        self.ev.set()
+
+    def take(self):
+        with self.lock:
+            f, self.latest = self.latest, None
+        return f
+
+    def frame_at(self, t):
+        proj = self.page.proj
+        W, H = self.size
+        vs = proj.videos()
+        act = [v for v in vs if v.start - 1e-6 <= t < v.end]
+        if not act:
+            return np.zeros((H, W, 3), np.uint8)
+
+        def img(it):
+            fr = self.src.get(it.path, it.src_in + (t - it.start) * it.speed)
+            if fr is None:
+                return np.zeros((H, W, 3), np.uint8)
+            fr = _fit(fr, W, H)
+            return fr
+        if len(act) >= 2:
+            a, b = act[0], act[1]
+            if a.trans != "none":
+                ov = a.end - b.start
+                p = (t - b.start) / max(0.05, ov)
+                return blend(img(a), img(b), p, a.trans)
+            return img(b)
+        return img(act[0])
+
+    def run(self):
+        while not self.stop_flag:
+            with self.lock:
+                want, self.want = self.want, None
+                playing = self.playing
+            if want is not None:
+                self.t = want
+                with self.lock:
+                    self.t0, self.p0 = time.perf_counter(), self.t
+                try:
+                    fr = self.frame_at(self.t)
+                    with self.lock:
+                        self.latest = (self.t, fr)
+                except Exception:
+                    pass
+            if playing:
+                t = self.p0 + (time.perf_counter() - self.t0)
+                L = self.page.proj.length()
+                if t >= L:
+                    with self.lock:
+                        self.playing = False
+                    self.t = L
+                    with self.lock:
+                        self.latest = (L, None)
+                    continue
+                self.t = t
+                try:
+                    fr = self.frame_at(t)
+                except Exception:
+                    fr = None
+                with self.lock:
+                    self.latest = (t, fr)
+                time.sleep(max(0.0, 1 / 60 - 0.002))
+            elif want is None:
+                self.ev.wait(0.05)
+                self.ev.clear()
+        self.src.close()
+
+
+# ------------------------------------------------------------------ Vorschau-Fläche
+class Preview(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.img = None
+        self.setMinimumSize(320, 180)
+
+    def set_frame(self, rgb):
+        h, w = rgb.shape[:2]
+        self._buf = rgb
+        self.img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(r, 18, 18)
+        p.setClipPath(path)
+        p.fillRect(r, QColor(0, 0, 0))
+        if self.img is not None:
+            iw, ih = self.img.width(), self.img.height()
+            s = min(r.width() / iw, r.height() / ih)
+            dw, dh = iw * s, ih * s
+            p.drawImage(QRectF(r.center().x() - dw / 2, r.center().y() - dh / 2, dw, dh), self.img)
+        else:
+            p.setPen(QColor(255, 255, 255, 150))
+            p.setFont(app_font(10.5))
+            p.drawText(r, Qt.AlignCenter, "Füge links Clips hinzu – sie erscheinen unten in der Zeitleiste.")
+        p.setClipping(False)
+        p.setPen(QPen(T.line(1.6), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r, 18, 18)
+
+
+# ------------------------------------------------------------------ Zeitleiste
+class MTimeline(QWidget):
+    seek = Signal(float)
+    selected = Signal(object)        # MItem, ("trans", MItem) oder None
+    changed = Signal()
+    begin = Signal()                 # vor einer Änderung (Rückgängig)
+
+    RULER, VH, AH, GAP, LEFT = 26, 64, 46, 8, 86
+
+    def __init__(self, proj, parent=None):
+        super().__init__(parent)
+        self.proj = proj
+        self.pps = 40.0              # Pixel pro Sekunde
+        self.x0 = 0.0                # Scroll (Sekunden)
+        self.ph = 0.0                # Abspielposition
+        self.sel = None
+        self.drag = None
+        self.hover = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(self.RULER + self.VH + 2 * self.AH + 3 * self.GAP + 16)
+        self.setFocusPolicy(Qt.ClickFocus)
+
+    # Geometrie
+    def tx(self, t):
+        return self.LEFT + (t - self.x0) * self.pps
+
+    def xt(self, x):
+        return self.x0 + (x - self.LEFT) / self.pps
+
+    def track_rect(self, tr):
+        y = self.RULER + self.GAP
+        if tr == 0:
+            return QRectF(self.LEFT, y, self.width() - self.LEFT - 8, self.VH)
+        y += self.VH + self.GAP + (tr - 1) * (self.AH + self.GAP)
+        return QRectF(self.LEFT, y, self.width() - self.LEFT - 8, self.AH)
+
+    def item_rect(self, it):
+        tr = self.track_rect(it.track)
+        return QRectF(self.tx(it.start), tr.top() + 3, max(6.0, it.dur * self.pps), tr.height() - 6)
+
+    def track_at(self, y):
+        for tr in (0, 1, 2):
+            r = self.track_rect(tr)
+            if r.top() - self.GAP / 2 <= y <= r.bottom() + self.GAP / 2:
+                return tr
+        return None
+
+    def trans_markers(self):
+        """Rauten an den Stellen, wo zwei Clips aneinanderstoßen (hier sitzt der Übergang)."""
+        out = []
+        vs = self.proj.videos()
+        cy = self.track_rect(0).center().y()
+        for a, b in zip(vs, vs[1:]):
+            if b.start <= a.end + 0.06:
+                t = (b.start + a.end) / 2 if b.start < a.end else b.start
+                x = self.tx(t)
+                out.append((QRectF(x - 11, cy - 11, 22, 22), a))
+        return out
+
+    def fit_all(self):
+        L = max(10.0, self.proj.length() + 2)
+        self.pps = max(4.0, (self.width() - self.LEFT - 30) / L)
+        self.x0 = 0.0
+        self.update()
+
+    # Zeichnen
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        W = self.width()
+        # Spur-Namen
+        for tr, name, ic in ((0, "Video", "film"), (1, "Ton 1", "music"), (2, "Ton 2", "music")):
+            r = self.track_rect(tr)
+            p.setPen(Qt.NoPen)
+            p.setBrush(T.card_fill(130))
+            p.drawRoundedRect(QRectF(8, r.top(), self.LEFT - 16, r.height()), 10, 10)
+            paint_icon(p, ic, QRectF(16, r.center().y() - 8, 16, 16), ink(170), 1.5)
+            p.setPen(ink(170))
+            p.setFont(app_font(8.5, True))
+            p.drawText(QRectF(36, r.top(), self.LEFT - 44, r.height()), Qt.AlignVCenter, name)
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink(10))
+            p.drawRoundedRect(r, 10, 10)
+        p.save()
+        p.setClipRect(QRectF(self.LEFT, 0, W - self.LEFT, self.height()))
+        # Lineal
+        step = next(s for s in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300) if s * self.pps >= 70)
+        t = math.floor(self.x0 / step) * step
+        p.setFont(app_font(8))
+        while self.tx(t) < W:
+            x = self.tx(t)
+            p.setPen(ink(60))
+            p.drawLine(QPointF(x, self.RULER - 7), QPointF(x, self.RULER))
+            p.setPen(ink(140))
+            p.drawText(QRectF(x + 3, 2, 60, self.RULER - 8), Qt.AlignLeft | Qt.AlignVCenter, fmt_s(t))
+            t += step
+        # Stücke
+        for it in sorted(self.proj.items, key=lambda x: (x.track, x.start)):
+            r = self.item_rect(it)
+            if r.right() < self.LEFT or r.left() > W:
+                continue
+            sel = it is self.sel
+            path = QPainterPath()
+            path.addRoundedRect(r, 8, 8)
+            if it.track == 0:
+                p.save()
+                p.setClipPath(path)
+                p.fillRect(r, QColor(30, 30, 34))
+                pm = thumb(it.path, it.src_in + 0.3)
+                if pm is not None:
+                    tw = r.height() * pm.width() / max(1, pm.height())
+                    x = r.left()
+                    while x < r.right():
+                        p.drawPixmap(QRectF(x, r.top(), tw, r.height()), pm, QRectF(0, 0, pm.width(), pm.height()))
+                        x += tw
+                g = QLinearGradient(r.topLeft(), r.bottomLeft())
+                g.setColorAt(0, QColor(0, 0, 0, 30))
+                g.setColorAt(1, QColor(0, 0, 0, 160))
+                p.fillRect(r, g)
+                p.setPen(QColor(255, 255, 255, 235))
+                p.setFont(app_font(8.5, True))
+                name = os.path.splitext(os.path.basename(it.path))[0]
+                sp = f"  ·  {it.speed:g}×" if abs(it.speed - 1) > 0.01 else ""
+                p.drawText(r.adjusted(8, 0, -8, -4), Qt.AlignLeft | Qt.AlignBottom,
+                           QFontMetrics(p.font()).elidedText(f"{name}  ·  {it.dur:.1f}s{sp}", Qt.ElideRight,
+                                                            int(r.width() - 16)))
+                p.restore()
+            else:
+                col = T.pill()[0] if it.track == 1 else QColor("#5fb3ff")
+                p.setPen(Qt.NoPen)
+                p.setBrush(with_alpha(col, 70))
+                p.drawPath(path)
+                w = waveform(it.path)
+                info = media_info(it.path)
+                dur = max(0.1, info["dur"])
+                p.setPen(QPen(with_alpha(col, 220), 1))
+                cy, hh = r.center().y(), r.height() / 2 - 4
+                xs = int(r.width())
+                p.save()
+                p.setClipPath(path)
+                for px in range(0, xs, 2):
+                    st = it.src_in + px / self.pps * it.speed
+                    idx = int(st / dur * (len(w) - 1))
+                    if 0 <= idx < len(w):
+                        a = w[idx] * hh * min(1.5, it.volume)
+                        p.drawLine(QPointF(r.left() + px, cy - a), QPointF(r.left() + px, cy + a))
+                p.restore()
+                p.setPen(QColor(255, 255, 255, 230))
+                p.setFont(app_font(8, True))
+                p.drawText(r.adjusted(8, 2, -8, 0), Qt.AlignLeft | Qt.AlignTop,
+                           QFontMetrics(p.font()).elidedText(os.path.basename(it.path), Qt.ElideRight,
+                                                            int(r.width() - 16)))
+                for fdur, left in ((it.fade_in, True), (it.fade_out, False)):
+                    if fdur > 0.01:
+                        fw = min(r.width() / 2, fdur * self.pps)
+                        tri = QPainterPath()
+                        if left:
+                            tri.moveTo(r.bottomLeft())
+                            tri.lineTo(r.topLeft())
+                            tri.lineTo(QPointF(r.left() + fw, r.top()))
+                        else:
+                            tri.moveTo(r.bottomRight())
+                            tri.lineTo(r.topRight())
+                            tri.lineTo(QPointF(r.right() - fw, r.top()))
+                        tri.closeSubpath()
+                        p.setPen(Qt.NoPen)
+                        p.setBrush(QColor(0, 0, 0, 90))
+                        p.drawPath(tri)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 240) if sel else with_alpha(T.glass_edge(1.0), 255), 2 if sel else 1))
+            p.drawRoundedRect(r, 8, 8)
+            if sel:                                              # Griffe zum Kürzen
+                for x in (r.left() + 3, r.right() - 3):
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor(255, 255, 255))
+                    p.drawRoundedRect(QRectF(x - 2.5, r.center().y() - 12, 5, 24), 2.5, 2.5)
+        # Übergänge (Rauten zwischen den Clips)
+        for rr, a in self.trans_markers():
+            on = a.trans != "none"
+            selt = isinstance(self.sel, tuple) and self.sel[1] is a
+            p.save()
+            p.translate(rr.center())
+            p.rotate(45)
+            q = QRectF(-8, -8, 16, 16)
+            p.setPen(QPen(QColor(255, 255, 255, 230 if selt else 160), 1.5))
+            p.setBrush(T.pill()[0] if on else QColor(20, 20, 24))
+            p.drawRoundedRect(q, 3, 3)
+            p.restore()
+            if not on:
+                p.setPen(QPen(QColor(255, 255, 255, 200), 1.5))
+                p.drawLine(QPointF(rr.center().x() - 4, rr.center().y()), QPointF(rr.center().x() + 4, rr.center().y()))
+                p.drawLine(QPointF(rr.center().x(), rr.center().y() - 4), QPointF(rr.center().x(), rr.center().y() + 4))
+        # Abspielkopf
+        x = self.tx(self.ph)
+        p.setPen(QPen(QColor(255, 255, 255), 1.6))
+        p.drawLine(QPointF(x, 6), QPointF(x, self.height() - 6))
+        tri = QPainterPath()
+        tri.moveTo(x - 6, 4)
+        tri.lineTo(x + 6, 4)
+        tri.lineTo(x, 12)
+        tri.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255))
+        p.drawPath(tri)
+        p.restore()
+
+    # Maus
+    def hit(self, pos):
+        for rr, a in self.trans_markers():
+            if rr.adjusted(-3, -3, 3, 3).contains(pos):
+                return ("trans", a, None)
+        for it in sorted(self.proj.items, key=lambda x: -x.start):
+            r = self.item_rect(it)
+            if r.contains(pos):
+                if pos.x() - r.left() < 9:
+                    return ("left", it, None)
+                if r.right() - pos.x() < 9:
+                    return ("right", it, None)
+                return ("move", it, None)
+        return None
+
+    def snap_points(self, skip):
+        pts = [0.0, self.ph]
+        for it in self.proj.items:
+            if it is not skip:
+                pts += [it.start, it.end]
+        return pts
+
+    def snap(self, t, skip):
+        if not self.proj.magnet:
+            return t
+        best, bd = t, 10 / self.pps
+        for s in self.snap_points(skip):
+            if abs(s - t) < bd:
+                best, bd = s, abs(s - t)
+        return best
+
+    def mousePressEvent(self, e):
+        pos = e.position()
+        self.setFocus()
+        if pos.y() < self.RULER or pos.x() < self.LEFT:
+            if pos.x() >= self.LEFT:
+                self.drag = ("seek",)
+                self.seek.emit(max(0.0, self.xt(pos.x())))
+            return
+        h = self.hit(pos)
+        if h is None:
+            self.sel = None
+            self.selected.emit(None)
+            self.drag = ("seek",)
+            self.seek.emit(max(0.0, self.xt(pos.x())))
+            self.update()
+            return
+        kind, it, _ = h
+        if kind == "trans":
+            self.sel = ("trans", it)
+            self.selected.emit(self.sel)
+            self.update()
+            return
+        self.sel = it
+        self.selected.emit(it)
+        self.begin.emit()
+        self.drag = (kind, it, pos.x(), it.start, it.src_in, it.src_out, it.track)
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        pos = e.position()
+        if not self.drag:
+            h = self.hit(pos)
+            self.setCursor(Qt.SizeHorCursor if h and h[0] in ("left", "right") else
+                           Qt.PointingHandCursor if h else Qt.ArrowCursor)
+            return
+        if self.drag[0] == "seek":
+            self.seek.emit(max(0.0, self.xt(pos.x())))
+            return
+        kind, it, x0, st0, in0, out0, tr0 = self.drag
+        dt = (pos.x() - x0) / self.pps
+        info = media_info(it.path)
+        if kind == "move":
+            if it.track == 0 and self.proj.magnet:
+                # Einrasten: Reihenfolge per Ziehen ändern
+                vs = self.proj.videos()
+                t = st0 + dt + it.dur / 2
+                others = [v for v in vs if v is not it]
+                idx = sum(1 for v in others if v.start + v.dur / 2 < t)
+                order = others[:idx] + [it] + others[idx:]
+                tmp = 0.0
+                for v in order:                       # neue Reihenfolge übernehmen
+                    v.start = tmp
+                    tmp += v.dur
+                self.proj.pack()
+            else:
+                ns = max(0.0, st0 + dt)
+                ns = self.snap(ns, it)
+                ne = self.snap(ns + it.dur, it)
+                if ne != ns + it.dur:
+                    ns = ne - it.dur
+                it.start = max(0.0, ns)
+                if it.track > 0:
+                    tr = self.track_at(pos.y())
+                    if tr in (1, 2):
+                        it.track = tr
+        elif kind == "left":
+            ni = min(out0 - 0.2, max(0.0, in0 + dt * it.speed))
+            if not (it.track == 0 and self.proj.magnet):
+                it.start = max(0.0, st0 + (ni - in0) / it.speed)
+            it.src_in = ni
+            self.proj.pack()
+        elif kind == "right":
+            no = max(in0 + 0.2, min(info["dur"] or out0, out0 + dt * it.speed))
+            it.src_out = no
+            self.proj.pack()
+        self.changed.emit()
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self.drag and self.drag[0] != "seek":
+            self.proj.pack()
+            self.changed.emit()
+        self.drag = None
+        self.update()
+
+    def wheelEvent(self, e):
+        d = e.angleDelta().y() or e.angleDelta().x()
+        if e.modifiers() & Qt.ShiftModifier:            # Shift + Mausrad: seitlich scrollen
+            self.x0 = max(0.0, self.x0 - d / 120 * 80 / self.pps)
+        else:                                             # Mausrad: zoomen
+            t = self.xt(e.position().x())
+            f = 1.15 if d > 0 else 1 / 1.15
+            self.pps = max(2.0, min(400.0, self.pps * f))
+            self.x0 = max(0.0, t - (e.position().x() - self.LEFT) / self.pps)
+        self.update()
+
+    def scroll_to(self, t):
+        vis = (self.width() - self.LEFT - 20) / self.pps
+        if t < self.x0 or t > self.x0 + vis:
+            self.x0 = max(0.0, t - vis * 0.2)
+
+
+# ------------------------------------------------------------------ Medien-Liste
+class MediaRow(QWidget):
+    add = Signal()
+
+    def __init__(self, path, is_audio, parent=None):
+        super().__init__(parent)
+        self.path, self.is_audio = path, is_audio
+        self.hov = 0.0
+        self.setFixedHeight(58)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Klicken = zur Zeitleiste hinzufügen")
+
+    def enterEvent(self, e):
+        tween(self, "hov", 1.0, 120)
+
+    def leaveEvent(self, e):
+        tween(self, "hov", 0.0, 160)
+
+    def mousePressEvent(self, e):
+        self.add.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        r = QRectF(self.rect()).adjusted(2, 3, -2, -3)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, int(14 * self.hov)) if T.dark else QColor(0, 0, 0, int(10 * self.hov)))
+        p.drawRoundedRect(r, 12, 12)
+        tr = QRectF(r.left() + 6, r.top() + 5, 64, r.height() - 10)
+        path = QPainterPath()
+        path.addRoundedRect(tr, 7, 7)
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(tr, ink(25))
+        if not self.is_audio:
+            pm = thumb(self.path)
+            if pm is not None:
+                p.drawPixmap(tr, pm, QRectF(0, 0, pm.width(), pm.height()))
+        else:
+            paint_icon(p, "music", QRectF(tr.center().x() - 9, tr.center().y() - 9, 18, 18), ink(180), 1.6)
+        p.restore()
+        info = media_info(self.path)
+        p.setPen(ink(235))
+        p.setFont(app_font(9, True))
+        avail = int(r.width() - 120)
+        p.drawText(QRectF(tr.right() + 10, r.top() + 6, avail, 18), Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(os.path.basename(self.path), Qt.ElideMiddle, avail))
+        p.setPen(ink(130))
+        p.setFont(app_font(8))
+        p.drawText(QRectF(tr.right() + 10, r.top() + 24, avail, 16), Qt.AlignVCenter, fmt_s(info["dur"]))
+        c = QRectF(r.right() - 34, r.center().y() - 13, 26, 26)
+        p.setPen(Qt.NoPen)
+        p.setBrush(with_alpha(T.pill()[0], int(120 + 135 * self.hov)))
+        p.drawEllipse(c)
+        paint_icon(p, "plus", c.adjusted(7, 7, -7, -7), T.pill()[1], 1.8)
+
+
+# ------------------------------------------------------------------ Seite
+class MontagePage(QWidget):
+    def __init__(self, win, parent=None):
+        super().__init__(parent)
+        self.win = win
+        self.proj = Project()
+        self.proj.load(win.st.get("montage"))
+        self.media = [p for p in win.st.get("montage_media", []) if os.path.exists(p)]
+        self.undo_st, self.redo_st = [], []
+        self.player = MontagePlayer(self)
+        self.player.start()
+        self.playing = False
+        self.exporting = False
+        self.cancel = threading.Event()
+        self.audio = None
+        self._aud_gen = 0
+        self._aud_file = None
+        if QMediaPlayer is not None:
+            try:
+                self.audio = QMediaPlayer()
+                self.aout = QAudioOutput()
+                self.aout.setVolume(0.9)
+                self.audio.setAudioOutput(self.aout)
+            except Exception:
+                self.audio = None
+        self._build()
+        self.timer = QTimer(self)
+        self.timer.setInterval(10)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start()
+        self.save_t = QTimer(self)
+        self.save_t.setSingleShot(True)
+        self.save_t.setInterval(700)
+        self.save_t.timeout.connect(self._after_change)
+        QTimer.singleShot(300, self._after_change)
+
+    # ---- Aufbau
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        root.addLayout(top, 1)
+
+        # links: Medien
+        left = Glass(radius=30, alpha=120)
+        left.setFixedWidth(300)
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(16, 16, 10, 12)
+        lv.setSpacing(8)
+        t = QLabel("Medien")
+        t.setFont(display_font(13))
+        lv.addWidget(t)
+        self.media_seg = Segmented(["Clips", "Musik & Sounds"], height=34)
+        self.media_seg.changed.connect(lambda _: self.refresh_media())
+        lv.addWidget(self.media_seg)
+        self.media_scroll = QScrollArea()
+        self.media_scroll.setWidgetResizable(True)
+        self.media_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.media_scroll.viewport().setAutoFillBackground(False)
+        lv.addWidget(self.media_scroll, 1)
+        b = PopButton("Dateien hinzufügen …", "folder", "glass", 36)
+        b.clicked.connect(self.import_files)
+        lv.addWidget(b)
+        top.addWidget(left)
+
+        # Mitte: Vorschau
+        mid = Glass(radius=30, alpha=120)
+        mv = QVBoxLayout(mid)
+        mv.setContentsMargins(14, 14, 14, 12)
+        mv.setSpacing(10)
+        self.preview = Preview()
+        self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        mv.addWidget(self.preview, 1)
+        ctl = QHBoxLayout()
+        ctl.setSpacing(8)
+        self.time_lbl = lbl("0:00.00 / 0:00.00", 10, True)
+        ctl.addWidget(self.time_lbl)
+        ctl.addStretch(1)
+        b = PopButton("", "prev", "flat", 38, icon_only=True)
+        b.clicked.connect(lambda: self.seek(0))
+        ctl.addWidget(b)
+        self.play_btn = PopButton("", "play", "accent", 42, icon_only=True)
+        self.play_btn.clicked.connect(self.toggle_play)
+        ctl.addWidget(self.play_btn)
+        b = PopButton("", "next", "flat", 38, icon_only=True)
+        b.clicked.connect(lambda: self.seek(self.proj.length()))
+        ctl.addWidget(b)
+        ctl.addStretch(1)
+        self.exp_btn = PopButton("Montage exportieren", "upload", "accent", 40)
+        self.exp_btn.clicked.connect(self.export)
+        ctl.addWidget(self.exp_btn)
+        mv.addLayout(ctl)
+        from ui import Bar
+        self.exp_bar = Bar(height=4)
+        mv.addWidget(self.exp_bar)
+        top.addWidget(mid, 1)
+
+        # rechts: Eigenschaften
+        right = Glass(radius=30, alpha=120)
+        right.setFixedWidth(340)
+        self.insp_outer = QVBoxLayout(right)
+        self.insp_outer.setContentsMargins(18, 18, 18, 14)
+        self.insp_box = None
+        top.addWidget(right)
+
+        # unten: Werkzeuge + Zeitleiste
+        bottom = Glass(radius=30, alpha=120)
+        bv = QVBoxLayout(bottom)
+        bv.setContentsMargins(12, 10, 12, 10)
+        bv.setSpacing(6)
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+
+        def tb(text, icon, fn, tip=""):
+            x = PopButton(text, icon, "glass", 32, icon_only=not text)
+            x.setToolTip(tip)
+            x.clicked.connect(fn)
+            tools.addWidget(x)
+            return x
+        tb("", "back", self.undo, "Rückgängig (Strg+Z)")
+        tb("", "refresh", self.redo, "Wiederholen (Strg+Y)")
+        tb("Teilen", "cut", self.split, "Clip an der Abspielposition teilen (S)")
+        tb("Löschen", "trash", self.delete_sel, "Ausgewähltes löschen (Entf)")
+        tools.addSpacing(8)
+        self.mag_btn = PopButton("Einrasten", "magnet", "accent" if self.proj.magnet else "glass", 32)
+        self.mag_btn.setToolTip("An: Clips kleben lückenlos aneinander. Aus: frei verschieben.")
+        self.mag_btn.clicked.connect(self.toggle_magnet)
+        tools.addWidget(self.mag_btn)
+        tools.addStretch(1)
+        self.len_lbl = lbl("", 9, True, "muted")
+        tools.addWidget(self.len_lbl)
+        tb("", "minus", lambda: self.zoom(1 / 1.4), "Herauszoomen")
+        tb("", "plus", lambda: self.zoom(1.4), "Hineinzoomen")
+        tb("Alles", "expand", lambda: self.tl.fit_all(), "Ganze Montage zeigen")
+        bv.addLayout(tools)
+        self.tl = MTimeline(self.proj)
+        self.tl.seek.connect(self.seek)
+        self.tl.selected.connect(self.show_inspector)
+        self.tl.changed.connect(self.on_changed)
+        self.tl.begin.connect(self.snapshot)
+        bv.addWidget(self.tl)
+        root.addWidget(bottom)
+        self.refresh_media()
+        self.show_inspector(None)
+
+    # ---- Medien
+    def media_files(self, audio):
+        ext = AUDIO_EXT if audio else VIDEO_EXT
+        out = []
+        if not audio:
+            d = self.win.export_dir() if hasattr(self.win, "export_dir") else ""
+            if d and os.path.isdir(d):
+                fs = [os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith(VIDEO_EXT)]
+                out += sorted(fs, key=lambda x: os.path.getmtime(x), reverse=True)
+        out += [m for m in self.media if m.lower().endswith(ext) and m not in out]
+        return out
+
+    def refresh_media(self):
+        audio = self.media_seg.current() != "Clips"
+        host = QWidget()
+        host.setAttribute(Qt.WA_TranslucentBackground)
+        v = QVBoxLayout(host)
+        v.setContentsMargins(0, 0, 4, 0)
+        v.setSpacing(0)
+        files = self.media_files(audio)
+        if not files:
+            v.addSpacing(20)
+            h = lbl("Noch keine Musik oder Sounds. Füge MP3/WAV-Dateien über den Knopf unten hinzu." if audio else
+                    "Noch keine Clips. Exportierte Clips aus dem Editor erscheinen hier automatisch – oder füge "
+                    "Dateien über den Knopf unten hinzu.", 9, False, "muted", True)
+            h.setAlignment(Qt.AlignCenter)
+            v.addWidget(h)
+        for f in files:
+            row = MediaRow(f, audio)
+            row.add.connect(lambda f=f, a=audio: self.add_media(f, a))
+            v.addWidget(row)
+        v.addStretch(1)
+        self.media_scroll.setWidget(host)
+
+    def import_files(self):
+        audio = self.media_seg.current() != "Clips"
+        flt = ("Ton (*.mp3 *.wav *.m4a *.aac *.ogg *.flac *.opus *.wma)" if audio else
+               "Video (*.mp4 *.mkv *.mov *.flv *.ts *.avi *.webm)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Dateien hinzufügen", "", flt + ";;Alle (*)")
+        if files:
+            for f in files:
+                if f not in self.media:
+                    self.media.append(f)
+            self.win.st["montage_media"] = self.media
+            self.win.save_settings()
+            self.refresh_media()
+
+    def add_media(self, path, audio):
+        self.snapshot()
+        if audio:
+            free1 = all(not (a.start < self.tl.ph + 1 and a.end > self.tl.ph) for a in self.proj.audios() if a.track == 1)
+            it = MItem(path, 1 if free1 else 2, start=self.tl.ph)
+        else:
+            vs = self.proj.videos()
+            it = MItem(path, 0, start=vs[-1].end if vs else 0.0)
+        if it.dur < 0.2:
+            self.win.say("Datei konnte nicht gelesen werden", RED)
+            return
+        self.proj.items.append(it)
+        self.proj.pack()
+        self.tl.sel = it
+        self.show_inspector(it)
+        if self.proj.length() * self.tl.pps > self.tl.width() - 120:
+            self.tl.fit_all()
+        self.on_changed()
+
+    # ---- Eigenschaften (rechts)
+    def _clear(self, lay):
+        while lay.count():
+            it = lay.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+            elif it.layout():
+                self._clear(it.layout())
+
+    def show_inspector(self, sel):
+        # jedes Mal ein frischer Bereich: das alte wird sofort ausgeblendet (keine Überlagerung)
+        if self.insp_box is not None:
+            self.insp_box.hide()
+            self.insp_outer.removeWidget(self.insp_box)
+            self.insp_box.deleteLater()
+        self.insp_box = QWidget()
+        self.insp_box.setAttribute(Qt.WA_TranslucentBackground)
+        L = QVBoxLayout(self.insp_box)
+        L.setContentsMargins(0, 0, 0, 0)
+        L.setSpacing(10)
+        self.insp_outer.addWidget(self.insp_box)
+
+        def title(text, sub=""):
+            q = QLabel(text)
+            q.setFont(display_font(13))
+            L.addWidget(q)
+            if sub:
+                L.addWidget(lbl(sub, 8.5, False, "muted", True))
+        if sel is None:
+            title("Projekt", "Wähle unten einen Clip, eine Tonspur oder eine Raute zwischen zwei Clips (Übergang).")
+            L.addWidget(lbl("Auflösung", 9, True, "muted"))
+            s = Segmented(["Original", "1080p", "1440p"], height=34)
+            s.set_current(self.proj.res)
+            s.changed.connect(lambda v: (setattr(self.proj, "res", v), self.on_changed()))
+            L.addWidget(s)
+            L.addWidget(lbl("Bilder pro Sekunde", 9, True, "muted"))
+            s2 = Segmented(["Original", "60", "30"], height=34)
+            s2.set_current(self.proj.fps)
+            s2.changed.connect(lambda v: (setattr(self.proj, "fps", v), self.on_changed()))
+            L.addWidget(s2)
+            L.addWidget(lbl("„Original“ übernimmt Auflösung und fps des ersten Clips – ohne Qualitätsverlust.",
+                            8.5, False, "muted", True))
+            L.addSpacing(8)
+            b = PopButton("Alles leeren", "trash", "danger", 34)
+            b.clicked.connect(self.clear_all)
+            L.addWidget(b)
+            L.addStretch(1)
+            return
+        if isinstance(sel, tuple):
+            a = sel[1]
+            title("Übergang", "Wie der Clip in den nächsten übergeht.")
+            from PySide6.QtWidgets import QGridLayout
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(4)
+            grid.setVerticalSpacing(2)
+            for k, (name, key) in enumerate(TRANSITIONS):
+                b = PopButton(name, None, "accent" if a.trans == key else "glass", 30)
+                b.setFont(app_font(9, True))
+                b.clicked.connect(lambda _=False, key=key: self.set_trans(a, key))
+                grid.addWidget(b, k // 2, k % 2)
+            L.addLayout(grid)
+            sr = SliderRow("Dauer", 0.2, 1.5, 13, a.tdur, lambda v: f"{v:.1f} s")
+            sr.s.valueChanged.connect(lambda v: (setattr(a, "tdur", round(sr.value(), 2)), self.proj.pack(),
+                                                 self.on_changed(light=True)))
+            L.addWidget(sr)
+            b = PopButton("Für alle Übergänge übernehmen", None, "glass", 32)
+            b.clicked.connect(lambda: self.trans_all(a.trans, a.tdur))
+            L.addWidget(b)
+            L.addStretch(1)
+            return
+        it = sel
+        name = os.path.basename(it.path)
+        if it.track == 0:
+            title("Clip", name)
+            L.addWidget(lbl("Geschwindigkeit", 9, True, "muted"))
+            s = Segmented(["0.5×", "1×", "1.5×", "2×"], height=34)
+            s.set_current(f"{it.speed:g}×")
+            s.changed.connect(lambda v: self.set_speed(it, float(v.replace("×", ""))))
+            L.addWidget(s)
+            sr = SliderRow("Clip-Ton", 0, 2, 40, it.volume, lambda v: f"{int(round(v * 100))} %")
+            sr.s.valueChanged.connect(lambda _: (setattr(it, "volume", round(sr.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(sr)
+            L.addWidget(lbl(f"Ausschnitt: {fmt(it.src_in)} – {fmt(it.src_out)}  ·  Ränder unten ziehen zum Kürzen",
+                            8.5, False, "muted", True))
+            b = PopButton("Übergang zum nächsten Clip …", "layers", "glass", 34)
+            b.clicked.connect(lambda: (setattr(self.tl, "sel", ("trans", it)), self.show_inspector(("trans", it)),
+                                       self.tl.update()))
+            L.addWidget(b)
+        else:
+            title("Musik / Sound", name)
+            sr = SliderRow("Lautstärke", 0, 2, 40, it.volume, lambda v: f"{int(round(v * 100))} %")
+            sr.s.valueChanged.connect(lambda _: (setattr(it, "volume", round(sr.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(sr)
+            s1 = SliderRow("Einblenden", 0, 5, 50, it.fade_in, lambda v: f"{v:.1f} s")
+            s1.s.valueChanged.connect(lambda _: (setattr(it, "fade_in", round(s1.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(s1)
+            s2 = SliderRow("Ausblenden", 0, 5, 50, it.fade_out, lambda v: f"{v:.1f} s")
+            s2.s.valueChanged.connect(lambda _: (setattr(it, "fade_out", round(s2.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(s2)
+            b = PopButton("An Montage-Länge anpassen", None, "glass", 34)
+            b.clicked.connect(lambda: self.fit_audio(it))
+            L.addWidget(b)
+            L.addWidget(lbl("Tipp: Mit „Clip-Ton“ beim Clip kannst du den Spielsound leiser machen, damit die Musik "
+                            "besser zu hören ist.", 8.5, False, "muted", True))
+        L.addSpacing(6)
+        b = PopButton("Löschen", "trash", "danger", 34)
+        b.clicked.connect(self.delete_sel)
+        L.addWidget(b)
+        L.addStretch(1)
+
+    # ---- Bearbeiten
+    def snapshot(self):
+        self.undo_st.append(json.dumps(self.proj.to_dict()))
+        del self.undo_st[:-80]
+        self.redo_st = []
+
+    def _restore(self, s):
+        self.proj.load(json.loads(s))
+        self.tl.proj = self.proj
+        self.tl.sel = None
+        self.show_inspector(None)
+        self.on_changed()
+
+    def undo(self):
+        if self.undo_st:
+            self.redo_st.append(json.dumps(self.proj.to_dict()))
+            self._restore(self.undo_st.pop())
+
+    def redo(self):
+        if self.redo_st:
+            self.undo_st.append(json.dumps(self.proj.to_dict()))
+            self._restore(self.redo_st.pop())
+
+    def set_trans(self, a, key):
+        self.snapshot()
+        a.trans = key
+        self.proj.pack()
+        self.show_inspector(("trans", a))
+        self.on_changed()
+
+    def trans_all(self, key, d):
+        self.snapshot()
+        for v in self.proj.videos()[:-1]:
+            v.trans, v.tdur = key, d
+        self.proj.pack()
+        self.on_changed()
+        self.win.say("Übergang für alle Clips übernommen")
+
+    def set_speed(self, it, sp):
+        self.snapshot()
+        it.speed = sp
+        self.proj.pack()
+        self.on_changed()
+
+    def fit_audio(self, it):
+        self.snapshot()
+        L = max((v.end for v in self.proj.videos()), default=0.0)
+        if L > it.start + 0.2:
+            it.src_out = min(media_info(it.path)["dur"], it.src_in + (L - it.start) * it.speed)
+            it.fade_out = max(it.fade_out, 2.0)
+        self.show_inspector(it)
+        self.on_changed()
+
+    def toggle_magnet(self):
+        self.snapshot()
+        self.proj.magnet = not self.proj.magnet
+        self.mag_btn.set_kind("accent" if self.proj.magnet else "glass")
+        self.proj.pack()
+        self.on_changed()
+        self.win.say("Einrasten an – Clips kleben aneinander" if self.proj.magnet else "Einrasten aus – frei verschieben")
+
+    def split(self):
+        t = self.tl.ph
+        sel = self.tl.sel if isinstance(self.tl.sel, MItem) else None
+        cands = [sel] if sel and sel.start < t < sel.end else \
+            [i for i in self.proj.items if i.start + 0.05 < t < i.end - 0.05]
+        if not cands:
+            self.win.say("Setze die Abspielposition auf einen Clip zum Teilen")
+            return
+        self.snapshot()
+        it = cands[0]
+        cut = it.src_in + (t - it.start) * it.speed
+        b = MItem.from_dict(it.to_dict())
+        b.id = uuid.uuid4().hex[:8]
+        b.src_in, b.start = cut, t
+        b.fade_in = 0.0
+        it.src_out = cut
+        it.trans, it.fade_out = "none", 0.0
+        self.proj.items.append(b)
+        self.proj.pack()
+        self.on_changed()
+
+    def delete_sel(self):
+        s = self.tl.sel
+        if isinstance(s, tuple):
+            self.set_trans(s[1], "none")
+            return
+        if s is None:
+            return
+        self.snapshot()
+        self.proj.items = [i for i in self.proj.items if i is not s]
+        self.tl.sel = None
+        self.proj.pack()
+        self.show_inspector(None)
+        self.on_changed()
+
+    def clear_all(self):
+        if not self.proj.items:
+            return
+        self.snapshot()
+        self.proj.items = []
+        self.tl.sel = None
+        self.on_changed()
+        self.win.say("Montage geleert – Strg+Z holt sie zurück")
+
+    def zoom(self, f):
+        self.tl.pps = max(2.0, min(400.0, self.tl.pps * f))
+        self.tl.update()
+
+    def on_changed(self, light=False):
+        L = self.proj.length()
+        self.len_lbl.setText(f"Länge {fmt_s(L)}  ·  {len(self.proj.videos())} Clips")
+        self.tl.update()
+        self.player.seek(self.tl.ph)
+        self.save_t.start()
+
+    def _after_change(self):
+        self.win.st["montage"] = self.proj.to_dict()
+        self.win.save_settings()
+        self.render_audio()
+
+    # ---- Ton-Vorschau: der komplette Ton wird im Hintergrund kurz vorberechnet
+    def render_audio(self):
+        if self.audio is None:
+            return
+        self._aud_gen += 1
+        gen = self._aud_gen
+        if not self.proj.items:
+            return
+        proj = copy.deepcopy(self.proj)
+
+        def work():
+            try:
+                inputs, graph, vl, al, W, H, fps, L = build_graph(proj, audio_only=True)
+                out = os.path.join(tempfile.gettempdir(), f"ace_montage_preview_{gen % 3}.m4a")
+                gf = out + ".txt"
+                with open(gf, "w", encoding="utf-8") as fh:
+                    fh.write(graph)
+                ff = core.find_ffmpeg()
+                r = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error"] + inputs +
+                                   ["-filter_complex_script", gf, "-map", f"[{al}]", "-c:a", "aac", "-b:a", "192k", out],
+                                   capture_output=True, creationflags=core.NOWIN | getattr(
+                                       subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0), timeout=300)
+                if r.returncode == 0 and gen == self._aud_gen:
+                    self.win.ui(self._audio_ready, out)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _audio_ready(self, path):
+        self._aud_file = path
+        was = self.playing
+        self.audio.stop()
+        self.audio.setSource(QUrl.fromLocalFile(path))
+        if was:
+            self.audio.setPosition(int(self.player.t * 1000))
+            self.audio.play()
+
+    # ---- Abspielen
+    def seek(self, t):
+        t = max(0.0, min(t, max(0.0, self.proj.length())))
+        self.tl.ph = t
+        self.player.seek(t)
+        if self.audio and self.playing:
+            self.audio.setPosition(int(t * 1000))
+        self.tl.update()
+        self._time()
+
+    def toggle_play(self):
+        if not self.proj.items:
+            return
+        self.playing = not self.playing
+        if self.playing and self.tl.ph >= self.proj.length() - 0.05:
+            self.seek(0)
+        self.player.t = self.tl.ph
+        self.player.play(self.playing)
+        self.play_btn.icon_name = "pause" if self.playing else "play"
+        self.play_btn.update()
+        if self.audio and self._aud_file:
+            if self.playing:
+                self.audio.setPosition(int(self.tl.ph * 1000))
+                self.audio.play()
+            else:
+                self.audio.pause()
+
+    def stop(self):
+        if self.playing:
+            self.toggle_play()
+
+    def _time(self):
+        self.time_lbl.setText(f"{fmt(self.tl.ph)} / {fmt(self.proj.length())}")
+
+    def _poll(self):
+        if not self.isVisible():
+            return
+        w = max(64, self.preview.width())
+        h = max(64, self.preview.height())
+        dpr = self.devicePixelRatioF()
+        self.player.size = (int(w * dpr) // 2 * 2, int(h * dpr) // 2 * 2)
+        f = self.player.take()
+        if f is None:
+            return
+        t, fr = f
+        if fr is not None:
+            self.preview.set_frame(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
+        if self.playing:
+            self.tl.ph = t
+            self.tl.scroll_to(t)
+            self.tl.update()
+            self._time()
+            if not self.player.playing:
+                self.playing = False
+                self.play_btn.icon_name = "play"
+                self.play_btn.update()
+                if self.audio:
+                    self.audio.pause()
+            elif self.audio and self._aud_file and abs(self.audio.position() / 1000 - t) > 0.25:
+                self.audio.setPosition(int(t * 1000))
+
+    # ---- Export
+    def export(self):
+        if self.exporting:
+            self.cancel.set()
+            return
+        if not self.proj.videos() and not self.proj.audios():
+            self.win.say("Füge zuerst Clips hinzu", RED)
+            return
+        d = self.win.export_dir() if hasattr(self.win, "export_dir") else ""
+        start = os.path.join(d or os.path.expanduser("~"), f"Montage {time.strftime('%Y-%m-%d %H-%M')}.mp4")
+        dst, _ = QFileDialog.getSaveFileName(self, "Montage speichern", start, "Video (*.mp4)")
+        if not dst:
+            return
+        if not dst.lower().endswith(".mp4"):
+            dst += ".mp4"
+        self.stop()
+        self.exporting = True
+        self.cancel.clear()
+        self.exp_btn.setText("Abbrechen")
+        self.exp_btn.icon_name = "close"
+        self.exp_btn.set_kind("danger")
+        self.exp_bar.set_value(0, False)
+        proj = copy.deepcopy(self.proj)
+
+        def work():
+            try:
+                export_montage(proj, dst, lambda p: self.win.ui(self.exp_bar.set_value, p), self.cancel)
+                self.win.ui(self._exp_done, dst, None)
+            except Exception as e:
+                self.win.ui(self._exp_done, dst, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _exp_done(self, dst, err):
+        self.exporting = False
+        self.exp_btn.setText("Montage exportieren")
+        self.exp_btn.icon_name = "upload"
+        self.exp_btn.set_kind("accent")
+        if err:
+            self.exp_bar.set_value(0, False)
+            self.win.say("Abgebrochen" if "Abgebrochen" in err else "Export fehlgeschlagen: " + err[:80], RED)
+            return
+        self.exp_bar.set_value(1.0)
+        self.win.say(f"Montage exportiert: {os.path.basename(dst)}")
+        if getattr(self.win, "tg_open", None) is not None and self.win.tg_open.isChecked():
+            try:
+                from ace import open_path
+                open_path(os.path.dirname(dst))
+            except Exception:
+                pass
+
+    # ---- Tasten
+    def key(self, e):
+        k = e.key()
+        ctrl = bool(e.modifiers() & Qt.ControlModifier)
+        if k == Qt.Key_Space:
+            self.toggle_play()
+        elif ctrl and k == Qt.Key_Z:
+            self.redo() if e.modifiers() & Qt.ShiftModifier else self.undo()
+        elif ctrl and k == Qt.Key_Y:
+            self.redo()
+        elif k in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.delete_sel()
+        elif k == Qt.Key_S:
+            self.split()
+        elif k == Qt.Key_Left:
+            self.seek(self.tl.ph - (1 / 30 if e.modifiers() & Qt.ShiftModifier else 1))
+        elif k == Qt.Key_Right:
+            self.seek(self.tl.ph + (1 / 30 if e.modifiers() & Qt.ShiftModifier else 1))
+        elif k == Qt.Key_Home:
+            self.seek(0)
+        elif k == Qt.Key_End:
+            self.seek(self.proj.length())
+        else:
+            return False
+        return True
+
+    def shutdown(self):
+        self.player.stop_flag = True
+        if self.audio:
+            self.audio.stop()

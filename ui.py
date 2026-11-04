@@ -179,6 +179,32 @@ def paint_icon(p, name, rect, color, lw=1.9):
     elif name == "ticket":
         p.drawRoundedRect(QRectF(4.5, 7, 15, 10), 2, 2)
         p.drawLine(P(14, 7.5), P(14, 16.5))
+    elif name == "music":
+        p.drawEllipse(P(8, 17), 2.6, 2.2)
+        p.drawEllipse(P(16.5, 15.5), 2.6, 2.2)
+        p.drawLine(P(10.6, 17), P(10.6, 6.5))
+        p.drawLine(P(19.1, 15.5), P(19.1, 5))
+        p.drawLine(P(10.6, 6.5), P(19.1, 5))
+    elif name == "cut":
+        p.drawEllipse(P(7, 17), 2.8, 2.8)
+        p.drawEllipse(P(17, 17), 2.8, 2.8)
+        p.drawLine(P(9, 15), P(16.5, 5))
+        p.drawLine(P(15, 15), P(7.5, 5))
+    elif name == "magnet":
+        path = QPainterPath()
+        path.moveTo(P(6, 5))
+        path.lineTo(P(6, 12))
+        path.arcTo(QRectF(6, 6.5, 12, 12), 180, 180)
+        path.lineTo(P(18, 5))
+        p.drawPath(path)
+        p.drawLine(P(5, 8.5), P(9, 8.5))
+        p.drawLine(P(15, 8.5), P(19, 8.5))
+    elif name == "minus":
+        p.drawLine(P(6, 12), P(18, 12))
+    elif name == "layers":
+        poly([(12, 4.5), (20, 8.5), (12, 12.5), (4, 8.5)], close=True)
+        p.drawPolyline(QPolygonF([P(4, 12.5), P(12, 16.5), P(20, 12.5)]))
+        p.drawPolyline(QPolygonF([P(4, 16), P(12, 20), P(20, 16)]))
     elif name == "bell":
         path = QPainterPath()
         path.moveTo(P(6, 16.5))
