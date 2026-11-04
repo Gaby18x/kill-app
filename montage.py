@@ -1479,7 +1479,62 @@ class MTimeline(QWidget):
         self.setFocusPolicy(Qt.ClickFocus)
         self.setAcceptDrops(True)
         self.drop_at = None
+        self._last = None
+        self._as = QTimer(self)                  # Ansicht läuft mit, wenn man beim Ziehen an den Rand kommt
+        self._as.setInterval(16)
+        self._as.timeout.connect(self._autoscroll)
         self.relayout()
+
+    # ---- Ansicht verschieben (nur Ansicht, nichts am Projekt)
+    def _edge_speed(self, x):
+        edge = 60.0
+        lo, hi = self.LEFT + edge, self.width() - 8 - edge
+        if x < lo:
+            v = -(lo - x)
+        elif x > hi:
+            v = x - hi
+        else:
+            return 0.0
+        return max(-60.0, min(60.0, v * 0.35))          # Pixel pro Takt, je näher am Rand desto schneller
+
+    def _autoscroll(self):
+        if self._last is None or (not self.drag and self.drop_at is None) or (self.drag and self.drag[0] == "sbar"):
+            self._as.stop()
+            return
+        pos = self._last
+        v = self._edge_speed(pos.x())
+        if v == 0.0:
+            return
+        nx = max(0.0, self.x0 + v / self.pps)
+        if abs(nx - self.x0) < 1e-6:
+            return
+        self.x0 = nx
+        if self.drag:
+            class _Ev:
+                def __init__(s_, p_):
+                    s_.p_ = p_
+
+                def position(s_):
+                    return s_.p_
+            self.mouseMoveEvent(_Ev(pos))
+        else:
+            self.drop_at = (max(0.0, self.xt(pos.x())), self.drop_at[1])
+        self.update()
+
+    def scroll_total(self):
+        vis = (self.width() - self.LEFT - 8) / self.pps
+        return max(self.proj.length() + vis * 0.3, self.x0 + vis, vis), vis
+
+    def sbar_rect(self):
+        y = self.height() - self.ADD - 4
+        return QRectF(190, y + self.ADD / 2 - 6, max(40, self.width() - 198), 12)
+
+    def sbar_thumb(self):
+        r = self.sbar_rect()
+        total, vis = self.scroll_total()
+        w = max(36.0, r.width() * min(1.0, vis / total))
+        x = r.left() + (r.width() - w) * (self.x0 / max(1e-6, total - vis) if total > vis else 0.0)
+        return QRectF(x, r.top(), w, r.height())
 
     @staticmethod
     def _paths(md):
@@ -1498,6 +1553,9 @@ class MTimeline(QWidget):
     def dragMoveEvent(self, e):
         if self._paths(e.mimeData()):
             e.acceptProposedAction()
+            self._last = e.position()
+            if not self._as.isActive():
+                self._as.start()
             self.drop_at = (max(0.0, self.xt(e.position().x())), self.track_at(e.position().y()))
             self.update()
 
@@ -1605,6 +1663,16 @@ class MTimeline(QWidget):
             p.setPen(ink(200))
             p.setFont(app_font(8.5, True))
             p.drawText(rr.adjusted(24, 0, -4, 0), Qt.AlignVCenter, txt)
+        sb = self.sbar_rect()                                   # Scroll-Leiste (Ansicht verschieben)
+        total, vis = self.scroll_total()
+        if total > vis + 0.01:
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink(16))
+            p.drawRoundedRect(sb, sb.height() / 2, sb.height() / 2)
+            th = self.sbar_thumb()
+            act = bool(self.drag and self.drag[0] == "sbar")
+            p.setBrush(ink(120 if act else 70))
+            p.drawRoundedRect(th.adjusted(1, 2, -1, -2), (th.height() - 4) / 2, (th.height() - 4) / 2)
         self._lane_x = {}
         for tr, name, ic in names:
             r = self.track_rect(tr)
@@ -1876,6 +1944,17 @@ class MTimeline(QWidget):
             if xr.adjusted(-3, -3, 3, 3).contains(pos):
                 self.del_lane.emit(tr)
                 return
+        sb = self.sbar_rect()
+        if sb.adjusted(0, -6, 0, 6).contains(pos):            # Scroll-Leiste
+            th = self.sbar_thumb()
+            if not th.contains(pos):                          # neben den Griff geklickt: dorthin springen
+                total, vis = self.scroll_total()
+                k = (pos.x() - sb.left() - th.width() / 2) / max(1.0, sb.width() - th.width())
+                self.x0 = max(0.0, min(1.0, k)) * max(0.0, total - vis)
+                th = self.sbar_thumb()
+            self.drag = ("sbar", pos.x(), self.x0, self.scroll_total())
+            self.update()
+            return
         if pos.y() < self.RULER or pos.x() < self.LEFT:
             if pos.x() >= self.LEFT:
                 self.drag = ("seek",)
@@ -1884,7 +1963,7 @@ class MTimeline(QWidget):
         h = self.hit(pos)
         if h is None:
             # leere Fläche: Klick = Abspielposition, Ziehen = Rahmen über mehrere Clips
-            self.drag = ("band", pos)
+            self.drag = ("band", pos, self.xt(pos.x()))
             self.update()
             return
         kind, it, _ = h
@@ -1908,7 +1987,7 @@ class MTimeline(QWidget):
         self.sel = it
         self.selected.emit(it)
         self.begin.emit()
-        self.drag = (kind, it, pos.x(), it.start, it.src_in, it.src_out, it.track)
+        self.drag = (kind, it, self.xt(pos.x()), it.start, it.src_in, it.src_out, it.track)
         if kind in ("left", "right") and it.kind != "box":
             self.trim_begin.emit(it.path, it.src_in if kind == "left" else it.src_out)
         self.update()
@@ -1929,18 +2008,29 @@ class MTimeline(QWidget):
                 self.hover = hv
                 self.update()
             return
+        if self.drag[0] == "sbar":
+            _, px, x00, (total, vis) = self.drag
+            sb = self.sbar_rect()
+            th = self.sbar_thumb()
+            self.x0 = max(0.0, x00 + (pos.x() - px) / max(1.0, sb.width() - th.width()) * max(0.0, total - vis))
+            self.update()
+            return
+        if not isinstance(e, QWidget) and hasattr(e, "buttons"):
+            self._last = pos
+            if not self._as.isActive():
+                self._as.start()
         if self.drag[0] == "seek":
             self.seek.emit(max(0.0, self.xt(pos.x())))
             return
         if self.drag[0] == "band":
-            p0 = self.drag[1]
+            p0 = QPointF(self.tx(self.drag[2]), self.drag[1].y())      # Startpunkt wandert mit der Ansicht
             if (pos - p0).manhattanLength() > 6 or self.band is not None:
                 self.band = QRectF(p0, pos).normalized()
                 self.multi = [i for i in self.proj.items if self.item_rect(i).intersects(self.band)]
                 self.update()
             return
-        kind, it, x0, st0, in0, out0, tr0 = self.drag
-        dt = (pos.x() - x0) / self.pps
+        kind, it, t_press, st0, in0, out0, tr0 = self.drag
+        dt = self.xt(pos.x()) - t_press
         info = {"dur": 3600.0} if it.kind == "box" else media_info(it.path)
         if kind == "move" and len(self.multi) > 1 and it in self.multi:
             # mehrere ausgewählte Stücke zusammen verschieben (Einrasten ist dabei kurz aus)
@@ -2051,15 +2141,19 @@ class MTimeline(QWidget):
             self.drag = None
             self.update()
             return
-        if self.drag and self.drag[0] != "seek":
+        self._as.stop()
+        if self.drag and self.drag[0] not in ("seek", "sbar"):
             self.proj.pack()
             self.changed.emit()
         self.drag = None
         self.update()
 
     def wheelEvent(self, e):
-        d = e.angleDelta().y() or e.angleDelta().x()
-        if e.modifiers() & Qt.ShiftModifier:            # Shift + Mausrad: seitlich scrollen
+        ad = e.angleDelta()
+        d = ad.y() or ad.x()
+        if abs(ad.x()) > abs(ad.y()):                    # Touchpad seitlich wischen: Ansicht verschieben
+            self.x0 = max(0.0, self.x0 - ad.x() / 120 * 80 / self.pps)
+        elif e.modifiers() & Qt.ShiftModifier:          # Shift + Mausrad: seitlich scrollen
             self.x0 = max(0.0, self.x0 - d / 120 * 80 / self.pps)
         else:                                             # Mausrad: zoomen
             t = self.xt(e.position().x())
@@ -3026,8 +3120,13 @@ class MontagePage(QWidget):
         self.win.say("Montage geleert – Strg+Z holt sie zurück")
 
     def zoom(self, f):
-        self.tl.pps = max(2.0, min(400.0, self.tl.pps * f))
-        self.tl.update()
+        tl = self.tl
+        vis = (tl.width() - tl.LEFT - 8) / tl.pps
+        anchor = tl.ph if tl.x0 <= tl.ph <= tl.x0 + vis else tl.x0 + vis / 2   # um die Abspiel-Linie zoomen
+        ax = tl.tx(anchor)
+        tl.pps = max(2.0, min(400.0, tl.pps * f))
+        tl.x0 = max(0.0, anchor - (ax - tl.LEFT) / tl.pps)
+        tl.update()
 
     def on_changed(self, light=False):
         L = self.proj.length()
