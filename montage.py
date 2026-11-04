@@ -472,11 +472,23 @@ def build_graph(proj, audio_only=False):
         d = it.dur
         vl, al = f"v{k}", f"a{k}"
         if not audio_only:
+            vf_fade = ""
+            if it.fade_in > 0.01:
+                vf_fade += f",fade=t=in:st=0:d={min(it.fade_in, d):.3f}"
+            if it.fade_out > 0.01:
+                vf_fade += f",fade=t=out:st={max(0.0, d - it.fade_out):.3f}:d={min(it.fade_out, d):.3f}"
             f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{it.speed:.4f},fps={fps:.3f},scale={W}:{H}:force_original_aspect_ratio="
-                     f"decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,settb=AVTB[{vl}]")
+                     f"decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p{vf_fade},"
+                     f"settb=AVTB[{vl}]")
         if info["audio"]:
+            af_fade = ""
+            if it.fade_in > 0.01:
+                af_fade += f",afade=t=in:st=0:d={min(it.fade_in, d):.3f}"
+            if it.fade_out > 0.01:
+                af_fade += f",afade=t=out:st={max(0.0, d - it.fade_out):.3f}:d={min(it.fade_out, d):.3f}"
             f.append(f"[{i}:a]asetpts=PTS-STARTPTS,{_atempo(it.speed)},volume={it.vol:.3f},aresample=48000,"
-                     f"aformat=channel_layouts=stereo:sample_rates=48000,apad=whole_dur={d:.3f},atrim=0:{d:.3f}[{al}]")
+                     f"aformat=channel_layouts=stereo:sample_rates=48000,apad=whole_dur={d:.3f},atrim=0:{d:.3f}"
+                     f"{af_fade}[{al}]")
         else:
             f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{d:.3f}[{al}]")
         if vlab is None:
@@ -868,6 +880,13 @@ class MontagePlayer(threading.Thread):
             if fr is None:
                 return np.zeros((H, W, 3), np.uint8)
             fr = _fit(fr, W, H)
+            k = 1.0                                      # Ein-/Ausblenden (aus/zu Schwarz)
+            if it.fade_in > 0.01 and t - it.start < it.fade_in:
+                k = min(k, (t - it.start) / it.fade_in)
+            if it.fade_out > 0.01 and it.end - t < it.fade_out:
+                k = min(k, (it.end - t) / it.fade_out)
+            if k < 0.999:
+                fr = cv2.convertScaleAbs(fr, alpha=max(0.0, k))
             return fr
         if len(act) >= 2:
             a, b = act[0], act[1]
@@ -1060,6 +1079,8 @@ class MTimeline(QWidget):
     trimming = Signal(str, float)    # beim Kürzen: Datei + Zeit der Schnittkante (für die Vorschau)
     trim_begin = Signal(str, float)  # Kürzen beginnt: Bilder rund um die Kante vorladen
     add_lane = Signal(str)           # "video" / "audio"
+    del_lane = Signal(int)
+    dropped = Signal(list, float, object)     # Pfade, Zeit, Spur (oder None)
 
     RULER, VH, AH, GAP, LEFT, ADD = 30, 58, 42, 10, 96, 30
 
@@ -1070,13 +1091,49 @@ class MTimeline(QWidget):
         self.x0 = 0.0                # Scroll (Sekunden)
         self.ph = 0.0                # Abspielposition
         self.sel = None
+        self.lane_hover = None
+        self._lane_x = {}
         self.multi = []              # per Rahmen ausgewählte Stücke
         self.band = None             # Auswahl-Rahmen (QRectF) beim Ziehen
         self.drag = None
         self.hover = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
+        self.setAcceptDrops(True)
+        self.drop_at = None
         self.relayout()
+
+    @staticmethod
+    def _paths(md):
+        if md.hasUrls():
+            ps = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+        elif md.hasText() and md.text().startswith("acemedia:"):
+            ps = [md.text()[9:]]
+        else:
+            ps = []
+        return [p for p in ps if p.lower().endswith(VIDEO_EXT + AUDIO_EXT)]
+
+    def dragEnterEvent(self, e):
+        if self._paths(e.mimeData()):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if self._paths(e.mimeData()):
+            e.acceptProposedAction()
+            self.drop_at = (max(0.0, self.xt(e.position().x())), self.track_at(e.position().y()))
+            self.update()
+
+    def dragLeaveEvent(self, e):
+        self.drop_at = None
+        self.update()
+
+    def dropEvent(self, e):
+        ps = self._paths(e.mimeData())
+        self.drop_at = None
+        if ps:
+            e.acceptProposedAction()
+            self.dropped.emit(ps, max(0.0, self.xt(e.position().x())), self.track_at(e.position().y()))
+        self.update()
 
     def has_audio(self, it):
         if it.track > 0:
@@ -1170,8 +1227,12 @@ class MTimeline(QWidget):
             p.setPen(ink(200))
             p.setFont(app_font(8.5, True))
             p.drawText(rr.adjusted(24, 0, -4, 0), Qt.AlignVCenter, txt)
+        self._lane_x = {}
         for tr, name, ic in names:
             r = self.track_rect(tr)
+            if (tr < 0 and True) or (tr > 0 and self.proj.alanes > 1):
+                xr = QRectF(self.LEFT - 26, r.top() + 4, 16, 16)
+                self._lane_x[tr] = xr
             p.setPen(Qt.NoPen)
             p.setBrush(T.card_fill(130))
             p.drawRoundedRect(QRectF(8, r.top(), self.LEFT - 16, r.height()), 10, 10)
@@ -1182,6 +1243,11 @@ class MTimeline(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(ink(10))
             p.drawRoundedRect(r, 10, 10)
+            if tr in self._lane_x:                                 # Spur löschen
+                xr = self._lane_x[tr]
+                p.setBrush(QColor(230, 60, 75, 200) if self.lane_hover == tr else ink(30))
+                p.drawEllipse(xr)
+                paint_icon(p, "close", xr.adjusted(3, 3, -3, -3), QColor(255, 255, 255), 1.5)
         p.save()
         p.setClipRect(QRectF(self.LEFT, 0, W - self.LEFT, self.height()))
         # Lineal
@@ -1196,7 +1262,7 @@ class MTimeline(QWidget):
             p.drawText(QRectF(x + 3, 2, 60, self.RULER - 8), Qt.AlignLeft | Qt.AlignVCenter, fmt_s(t))
             t += step
         # Stücke
-        for it in sorted(self.proj.items, key=lambda x: (x.track, x.start)):
+        for it in sorted(self.proj.items, key=lambda x: (x is self.sel or x in self.multi, x.track, x.start)):
             r = self.item_rect(it)
             if r.right() < self.LEFT or r.left() > W:
                 continue
@@ -1334,6 +1400,12 @@ class MTimeline(QWidget):
                 p.setPen(QPen(QColor(255, 255, 255, 200), 1.5))
                 p.drawLine(QPointF(rr.center().x() - 4, rr.center().y()), QPointF(rr.center().x() + 4, rr.center().y()))
                 p.drawLine(QPointF(rr.center().x(), rr.center().y() - 4), QPointF(rr.center().x(), rr.center().y() + 4))
+        if self.drop_at is not None:                           # Ablage-Stelle beim Hineinziehen
+            x = self.tx(self.drop_at[0])
+            tr_ = self.drop_at[1]
+            rr = self.track_rect(tr_) if tr_ is not None else QRectF(self.LEFT, self.RULER, 0, self.height() - self.RULER)
+            p.setPen(QPen(T.pill()[0], 3))
+            p.drawLine(QPointF(x, rr.top()), QPointF(x, rr.bottom()))
         if self.band is not None:                              # Auswahl-Rahmen
             p.setPen(QPen(QColor(255, 255, 255, 220), 1.2, Qt.DashLine))
             p.setBrush(QColor(255, 255, 255, 28))
@@ -1354,6 +1426,16 @@ class MTimeline(QWidget):
 
     # Maus
     def hit(self, pos):
+        # ausgewähltes Stück zuerst prüfen (liegt oben, auch wenn es sich mit einem anderen überschneidet)
+        sel = self.sel if isinstance(self.sel, MItem) else None
+        if sel is not None:
+            r = self.item_rect(sel)
+            if r.adjusted(-6, 0, 6, 0).contains(pos):
+                edge = min(14.0, r.width() / 3)
+                if pos.x() - r.left() < edge:
+                    return ("left", sel, None)
+                if r.right() - pos.x() < edge:
+                    return ("right", sel, None)
         for it in self.proj.items:
             ms = self.mute_rect(it)
             if ms is not None and self.has_audio(it) and ms.adjusted(-2, -2, 2, 2).contains(pos):
@@ -1396,6 +1478,10 @@ class MTimeline(QWidget):
             if rr.contains(pos):
                 self.add_lane.emit(kind)
                 return
+        for tr, xr in self._lane_x.items():
+            if xr.adjusted(-3, -3, 3, 3).contains(pos):
+                self.del_lane.emit(tr)
+                return
         if pos.y() < self.RULER or pos.x() < self.LEFT:
             if pos.x() >= self.LEFT:
                 self.drag = ("seek",)
@@ -1436,6 +1522,10 @@ class MTimeline(QWidget):
     def mouseMoveEvent(self, e):
         pos = e.position()
         if not self.drag:
+            lh = next((tr for tr, xr in self._lane_x.items() if xr.adjusted(-3, -3, 3, 3).contains(pos)), None)
+            if lh != self.lane_hover:
+                self.lane_hover = lh
+                self.update()
             h = self.hit(pos)
             self.setCursor(Qt.SizeHorCursor if h and h[0] in ("left", "right") else
                            Qt.PointingHandCursor if h or any(r.contains(pos) for r in self.add_rects()) else
@@ -1509,7 +1599,27 @@ class MTimeline(QWidget):
         self.changed.emit()
         self.update()
 
+    def resolve_overlap(self, it):
+        """Freier Modus: nicht auf einen anderen Clip derselben Spur legen - an die nächste freie Stelle rücken."""
+        if it.track == 0 and self.proj.magnet:
+            return
+        others = sorted([o for o in self.proj.items if o is not it and o.track == it.track], key=lambda o: o.start)
+        for _ in range(len(others) + 1):
+            hit_ = [o for o in others if o.start < it.end - 0.01 and it.start < o.end - 0.01]
+            if not hit_:
+                return
+            o = hit_[0]
+            if it.start + it.dur / 2 < o.start + o.dur / 2:
+                it.start = max(0.0, o.start - it.dur)
+                if any(x.start < it.end - 0.01 and it.start < x.end - 0.01 for x in others):
+                    it.start = o.end
+            else:
+                it.start = o.end
+
     def mouseReleaseEvent(self, e):
+        if self.drag and self.drag[0] in ("move", "left", "right") and isinstance(self.drag[1], MItem):
+            for g in (self.multi if self.drag[1] in self.multi else [self.drag[1]]):
+                self.resolve_overlap(g)
         if hasattr(self, "_grp0"):
             del self._grp0
         if self.drag and self.drag[0] == "band":
@@ -1588,7 +1698,7 @@ class MediaRow(QWidget):
         self.hov = 0.0
         self.setFixedHeight(58)
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("Klicken = zur Zeitleiste hinzufügen")
+        self.setToolTip("Klicken = hinten anfügen · Ziehen = an eine Stelle in der Zeitleiste legen")
 
     def enterEvent(self, e):
         tween(self, "hov", 1.0, 120)
@@ -1597,7 +1707,29 @@ class MediaRow(QWidget):
         tween(self, "hov", 0.0, 160)
 
     def mousePressEvent(self, e):
-        self.add.emit()
+        self._p0 = e.position()
+
+    def mouseMoveEvent(self, e):
+        p0 = getattr(self, "_p0", None)
+        if p0 is None or (e.position() - p0).manhattanLength() < 8:
+            return
+        self._p0 = None
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QDrag
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(self.path)])
+        md.setText("acemedia:" + self.path)
+        dr = QDrag(self)
+        dr.setMimeData(md)
+        pm = thumb_fast(self.path) if not self.is_audio else None
+        if pm is not None:
+            dr.setPixmap(pm.scaled(96, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        dr.exec(Qt.CopyAction)
+
+    def mouseReleaseEvent(self, e):
+        if getattr(self, "_p0", None) is not None:
+            self._p0 = None
+            self.add.emit()                       # einfacher Klick: hinten anfügen
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -1743,6 +1875,10 @@ class MontagePage(QWidget):
         right.setFixedWidth(340)
         self.insp_outer = QVBoxLayout(right)
         self.insp_outer.setContentsMargins(18, 18, 18, 14)
+        self.insp_outer.setSpacing(12)
+        self.insp_tabs = Segmented(["Clip", "Übergang"], height=34)
+        self.insp_tabs.changed.connect(self._tab_changed)
+        self.insp_outer.addWidget(self.insp_tabs)
         self.insp_box = None
         top.addWidget(right)
 
@@ -1784,6 +1920,8 @@ class MontagePage(QWidget):
         self.tl.trimming.connect(lambda path, t: self.player.show_src(path, t))
         self.tl.trim_begin.connect(lambda path, t: self.player.prefetch(path, t))
         self.tl.add_lane.connect(self.add_lane)
+        self.tl.del_lane.connect(self.del_lane)
+        self.tl.dropped.connect(self.drop_files)
         bv.addWidget(self.tl)
         root.addWidget(bottom)
         self.refresh_media()
@@ -1886,7 +2024,33 @@ class MontagePage(QWidget):
             elif it.layout():
                 self._clear(it.layout())
 
+    def _tab_changed(self, name):
+        sel = self.tl.sel
+        if name == "Übergang":
+            if isinstance(sel, MItem) and sel.track == 0:
+                vs = self.proj.videos()
+                if sel in vs and vs.index(sel) < len(vs) - 1:
+                    self.tl.sel = ("trans", sel)
+                    self.tl.update()
+                    self.show_inspector(self.tl.sel)
+                    return
+            if isinstance(sel, tuple) and sel[0] == "trans":
+                self.show_inspector(sel)
+                return
+            self.show_inspector(("all_trans", None))
+        else:
+            if isinstance(sel, tuple) and sel[0] == "trans":
+                self.tl.sel = sel[1]
+                self.tl.update()
+                self.show_inspector(sel[1])
+                return
+            self.show_inspector(sel if not (isinstance(sel, tuple) and sel[0] == "all_trans") else None)
+
     def show_inspector(self, sel):
+        self.stop_trans_preview()
+        want = "Übergang" if isinstance(sel, tuple) and sel[0] in ("trans", "all_trans") else "Clip"
+        if self.insp_tabs.current() != want:
+            self.insp_tabs.set_current(want)
         # jedes Mal ein frischer Bereich: das alte wird sofort ausgeblendet (keine Überlagerung)
         if self.insp_box is not None:
             self.insp_box.hide()
@@ -1942,9 +2106,30 @@ class MontagePage(QWidget):
             L.addWidget(b)
             L.addStretch(1)
             return
+        if isinstance(sel, tuple) and sel[0] == "all_trans":
+            vs = self.proj.videos()
+            title("Übergänge", "Wähle einen Clip oder eine Raute – oder setze hier einen Übergang für alle Clips. "
+                               "Maus auf einen Übergang halten = Vorschau.")
+            if len(vs) < 2:
+                L.addWidget(lbl("Füge mindestens zwei Clips hinzu.", 9, False, "muted", True))
+                L.addStretch(1)
+                return
+            from PySide6.QtWidgets import QGridLayout
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(4)
+            grid.setVerticalSpacing(2)
+            for k, (nm, key) in enumerate(TRANSITIONS):
+                b = PopButton(nm, None, "glass", 30)
+                b.setFont(app_font(9, True))
+                b.clicked.connect(lambda _=False, key=key: self.trans_all(key, vs[0].tdur or 0.5))
+                self._hover_preview(b, vs[0], key)
+                grid.addWidget(b, k // 2, k % 2)
+            L.addLayout(grid)
+            L.addStretch(1)
+            return
         if isinstance(sel, tuple):
             a = sel[1]
-            title("Übergang", "Wie der Clip in den nächsten übergeht.")
+            title("Übergang", "Wie der Clip in den nächsten übergeht. Maus auf einen Übergang halten = Vorschau.")
             from PySide6.QtWidgets import QGridLayout
             grid = QGridLayout()
             grid.setHorizontalSpacing(4)
@@ -1953,6 +2138,7 @@ class MontagePage(QWidget):
                 b = PopButton(name, None, "accent" if a.trans == key else "glass", 30)
                 b.setFont(app_font(9, True))
                 b.clicked.connect(lambda _=False, key=key: self.set_trans(a, key))
+                self._hover_preview(b, a, key)
                 grid.addWidget(b, k // 2, k % 2)
             L.addLayout(grid)
             sr = SliderRow("Dauer", 0.2, 1.5, 13, a.tdur, lambda v: f"{v:.1f} s")
@@ -2014,16 +2200,23 @@ class MontagePage(QWidget):
             sr = SliderRow("Clip-Ton", 0, 2, 40, it.volume, lambda v: f"{int(round(v * 100))} %")
             sr.s.valueChanged.connect(lambda _: (setattr(it, "volume", round(sr.value(), 2)), self.on_changed(light=True)))
             L.addWidget(sr)
+            fi = SliderRow("Einblenden (aus Schwarz)", 0, 3, 30, it.fade_in, lambda v: f"{v:.1f} s")
+            fi.s.valueChanged.connect(lambda _: (setattr(it, "fade_in", round(fi.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(fi)
+            fo = SliderRow("Ausblenden (zu Schwarz)", 0, 3, 30, it.fade_out, lambda v: f"{v:.1f} s")
+            fo.s.valueChanged.connect(lambda _: (setattr(it, "fade_out", round(fo.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(fo)
             L.addWidget(lbl(f"Ausschnitt: {fmt(it.src_in)} – {fmt(it.src_out)}  ·  Ränder unten ziehen zum Kürzen",
                             8.5, False, "muted", True))
             if it.track < 0:
                 L.addWidget(lbl("Liegt auf einer oberen Video-Spur und überdeckt dort das Haupt-Video.", 8.5,
                                 False, "muted", True))
-            b = PopButton("Übergang zum nächsten Clip …", "layers", "glass", 34)
-            b.setVisible(it.track == 0)
-            b.clicked.connect(lambda: (setattr(self.tl, "sel", ("trans", it)), self.show_inspector(("trans", it)),
-                                       self.tl.update()))
-            L.addWidget(b)
+            vs_ = self.proj.videos()
+            if it.track == 0 and it in vs_ and vs_.index(it) < len(vs_) - 1:
+                b = PopButton("Übergang zum nächsten Clip …", "layers", "glass", 34)
+                b.clicked.connect(lambda: (setattr(self.tl, "sel", ("trans", it)), self.show_inspector(("trans", it)),
+                                           self.tl.update()))
+                L.addWidget(b)
         else:
             title("Musik / Sound", name)
             b = PopButton("Ton an" if it.muted else "Stumm schalten", "speaker" if it.muted else "mute", "glass", 32)
@@ -2126,6 +2319,45 @@ class MontagePage(QWidget):
         self.show_inspector(("multi", self.tl.multi) if self.tl.multi else None)
         self.tl.update()
 
+    # ---- Übergangs-Vorschau beim Darüberfahren
+    def _hover_preview(self, btn, a, key):
+        ent, lev = btn.enterEvent, btn.leaveEvent
+        btn.enterEvent = lambda e: (ent(e), self.start_trans_preview(a, key))
+        btn.leaveEvent = lambda e: (lev(e), self.stop_trans_preview())
+
+    def start_trans_preview(self, a, key):
+        vs = self.proj.videos()
+        if a not in vs or vs.index(a) >= len(vs) - 1 or self.playing:
+            return
+        b = vs[vs.index(a) + 1]
+        W, H = self.player.size
+        fa = self.player.src.get("pv_a", a.path, max(a.src_in, a.src_out - 0.05 * a.speed))
+        fb = self.player.src.get("pv_b", b.path, b.src_in + 0.05)
+        if fa is None or fb is None:
+            return
+        self._tp = (_fit(fa, W, H), _fit(fb, W, H), key if key != "none" else "none", max(0.5, a.tdur), time.perf_counter())
+        if not hasattr(self, "_tp_timer"):
+            self._tp_timer = QTimer(self)
+            self._tp_timer.setInterval(16)
+            self._tp_timer.timeout.connect(self._tp_tick)
+        self._tp_timer.start()
+
+    def _tp_tick(self):
+        if not getattr(self, "_tp", None):
+            return
+        fa, fb, key, d, t0 = self._tp
+        cyc = (time.perf_counter() - t0) % (d + 0.6)          # Übergang abspielen, kurz halten, wiederholen
+        p = min(1.0, max(0.0, (cyc - 0.15) / d))
+        fr = fb if key == "none" and p > 0.5 else (fa if key == "none" else blend(fa, fb, p, key))
+        self.preview.set_frame(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
+
+    def stop_trans_preview(self):
+        if getattr(self, "_tp", None):
+            self._tp = None
+            if hasattr(self, "_tp_timer"):
+                self._tp_timer.stop()
+            self.player.seek(self.tl.ph)                         # wieder das normale Bild
+
     def set_trans(self, a, key):
         self.snapshot()
         a.trans = key
@@ -2194,6 +2426,88 @@ class MontagePage(QWidget):
                 return
             self.proj.alanes += 1
         self.tl.relayout()
+        self.on_changed()
+
+    def del_lane(self, tr):
+        """Spur löschen (mit allem, was darauf liegt). Haupt-Video und letzte Ton-Spur bleiben."""
+        if tr == 0 or (tr > 0 and self.proj.alanes <= 1):
+            return
+        self.snapshot()
+        n = sum(1 for i in self.proj.items if i.track == tr)
+        self.proj.items = [i for i in self.proj.items if i.track != tr]
+        for i in self.proj.items:
+            if tr < 0 and i.track < tr:
+                i.track += 1
+            elif tr > 0 and i.track > tr:
+                i.track -= 1
+        if tr < 0:
+            self.proj.vlanes -= 1
+        else:
+            self.proj.alanes -= 1
+        self.tl.sel = None
+        self.tl.multi = []
+        self.tl.relayout()
+        self.show_inspector(None)
+        self.on_changed()
+        self.win.say("Spur gelöscht" + (f" ({n} Stücke)" if n else "") + " – Strg+Z holt sie zurück")
+
+    def import_paths(self, paths):
+        """Dateien (z. B. aus dem Explorer) in die Medien aufnehmen."""
+        ok = [p for p in paths if p.lower().endswith(VIDEO_EXT + AUDIO_EXT)]
+        if not ok:
+            self.win.say("Keine Video- oder Tondatei", RED)
+            return
+        for p in ok:
+            if p not in self.media:
+                self.media.append(p)
+        self.win.st["montage_media"] = self.media
+        self.win.save_settings()
+        self._media_key = None
+        if all(p.lower().endswith(AUDIO_EXT) for p in ok):
+            self.media_seg.set_current("Musik & Sounds", True)
+        elif all(p.lower().endswith(VIDEO_EXT) for p in ok):
+            self.media_seg.set_current("Clips", True)
+        self.refresh_media()
+        self.win.say(f"{len(ok)} {'Datei' if len(ok) == 1 else 'Dateien'} hinzugefügt")
+
+    def drop_files(self, paths, t, lane):
+        """Dateien an eine Stelle der Zeitleiste ziehen."""
+        self.snapshot()
+        new = [p for p in paths if p not in self.media and not p.startswith(self.win.export_dir() or "\0")]
+        if new:
+            self.media += new
+            self.win.st["montage_media"] = self.media
+            self._media_key = None
+        added = None
+        for p in paths:
+            audio = p.lower().endswith(AUDIO_EXT)
+            if audio:
+                tr = lane if (lane is not None and lane > 0) else 1
+                it = MItem(p, tr, start=t)
+            else:
+                tr = lane if (lane is not None and lane <= 0) else 0
+                it = MItem(p, tr, start=t)
+                if tr == 0 and self.proj.magnet:
+                    # an der Stelle einfügen: Reihenfolge nach der Ablege-Position
+                    vs = self.proj.videos()
+                    idx = sum(1 for v in vs if v.start + v.dur / 2 < t)
+                    for k, v in enumerate(vs):
+                        v.start = k if k < idx else k + 1
+                    it.start = idx + 0.5
+            if it.dur < 0.2:
+                continue
+            self.proj.items.append(it)
+            if not (tr == 0 and self.proj.magnet):
+                self.tl.resolve_overlap(it)
+            self.proj.pack()
+            t = it.end
+            added = it
+        if added is not None:
+            self.tl.sel = added
+            self.show_inspector(added)
+            if self.proj.length() * self.tl.pps > self.tl.width() - 120:
+                self.tl.fit_all()
+        self.refresh_media()
         self.on_changed()
 
     def remove_empty_lanes(self):
@@ -2376,6 +2690,8 @@ class MontagePage(QWidget):
         if f is None:
             return
         t, fr = f
+        if getattr(self, "_tp", None):                     # Übergangs-Vorschau läuft gerade
+            return
         if fr is not None:
             self.preview.set_frame(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
         if self.playing:

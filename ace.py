@@ -2778,11 +2778,18 @@ class Window(QMainWindow):
     def dragEnterEvent(self, e):
         if self.overlay.isVisible():
             return
+        if self.stack.cur == 4:                   # Montage: Dateien kommen in die Medien / Zeitleiste
+            if e.mimeData().hasUrls() or e.mimeData().hasText():
+                e.acceptProposedAction()
+            return
         if self._dropped_video(e):
             e.acceptProposedAction()
             self.drop_hint.show_hint()
 
     def dragMoveEvent(self, e):
+        if self.stack.cur == 4:
+            e.acceptProposedAction()
+            return
         if self._dropped_video(e):
             e.acceptProposedAction()
 
@@ -2791,6 +2798,10 @@ class Window(QMainWindow):
 
     def dropEvent(self, e):
         self.drop_hint.hide_hint()
+        if self.stack.cur == 4:
+            self.page_montage.import_paths([u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()])
+            e.acceptProposedAction()
+            return
         p = self._dropped_video(e)
         if not p:
             self.say("Das ist keine Videodatei", RED)
