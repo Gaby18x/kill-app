@@ -592,6 +592,20 @@ def build_graph(proj, audio_only=False):
     return inputs, ";".join(f), "vout", "aout", W, H, fps, length
 
 
+def graph_args(graph, gfile):
+    """Filtergraph an FFmpeg übergeben. Kurz: direkt. Sehr lang (viele Clips): als Datei – je nach FFmpeg-Version
+    mit der neuen (-/filter_complex) oder alten Schreibweise (-filter_complex_script)."""
+    if len(graph) < 24000:
+        return ["-filter_complex", graph]
+    ff = core.find_ffmpeg()
+    try:
+        v = subprocess.run([ff, "-hide_banner", "-version"], capture_output=True, text=True, creationflags=core.NOWIN).stdout
+        major = int(re.search(r"version\D*(\d+)", v).group(1))
+    except Exception:
+        major = 7
+    return ["-/filter_complex", gfile] if major >= 7 else ["-filter_complex_script", gfile]
+
+
 def export_montage(proj, dst, progress=None, cancel=None):
     ff = core.find_ffmpeg()
     inputs, graph, vl, al, W, H, fps, length = build_graph(proj)
@@ -599,7 +613,7 @@ def export_montage(proj, dst, progress=None, cancel=None):
     with open(gfile, "w", encoding="utf-8") as fh:
         fh.write(graph)
     base = [ff, "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"] + inputs + \
-           ["-filter_complex_script", gfile, "-map", f"[{vl}]", "-map", f"[{al}]"]
+           graph_args(graph, gfile) + ["-map", f"[{vl}]", "-map", f"[{al}]"]
     audio = ["-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart"]
     attempts = []
     hw = core._hw_encoder(ff, "h264")
@@ -635,37 +649,54 @@ def export_montage(proj, dst, progress=None, cancel=None):
 
 # ------------------------------------------------------------------ Vorschau (Bilder berechnen)
 class FrameSource:
-    """Liefert Bilder aus den Quellvideos; liest beim Abspielen fortlaufend (schnell), springt nur wenn nötig."""
+    """Liefert Bilder aus den Quellvideos. Jeder Clip hat seinen eigenen Leser (auch wenn zwei Clips aus derselben
+    Datei stammen); der nächste Clip wird kurz vor dem Übergang im Hintergrund vorbereitet -> kein Ruckeln."""
 
     def __init__(self):
         self.caps = {}
+        self.glock = threading.Lock()
 
-    def get(self, path, t):
-        c = self.caps.get(path)
-        if c is None:
-            cap = cv2.VideoCapture(path)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
-            c = self.caps[path] = [cap, fps, -1.0, None]
-        cap, fps, last, lastf = c
-        if lastf is not None and abs(t - last) < 0.5 / fps:
-            return lastf
-        if last < t < last + 0.6:
-            n = int(round((t - last) * fps)) - 1
-            for _ in range(max(0, n)):
-                cap.grab()
-        else:
-            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
-        ok, fr = cap.read()
-        if not ok:
-            return lastf
-        c[2] = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 - 1.0 / fps
-        c[3] = fr
-        return fr
+    def _entry(self, key, path):
+        with self.glock:
+            c = self.caps.get(key)
+            if c is None or c["path"] != path:
+                cap = cv2.VideoCapture(path)
+                c = self.caps[key] = {"cap": cap, "fps": cap.get(cv2.CAP_PROP_FPS) or 60.0, "last": -1.0,
+                                      "lastf": None, "lock": threading.Lock(), "path": path}
+            return c
+
+    def get(self, key, path, t):
+        c = self._entry(key, path)
+        with c["lock"]:
+            cap, fps, last, lastf = c["cap"], c["fps"], c["last"], c["lastf"]
+            if lastf is not None and abs(t - last) < 0.5 / fps:
+                return lastf
+            if last < t < last + 0.6:
+                n = int(round((t - last) * fps)) - 1
+                for _ in range(max(0, n)):
+                    cap.grab()
+            else:
+                cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+            ok, fr = cap.read()
+            if not ok:
+                return lastf
+            c["last"] = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 - 1.0 / fps
+            c["lastf"] = fr
+            return fr
+
+    def warm(self, key, path, t):
+        """Im Hintergrund schon an die Stelle springen, an der der Clip gleich beginnt."""
+        c = self._entry(key, path)
+        if c.get("warm") == round(t, 2):
+            return
+        c["warm"] = round(t, 2)
+        threading.Thread(target=lambda: self.get(key, path, t), daemon=True).start()
 
     def close(self):
-        for c in self.caps.values():
-            c[0].release()
-        self.caps = {}
+        with self.glock:
+            for c in self.caps.values():
+                c["cap"].release()
+            self.caps = {}
 
 
 def _fit(fr, W, H):
@@ -824,7 +855,7 @@ class MontagePlayer(threading.Thread):
         top = [o for o in sorted(proj.overlays(), key=lambda x: x.track) if o.start - 1e-6 <= t < o.end]
         if top:                                      # weitere Video-Spur deckt alles darunter ab
             o = top[0]
-            fr = self.src.get(o.path, o.src_in + (t - o.start) * o.speed)
+            fr = self.src.get(o.id, o.path, o.src_in + (t - o.start) * o.speed)
             if fr is not None:
                 return _fit(fr, W, H)
         vs = proj.videos()
@@ -833,7 +864,7 @@ class MontagePlayer(threading.Thread):
             return np.zeros((H, W, 3), np.uint8)
 
         def img(it):
-            fr = self.src.get(it.path, it.src_in + (t - it.start) * it.speed)
+            fr = self.src.get(it.id, it.path, it.src_in + (t - it.start) * it.speed)
             if fr is None:
                 return np.zeros((H, W, 3), np.uint8)
             fr = _fit(fr, W, H)
@@ -855,7 +886,7 @@ class MontagePlayer(threading.Thread):
                 playing = self.playing
             if wsrc is not None:
                 try:
-                    fr = self.src.get(wsrc[0], wsrc[1])
+                    fr = self.src.get("trim:" + wsrc[0], wsrc[0], wsrc[1])
                     if fr is not None:
                         with self.lock:
                             self.latest = (None, _fit(fr, *self.size))
@@ -882,13 +913,17 @@ class MontagePlayer(threading.Thread):
                         self.latest = (L, None)
                     continue
                 self.t = t
+                tick = time.perf_counter()
+                for it in self.page.proj.videos() + self.page.proj.overlays():     # nächster Clip vorbereiten
+                    if t < it.start < t + 2.0:
+                        self.src.warm(it.id, it.path, it.src_in)
                 try:
                     fr = self.frame_at(t)
                 except Exception:
                     fr = None
                 with self.lock:
                     self.latest = (t, fr)
-                time.sleep(max(0.0, 1 / 60 - 0.002))
+                time.sleep(max(0.0, 1 / 60 - (time.perf_counter() - tick)))   # gleichmäßig 60 Bilder/s
             elif want is None:
                 self.ev.wait(0.05)
                 self.ev.clear()
@@ -1900,11 +1935,7 @@ class MontagePage(QWidget):
             L.addWidget(b)
             vids = [i for i in items if i.track <= 0]
             if vids:
-                L.addWidget(lbl("Geschwindigkeit", 9, True, "muted"))
-                s = Segmented(["0.5×", "1×", "1.5×", "2×"], height=34)
-                s.set_current(f"{vids[0].speed:g}×")
-                s.changed.connect(lambda v: self.speed_items(vids, float(v.replace("×", ""))))
-                L.addWidget(s)
+                L.addWidget(self.speed_slider(vids, "Geschwindigkeit (alle ausgewählten)"))
             L.addSpacing(6)
             b = PopButton(f"{len(items)} löschen", "trash", "danger", 34)
             b.clicked.connect(self.delete_sel)
@@ -1973,11 +2004,7 @@ class MontagePage(QWidget):
             return
         if it.track <= 0:
             title("Clip", name)
-            L.addWidget(lbl("Geschwindigkeit", 9, True, "muted"))
-            s = Segmented(["0.5×", "1×", "1.5×", "2×"], height=34)
-            s.set_current(f"{it.speed:g}×")
-            s.changed.connect(lambda v: self.set_speed(it, float(v.replace("×", ""))))
-            L.addWidget(s)
+            L.addWidget(self.speed_slider([it], "Geschwindigkeit"))
             if self.tl.has_audio(it):
                 b = PopButton("Ton an" if it.muted else "Stumm schalten", "speaker" if it.muted else "mute", "glass", 32)
                 b.clicked.connect(lambda: self.mute_items([it], not it.muted))
@@ -2053,6 +2080,38 @@ class MontagePage(QWidget):
         self.show_inspector(self.tl.sel if self.tl.sel is not None else (("multi", items) if len(items) > 1 else None))
         self.on_changed()
         self.win.say("Stumm geschaltet" if on else "Ton wieder an")
+
+    def speed_slider(self, items, title):
+        """Stufenlos 0,1× bis 3,0× in 0,1er-Schritten (gilt für alle übergebenen Clips)."""
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        sr = SliderRow(title, 0.1, 3.0, 29, items[0].speed, lambda x: f"{round(x, 1):.1f}×")
+        v.addWidget(sr)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        for val in (0.5, 1.0, 1.5, 2.0):
+            b = PopButton(f"{val:g}×", None, "glass", 28)
+            b.setFont(app_font(8.5, True))
+            b.clicked.connect(lambda _=False, val=val: sr.s._set(val))
+            row.addWidget(b, 1)
+        v.addLayout(row)
+        state = {"snap": False}
+
+        def changed(_):
+            sp = round(sr.value(), 1)
+            if all(abs(i.speed - sp) < 1e-6 for i in items):
+                return
+            if not state["snap"]:
+                self.snapshot()
+                state["snap"] = True
+            for i in items:
+                i.speed = sp
+            self.proj.pack()
+            self.on_changed(light=True)
+        sr.s.valueChanged.connect(changed)
+        return box
 
     def speed_items(self, items, sp):
         self.snapshot()
@@ -2248,7 +2307,7 @@ class MontagePage(QWidget):
                     fh.write(graph)
                 ff = core.find_ffmpeg()
                 r = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error"] + inputs +
-                                   ["-filter_complex_script", gf, "-map", f"[{al}]", "-f", "s16le", "-ac", "2",
+                                   graph_args(graph, gf) + ["-map", f"[{al}]", "-f", "s16le", "-ac", "2",
                                     "-ar", str(RATE), "-"],
                                    capture_output=True, creationflags=core.NOWIN | getattr(
                                        subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0), timeout=600)
