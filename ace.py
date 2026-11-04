@@ -4900,7 +4900,7 @@ class Window(QMainWindow):
         path, start, end = self.path, c.start, c.end
 
         def work():
-            cap = cv2.VideoCapture(path)
+            cap = core.SafeCap(path)
             if not cap.isOpened():
                 return
             fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
@@ -5638,7 +5638,7 @@ class Window(QMainWindow):
             info = self.lib_cache.get(key)
             if info is None:
                 thumb, dur = None, 0.0
-                cap = cv2.VideoCapture(p)
+                cap = core.SafeCap(p)
                 if cap.isOpened():
                     fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
                     n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0

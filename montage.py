@@ -210,7 +210,7 @@ def media_info(path):
         info["vdur"] = info["dur"]
         if info["video"] and info["fps"] > 1:
             # Bild kann kürzer sein als der Ton (z. B. Aufnahmen mit längerem Ton): echte Bild-Länge merken
-            cap = cv2.VideoCapture(path)
+            cap = core.SafeCap(path)
             n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
             fps = cap.get(cv2.CAP_PROP_FPS) or info["fps"]
             cap.release()
@@ -239,7 +239,7 @@ def _worker():
         try:
             media_info(path)
             if kind == "thumb":
-                cap = cv2.VideoCapture(path)
+                cap = core.SafeCap(path)
                 if cap.isOpened():
                     cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, media_info(path)["dur"] / 2) * 1000)
                     ok, fr = cap.read()
@@ -305,7 +305,7 @@ def thumb(path, t=None):
     if key in _THUMB:
         return _THUMB[key]
     pm = None
-    cap = cv2.VideoCapture(path)
+    cap = core.SafeCap(path)
     if cap.isOpened():
         if t is None:
             t = media_info(path)["dur"] / 2
@@ -715,7 +715,7 @@ class FrameSource:
         with self.glock:
             c = self.caps.get(key)
             if c is None or c["path"] != path:
-                cap = cv2.VideoCapture(path)
+                cap = core.SafeCap(path)
                 c = self.caps[key] = {"cap": cap, "fps": cap.get(cv2.CAP_PROP_FPS) or 60.0, "last": -1.0,
                                       "lastf": None, "lock": threading.Lock(), "path": path}
             return c
@@ -1046,7 +1046,7 @@ class MontagePlayer(threading.Thread):
         W, H = self.size
 
         def work():
-            cap = cv2.VideoCapture(path)
+            cap = core.SafeCap(path)
             fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
             t0 = max(0.0, center - span)
             cap.set(cv2.CAP_PROP_POS_MSEC, t0 * 1000)

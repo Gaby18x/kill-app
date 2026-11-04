@@ -235,6 +235,155 @@ def group_hits(hits, gap):
     return kills
 
 
+class SafeCap:
+    """Wie cv2.VideoCapture, liest aber über FFmpeg weiter, wenn OpenCV das Video nicht dekodieren kann
+    (z. B. AV1-Aufnahmen neuerer Grafikkarten, manche HEVC-/10-Bit-Dateien)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.cap = cv2.VideoCapture(path)
+        self.pos = 0
+        self.ff = False
+        self.meta = {}
+        self.proc = None
+        self.proc_pos = -1
+        ok = self.cap.isOpened() and (self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) > 0
+        if ok:
+            ok, fr = self.cap.read()                 # kann OpenCV wirklich Bilder liefern?
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        if not ok:
+            self.ff = True
+            self._probe()
+
+    def _probe(self):
+        ff = find_ffmpeg()
+        m = {"fps": 60.0, "w": 0, "h": 0, "dur": 0.0}
+        try:
+            e = subprocess.run([ff, "-hide_banner", "-i", self.path], capture_output=True, text=True, errors="ignore",
+                               creationflags=NOWIN, timeout=20).stderr
+            d = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", e)
+            if d:
+                m["dur"] = int(d.group(1)) * 3600 + int(d.group(2)) * 60 + float(d.group(3))
+            v = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", e)
+            if v:
+                m["w"], m["h"] = int(v.group(1)), int(v.group(2))
+            f = re.search(r"([\d.]+) fps", e) or re.search(r"([\d.]+) tbr", e)
+            if f:
+                m["fps"] = float(f.group(1)) or 60.0
+        except Exception:
+            pass
+        self.meta = m
+
+    def isOpened(self):
+        return (not self.ff and self.cap.isOpened()) or (self.ff and self.meta.get("w", 0) > 0)
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_POS_FRAMES and self.ff:
+            return float(self.pos)
+        if prop == cv2.CAP_PROP_POS_MSEC and self.ff:
+            return self.pos / (self.meta.get("fps", 60.0) or 60.0) * 1000.0
+        if not self.ff or not self.meta:
+            v = self.cap.get(prop)
+            if v or not self.ff:
+                return v
+        m = self.meta or {}
+        if prop == cv2.CAP_PROP_FPS:
+            return m.get("fps", 60.0)
+        if prop == cv2.CAP_PROP_FRAME_COUNT:
+            return m.get("dur", 0.0) * m.get("fps", 60.0)
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return m.get("w", 0)
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return m.get("h", 0)
+        return 0.0
+
+    def set(self, prop, v):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            self.pos = int(v)
+        elif prop == cv2.CAP_PROP_POS_MSEC:
+            self.pos = int(round(v / 1000.0 * (self.get(cv2.CAP_PROP_FPS) or 60.0)))
+        if not self.ff:
+            return self.cap.set(prop, v)
+        return True
+
+    def read(self):
+        if not self.ff:
+            ok, fr = self.cap.read()
+            if ok:
+                self.pos += 1
+                return ok, fr
+            self.ff = True                           # OpenCV gibt auf: ab jetzt über FFmpeg
+            if not self.meta:
+                self._probe()
+                if not self.meta.get("w"):
+                    self.meta.update(w=int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                     h=int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        m = self.meta
+        w, h, fps = m.get("w", 0), m.get("h", 0), m.get("fps", 60.0) or 60.0
+        if w <= 0 or h <= 0:
+            return False, None
+        n = w * h * 3
+        for attempt in (0, 1):
+            if self.proc is None or self.proc_pos != self.pos:   # nicht fortlaufend: Strom neu an der Stelle starten
+                self._close_proc()
+                t = self.pos / fps
+                try:
+                    self.proc = subprocess.Popen(
+                        [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", self.path,
+                         "-an", "-sn", "-vf", f"fps={fps:.4f}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NOWIN, bufsize=n * 2)
+                except Exception:
+                    return False, None
+                self.proc_pos = self.pos
+            try:
+                b = self.proc.stdout.read(n)
+            except Exception:
+                b = b""
+            if len(b) == n:
+                self.pos += 1
+                self.proc_pos = self.pos
+                return True, np.frombuffer(b, np.uint8).reshape(h, w, 3).copy()
+            self._close_proc()
+            if attempt == 0 and self.pos > 0 and self.pos / fps < m.get("dur", 0) - 0.05:
+                continue
+            break
+        return False, None
+
+    def grab(self):
+        if not self.ff:
+            ok = self.cap.grab()
+            if ok:
+                self.pos += 1
+                self._grabbed = None
+                return ok
+        ok, self._grabbed = self.read()
+        return ok
+
+    def retrieve(self):
+        if getattr(self, "_grabbed", None) is not None:
+            return True, self._grabbed
+        if not self.ff:
+            return self.cap.retrieve()
+        return False, None
+
+    def _close_proc(self):
+        p_ = getattr(self, "proc", None)
+        self.proc = None
+        if p_ is not None:
+            try:
+                p_.kill()
+                p_.wait(timeout=1)
+            except Exception:
+                pass
+
+    def release(self):
+        self._close_proc()
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+
 def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_kill=None, gpu=True, thorough=False):
     """server: Dict mit "kind" = "bruder" | "notify" | "xhit". Gibt (clips, info) zurueck.
     clips: Liste von (start, ende, kill_zeit, thumbnail_bgr)."""
@@ -242,7 +391,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
     if not ffmpeg:
         raise RuntimeError("FFmpeg nicht gefunden.")
     kind = server["kind"]
-    cap = cv2.VideoCapture(path)
+    cap = SafeCap(path)
     if not cap.isOpened():
         raise RuntimeError("Video konnte nicht geoeffnet werden.")
     fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
@@ -486,7 +635,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     return None
                 c = getattr(tl, "cap", None)
                 if c is None:                       # jeder Arbeiter bekommt sein eigenes Video-Handle
-                    c = tl.cap = cv2.VideoCapture(path)
+                    c = tl.cap = SafeCap(path)
                     caps_open.append(c)
                 c.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
                 ok, fr = c.read()
@@ -691,7 +840,7 @@ class Player(threading.Thread):
 
     def __init__(self, path):
         super().__init__(daemon=True)
-        self.cap = cv2.VideoCapture(path)
+        self.cap = SafeCap(path)
         self.ok = self.cap.isOpened()
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 60.0
         self.frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
