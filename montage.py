@@ -179,6 +179,14 @@ def box_font_px(b, vw, vh):
 _INFO = {}
 
 
+def clip_len(path, track=0):
+    """Nutzbare Länge: auf Video-Spuren nur so lang wie es Bild gibt."""
+    info = media_info(path)
+    if track <= 0 and info.get("video"):
+        return info.get("vdur") or info["dur"]
+    return info["dur"]
+
+
 def media_info(path):
     """Dauer, Größe, fps und ob Ton vorhanden ist (über FFmpeg gelesen, zwischengespeichert)."""
     if path in _INFO:
@@ -199,6 +207,17 @@ def media_info(path):
         if mf:
             info["fps"] = float(mf.group(1))
         info["audio"] = "Audio:" in e
+        info["vdur"] = info["dur"]
+        if info["video"] and info["fps"] > 1:
+            # Bild kann kürzer sein als der Ton (z. B. Aufnahmen mit längerem Ton): echte Bild-Länge merken
+            cap = cv2.VideoCapture(path)
+            n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            fps = cap.get(cv2.CAP_PROP_FPS) or info["fps"]
+            cap.release()
+            if n > 2 and fps > 1:
+                vd = n / fps
+                if 0.5 < vd < info["dur"] - 0.03:
+                    info["vdur"] = vd
     except Exception:
         pass
     _INFO[path] = info
@@ -341,7 +360,7 @@ class MItem:
         self.kind = kind
         self.bx, self.by, self.bw, self.bh = 0.35, 0.38, 0.30, 0.20
         self.color, self.alpha, self.text, self.tsize = "#ffffff", 0.85, "", 0.5
-        dur = 3.0 if kind == "box" else media_info(path)["dur"]
+        dur = 3.0 if kind == "box" else clip_len(path, track)
         self.src_in = src_in
         self.src_out = src_out if src_out is not None else max(0.2, dur)
         self.speed = 1.0
@@ -434,6 +453,11 @@ class Project:
     def load(self, d):
         self.items = [MItem.from_dict(x) for x in (d or {}).get("items", [])
                       if x.get("kind") != "box" and os.path.exists(x.get("path", ""))]
+        for it in self.items:                          # alte Projekte: nicht über das Bild-Ende hinaus
+            if it.track <= 0:
+                L = clip_len(it.path, it.track)
+                if L > 0.3 and it.src_out > L + 0.02:
+                    it.src_out = max(it.src_in + 0.2, L)
         self.magnet = (d or {}).get("magnet", True)
         self.res = (d or {}).get("res", "Original")
         self.fps = (d or {}).get("fps", "Original")
@@ -494,7 +518,8 @@ def build_graph(proj, audio_only=False):
                 vf_fade += f",fade=t=in:st=0:d={min(it.fade_in, d):.3f}"
             if it.fade_out > 0.01:
                 vf_fade += f",fade=t=out:st={max(0.0, d - it.fade_out):.3f}:d={min(it.fade_out, d):.3f}"
-            f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{it.speed:.4f},fps={fps:.3f},scale={W}:{H}:force_original_aspect_ratio="
+            f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{it.speed:.4f},fps={fps:.3f},"
+                     f"tpad=stop_mode=clone:stop_duration={d:.3f},trim=duration={d:.3f},scale={W}:{H}:force_original_aspect_ratio="
                      f"decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p{vf_fade},"
                      f"settb=AVTB[{vl}]")
         if info["audio"]:
@@ -561,7 +586,8 @@ def build_graph(proj, audio_only=False):
         info = media_info(o.path)
         i = add_input(["-ss", f"{o.src_in:.3f}", "-t", f"{(o.src_out - o.src_in):.3f}", "-i", o.path])
         if not audio_only:
-            f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{o.speed:.4f},fps={fps:.3f},scale={W}:{H}:force_original_aspect_ratio="
+            f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{o.speed:.4f},fps={fps:.3f},"
+                     f"tpad=stop_mode=clone:stop_duration={o.dur:.3f},trim=duration={o.dur:.3f},scale={W}:{H}:force_original_aspect_ratio="
                      f"decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
                      f"setpts=PTS+{o.start:.3f}/TB[ov{k}]")
             ov_list.append((f"ov{k}", o))
@@ -708,6 +734,14 @@ class FrameSource:
                 cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
             ok, fr = cap.read()
             if not ok:
+                if lastf is None:                     # hinter dem Bild-Ende: letztes Bild zeigen
+                    n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                    if n > 1:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, n - 2)
+                        ok, fr = cap.read()
+                        if ok:
+                            c["lastf"] = fr
+                            return fr
                 return lastf
             c["last"] = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 - 1.0 / fps
             c["lastf"] = fr
@@ -1424,6 +1458,7 @@ class MTimeline(QWidget):
     add_lane = Signal(str)           # "video" / "audio"
     del_lane = Signal(int)
     dropped = Signal(list, float, object)     # Pfade, Zeit, Spur (oder None)
+    magnet_pause = Signal(bool)               # Gruppe wird verschoben: Einrasten kurz aus
 
     RULER, VH, AH, GAP, LEFT, ADD = 30, 58, 42, 10, 96, 30
 
@@ -1594,7 +1629,7 @@ class MTimeline(QWidget):
         p.save()
         p.setClipRect(QRectF(self.LEFT, 0, W - self.LEFT, self.height()))
         # Lineal
-        step = next(s for s in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300) if s * self.pps >= 70)
+        step = next((s for s in (0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600) if s * self.pps >= 70), 600)
         t = math.floor(self.x0 / step) * step
         p.setFont(app_font(8))
         while self.tx(t) < W:
@@ -1602,7 +1637,8 @@ class MTimeline(QWidget):
             p.setPen(ink(60))
             p.drawLine(QPointF(x, self.RULER - 7), QPointF(x, self.RULER))
             p.setPen(ink(140))
-            p.drawText(QRectF(x + 3, 2, 60, self.RULER - 8), Qt.AlignLeft | Qt.AlignVCenter, fmt_s(t))
+            lab = fmt_s(t) if step >= 1 else f"{int(t + 1e-6) // 60}:{(t + 1e-6) % 60:04.1f}"
+            p.drawText(QRectF(x + 3, 2, 60, self.RULER - 8), Qt.AlignLeft | Qt.AlignVCenter, lab)
             t += step
         # Stücke
         for it in sorted(self.proj.items, key=lambda x: (x is self.sel or x in self.multi, x.track, x.start)):
@@ -1628,13 +1664,16 @@ class MTimeline(QWidget):
                            QFontMetrics(p.font()).elidedText(t_, Qt.ElideRight, int(max(10, r.width() - 40))))
             elif it.track <= 0:
                 p.save()
-                p.setClipPath(path)
+                p.setClipPath(path, Qt.IntersectClip)        # nie über die Spur-Namen links malen
                 p.fillRect(r, QColor(30, 30, 34))
                 pm = thumb_fast(it.path)
                 if pm is not None:
-                    tw = r.height() * pm.width() / max(1, pm.height())
+                    tw = max(4.0, r.height() * pm.width() / max(1, pm.height()))
                     x = r.left()
-                    while x < r.right():
+                    if x < self.LEFT - tw:                   # nur den sichtbaren Teil kacheln
+                        x += math.floor((self.LEFT - tw - x) / tw) * tw
+                    xend = min(r.right(), W)
+                    while x < xend:
                         p.drawPixmap(QRectF(x, r.top(), tw, r.height()), pm, QRectF(0, 0, pm.width(), pm.height()))
                         x += tw
                 g = QLinearGradient(r.topLeft(), r.bottomLeft())
@@ -1661,13 +1700,16 @@ class MTimeline(QWidget):
                     w = np.zeros(10)
                 p.setPen(QPen(with_alpha(col, 220), 1))
                 cy, hh = r.center().y(), r.height() / 2 - 4
+                # nur den sichtbaren Ausschnitt berechnen (bei starkem Zoom sonst riesig)
+                vx0 = max(0, int((self.LEFT - r.left()) // 2 * 2))
+                vx1 = int(min(r.width(), W - r.left() + 2))
                 key = (it.id, round(self.pps, 3), round(it.src_in, 3), round(it.src_out, 3), round(it.speed, 3),
-                       round(it.vol, 2), int(r.height()), len(w))
+                       round(it.vol, 2), int(r.height()), len(w), vx0, vx1)
                 cache = self.__dict__.setdefault("_wcache", {})
                 lines = cache.get(key)
                 if lines is None:                            # nur bei Änderung neu berechnen
                     from PySide6.QtCore import QLineF
-                    xs = np.arange(0, int(r.width()), 2, dtype=np.float64)
+                    xs = np.arange(vx0, max(vx0, vx1), 2, dtype=np.float64)
                     st = it.src_in + xs / self.pps * it.speed
                     idx = np.clip((st / dur * (len(w) - 1)).astype(int), 0, len(w) - 1)
                     amp = w[idx] * hh * min(1.5, it.vol)
@@ -1676,7 +1718,7 @@ class MTimeline(QWidget):
                         cache.clear()
                     cache[key] = lines
                 p.save()
-                p.setClipPath(path)
+                p.setClipPath(path, Qt.IntersectClip)
                 p.translate(r.left(), cy)
                 p.drawLines(lines)
                 p.restore()
@@ -1900,10 +1942,13 @@ class MTimeline(QWidget):
         kind, it, x0, st0, in0, out0, tr0 = self.drag
         dt = (pos.x() - x0) / self.pps
         info = {"dur": 3600.0} if it.kind == "box" else media_info(it.path)
-        if kind == "move" and len(self.multi) > 1 and it in self.multi and not (self.proj.magnet and it.track == 0):
-            # mehrere ausgewählte Stücke zusammen verschieben
+        if kind == "move" and len(self.multi) > 1 and it in self.multi:
+            # mehrere ausgewählte Stücke zusammen verschieben (Einrasten ist dabei kurz aus)
             if not hasattr(self, "_grp0"):
                 self._grp0 = {g.id: g.start for g in self.multi}
+                if self.proj.magnet and any(g.track == 0 for g in self.multi):
+                    self._mag_paused = True
+                    self.magnet_pause.emit(True)
             mn = min(self._grp0.values())
             d = max(-mn, dt)
             for g in self.multi:
@@ -1943,7 +1988,7 @@ class MTimeline(QWidget):
             if it.kind != "box":
                 self.trimming.emit(it.path, ni)
         elif kind == "right":
-            no = max(in0 + 0.2, min(info["dur"] or out0, out0 + dt * it.speed))
+            no = max(in0 + 0.2, min(clip_len(it.path, it.track) or out0, out0 + dt * it.speed))
             it.src_out = no
             self.proj.pack()
             if it.kind != "box":
@@ -1974,6 +2019,20 @@ class MTimeline(QWidget):
                 self.resolve_overlap(g)
         if hasattr(self, "_grp0"):
             del self._grp0
+        if getattr(self, "_mag_paused", False):           # Einrasten wieder an: Gruppe als Block einsortieren
+            self._mag_paused = False
+            grp = sorted([g for g in self.multi if g.track == 0], key=lambda g: g.start)
+            others = [v for v in self.proj.videos() if v not in grp]
+            if grp:
+                glen = sum(g.dur for g in grp)
+                tc = grp[0].start + glen / 2
+                idx = sum(1 for v in others if v.start + v.dur / 2 < tc)
+                tmp = 0.0
+                for v in others[:idx] + grp + others[idx:]:
+                    v.start = tmp
+                    tmp += v.dur
+            self.proj.pack()
+            self.magnet_pause.emit(False)
         if self.drag and self.drag[0] == "band":
             if self.band is None:                         # nur geklickt: Abspielposition setzen
                 self.sel = None
@@ -2282,6 +2341,8 @@ class MontagePage(QWidget):
         bv.addLayout(tools)
         self.tl = MTimeline(self.proj)
         self.tl.seek.connect(self.seek)
+        self.tl.magnet_pause.connect(lambda on: self.mag_btn.set_kind("glass" if on else
+                                                                     ("accent" if self.proj.magnet else "glass")))
         self.tl.selected.connect(lambda s: (self.show_inspector(s), self._sync_boxes()))
         self.tl.changed.connect(self.on_changed)
         self.tl.begin.connect(self.snapshot)
@@ -2467,7 +2528,7 @@ class MontagePage(QWidget):
             L.addWidget(b)
             vids = [i for i in items if i.track <= 0]
             vol0 = sum(i.volume for i in items) / max(1, len(items))
-            vsr = SliderRow("Lautstärke (alle ausgewählten)", 0, 2, 40, vol0, lambda v: f"{int(round(v * 100))} %")
+            vsr = SliderRow("Lautstärke (alle ausgewählten)", 0, 2, 200, vol0, lambda v: f"{int(round(v * 100))} %")
             vst = {"snap": False}
 
             def vol_all(_):
@@ -2578,7 +2639,7 @@ class MontagePage(QWidget):
                 L.addWidget(b)
             else:
                 L.addWidget(lbl("Dieser Clip hat keinen Ton.", 8.5, False, "muted"))
-            sr = SliderRow("Clip-Ton", 0, 2, 40, it.volume, lambda v: f"{int(round(v * 100))} %")
+            sr = SliderRow("Clip-Ton", 0, 2, 200, it.volume, lambda v: f"{int(round(v * 100))} %")
             sr.s.valueChanged.connect(lambda _: (setattr(it, "volume", round(sr.value(), 2)), self.on_changed(light=True)))
             L.addWidget(sr)
             fi = SliderRow("Einblenden (aus Schwarz)", 0, 3, 30, it.fade_in, lambda v: f"{v:.1f} s")
@@ -2603,7 +2664,7 @@ class MontagePage(QWidget):
             b = PopButton("Ton an" if it.muted else "Stumm schalten", "speaker" if it.muted else "mute", "glass", 32)
             b.clicked.connect(lambda: self.mute_items([it], not it.muted))
             L.addWidget(b)
-            sr = SliderRow("Lautstärke", 0, 2, 40, it.volume, lambda v: f"{int(round(v * 100))} %")
+            sr = SliderRow("Lautstärke", 0, 2, 200, it.volume, lambda v: f"{int(round(v * 100))} %")
             sr.s.valueChanged.connect(lambda _: (setattr(it, "volume", round(sr.value(), 2)), self.on_changed(light=True)))
             L.addWidget(sr)
             s1 = SliderRow("Einblenden", 0, 5, 50, it.fade_in, lambda v: f"{v:.1f} s")
@@ -2971,7 +3032,7 @@ class MontagePage(QWidget):
     def on_changed(self, light=False):
         L = self.proj.length()
         self.len_lbl.setText(f"Länge {fmt_s(L)}  ·  {len(self.proj.videos())} Clips")
-        self.scrub.set_pos(self.tl.ph, L)
+        self._time()
         self.tl.update()
         if not (self.tl.drag and self.tl.drag[0] in ("left", "right")):
             self.player.seek(self.tl.ph)              # beim Kürzen bleibt das Bild an der Schnittkante
