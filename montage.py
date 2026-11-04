@@ -1206,6 +1206,89 @@ class MontagePlayer(threading.Thread):
 
 
 # ------------------------------------------------------------------ Vorschau-Fläche
+class ScrubBar(QWidget):
+    """Normale Spul-Leiste: Punkt anklicken/ziehen oder irgendwo auf die Linie klicken."""
+    begin = Signal()
+    moved = Signal(float)
+    end = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.val = 0.0
+        self.length = 0.0
+        self.drag = False
+        self.hov = False
+        self.setFixedHeight(20)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_pos(self, t, length):
+        if self.drag:
+            return
+        if abs(t - self.val) > 1e-3 or abs(length - self.length) > 1e-3:
+            self.val, self.length = t, length
+            self.update()
+
+    def _x0x1(self):
+        return 8.0, self.width() - 8.0
+
+    def _t_at(self, x):
+        x0, x1 = self._x0x1()
+        k = max(0.0, min(1.0, (x - x0) / max(1.0, x1 - x0)))
+        return k * self.length
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton or self.length <= 0:
+            return
+        self.drag = True
+        self.begin.emit()
+        self.val = self._t_at(e.position().x())
+        self.moved.emit(self.val)
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        if self.drag:
+            self.val = self._t_at(e.position().x())
+            self.moved.emit(self.val)
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self.drag:
+            self.drag = False
+            self.end.emit()
+            self.update()
+
+    def enterEvent(self, e):
+        self.hov = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self.hov = False
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        x0, x1 = self._x0x1()
+        cy = self.height() / 2.0
+        th = 5.0 if (self.hov or self.drag) else 4.0
+        k = (self.val / self.length) if self.length > 0 else 0.0
+        k = max(0.0, min(1.0, k))
+        xk = x0 + k * (x1 - x0)
+        p.setPen(Qt.NoPen)
+        p.setBrush(T.ink(40))
+        p.drawRoundedRect(QRectF(x0, cy - th / 2, x1 - x0, th), th / 2, th / 2)
+        fill, _ = T.pill()
+        p.setBrush(fill)
+        p.drawRoundedRect(QRectF(x0, cy - th / 2, xk - x0, th), th / 2, th / 2)
+        r = 7.5 if (self.hov or self.drag) else 6.5
+        p.setBrush(QColor(0, 0, 0, 60))
+        p.drawEllipse(QPointF(xk, cy + 1), r, r)
+        p.setBrush(fill)
+        p.drawEllipse(QPointF(xk, cy), r, r)
+        p.end()
+
+
 class Preview(QWidget):
     box_picked = Signal(object)
     box_changed = Signal()
@@ -2118,6 +2201,12 @@ class MontagePage(QWidget):
         self.preview.box_begin.connect(self.snapshot)
         self.preview.box_changed.connect(lambda: self.on_changed(light=True))
         mv.addWidget(self.preview, 1)
+        self.scrub = ScrubBar()
+        self.scrub.setToolTip("Vor- und zurückspulen")
+        self.scrub.begin.connect(self._scrub_begin)
+        self.scrub.moved.connect(self.seek)
+        self.scrub.end.connect(self._scrub_end)
+        mv.addWidget(self.scrub)
         ctl = QHBoxLayout()
         ctl.setSpacing(8)
         self.time_lbl = lbl("0:00.00 / 0:00.00", 10, True)
@@ -2882,6 +2971,7 @@ class MontagePage(QWidget):
     def on_changed(self, light=False):
         L = self.proj.length()
         self.len_lbl.setText(f"Länge {fmt_s(L)}  ·  {len(self.proj.videos())} Clips")
+        self.scrub.set_pos(self.tl.ph, L)
         self.tl.update()
         if not (self.tl.drag and self.tl.drag[0] in ("left", "right")):
             self.player.seek(self.tl.ph)              # beim Kürzen bleibt das Bild an der Schnittkante
@@ -2940,7 +3030,19 @@ class MontagePage(QWidget):
             self.toggle_fs()
 
     def _time(self):
-        self.time_lbl.setText(f"{fmt(self.tl.ph)} / {fmt(self.proj.length())}")
+        L = self.proj.length()
+        self.time_lbl.setText(f"{fmt(self.tl.ph)} / {fmt(L)}")
+        self.scrub.set_pos(self.tl.ph, L)
+
+    def _scrub_begin(self):
+        self._scrub_resume = self.playing          # beim Ziehen kurz anhalten, danach weiter
+        if self.playing:
+            self.toggle_play()
+
+    def _scrub_end(self):
+        if getattr(self, "_scrub_resume", False):
+            self._scrub_resume = False
+            self.toggle_play()
 
     def _poll(self):
         if not self.isVisible():
