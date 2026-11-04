@@ -5248,10 +5248,21 @@ class Window(QMainWindow):
         if info.get("sekunden") is not None:
             extra += f" · {info['sekunden']:.0f} s"
         self.set_status(("Abgebrochen · " if cancelled else "Fertig · ") + f"{n} {word}{extra}", "ok" if n else "warn")
-        self.say(f"{n} {word} gefunden" if n else "Keine Kills gefunden – Empfindlichkeit erhöhen?",
+        self.say(f"{n} {word} gefunden" if n else "Keine Kills gefunden – Diagnose-Bild wird geöffnet",
                  OK_GREEN if n else None)
         if n:
             self.select(0)
+        elif not cancelled:
+            # Diagnose: Bild mit Messwerten + Ausschnitten speichern und öffnen (zum Weiterschicken)
+            def diag():
+                try:
+                    dst = os.path.join(core.DATA_DIR, "diagnose", time.strftime("scan_%Y-%m-%d_%H-%M-%S.png"))
+                    out = core.write_debug_image(dst)
+                    if out and hasattr(os, "startfile"):
+                        os.startfile(out)
+                except Exception:
+                    pass
+            threading.Thread(target=diag, daemon=True).start()
 
     # ------------------------------------------------------------ Clips
     def empty_state(self):

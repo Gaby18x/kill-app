@@ -384,6 +384,9 @@ class SafeCap:
             pass
 
 
+LAST_DEBUG = {}
+
+
 def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_kill=None, gpu=True, thorough=False):
     """server: Dict mit "kind" = "bruder" | "notify" | "xhit". Gibt (clips, info) zurueck.
     clips: Liste von (start, ende, kill_zeit, thumbnail_bgr)."""
@@ -391,13 +394,20 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
     if not ffmpeg:
         raise RuntimeError("FFmpeg nicht gefunden.")
     kind = server["kind"]
+    dbg = {"path": path, "server": server.get("name", ""), "kind": kind, "sens": sens, "thorough": thorough,
+           "top": [], "checks": [], "cal": [], "lock": threading.Lock()}
+    LAST_DEBUG.clear()
+    LAST_DEBUG.update(dbg)
+    dbg = LAST_DEBUG
     cap = SafeCap(path)
+    dbg["ff"] = cap.ff
     if not cap.isOpened():
         raise RuntimeError("Video konnte nicht geoeffnet werden.")
     fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     duration = total / fps
+    dbg.update(fps=fps, total=total, w=w, h=h, duration=duration)
 
     def prog(v):
         if progress:
@@ -481,13 +491,17 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                         sc.append(float(cv2.matchTemplate(s_, t_, cv2.TM_CCOEFF_NORMED).max()))
                 if not sc:
                     continue
-                v = float(np.mean(sorted(sc, reverse=True)[:3]))
+                # Bewertung: wie viele Beispiele werden bei dieser Groesse wirklich erkannt (kleine Vorlagen passen
+                # sonst "zufaellig" besser) - bei Gleichstand zaehlt die mittlere Uebereinstimmung
+                hit_n = sum(1 for x in sc if x >= thr)
+                v = (hit_n, float(np.mean(sorted(sc, reverse=True)[:3])))
+                dbg["cal"].append((round(float(f), 2), hit_n, round(v[1], 3)))
                 if abs(f - 1.0) < 0.01:
                     s_one = v
-                if v > best_s:
+                if best_s == -1.0 or v > best_s:
                     best_f, best_s = float(f), v
-            # nur wechseln, wenn eine andere Groesse deutlich besser passt (sonst bleibt alles wie bisher)
-            if best_s > 0.45 and best_s >= s_one + 0.06:
+            # nur wechseln, wenn bei einer anderen Groesse klar mehr Meldungen erkannt werden
+            if best_s != -1.0 and s_one != -1.0 and best_s[0] > s_one[0] and best_s[1] > 0.45:
                 return best_f
             return 1.0
 
@@ -513,9 +527,18 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
 
         def verify_or_x(cap_, fr, loc, t):
             """Text muss passen. Ist der Text nur knapp zu unsicher, entscheidet das rote X mit."""
-            if verify(fr, loc):
-                return True
-            return best_text[0] >= text_thr - 0.08 and x_near(cap_, t)
+            ok = verify(fr, loc)
+            if not ok:
+                ok = best_text[0] >= text_thr - 0.08 and x_near(cap_, t)
+            try:
+                x, y = int(loc[0]), int(loc[1])
+                crop = fr[max(0, y - int(30 * ks)):y + int(140 * ks), max(0, x - int(30 * ks)):x + int(520 * ks)].copy()
+                with dbg["lock"]:
+                    if len(dbg["checks"]) < 8:
+                        dbg["checks"].append((float(t), round(best_text[0], 3), bool(ok), crop))
+            except Exception:
+                pass
+            return ok
 
         best_text = [0.0]
 
@@ -534,6 +557,16 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     return True
             return False
 
+        def _dbg_top(mx, fr, ml):
+            """Diagnose: die besten Fast-Treffer merken (auch wenn sie unter der Schwelle liegen)."""
+            top = dbg["top"]
+            if len(top) >= 6 and mx <= top[-1][0]:
+                return
+            with dbg["lock"]:
+                top.append((float(mx), fr.copy(), ml))
+                top.sort(key=lambda x: -x[0])
+                del top[6:]
+
         def detect(fr):
             """Gibt (Treffer, Lage) fuer ein verkleinertes Bild zurueck."""
             if kind == "bruder":
@@ -542,6 +575,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     collect(m)
                 if m.sum() >= need:
                     _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED))
+                    _dbg_top(mx, fr, ml)
                     if mx >= thr:
                         return True, ((ml[0] + pad) * w / ow, (ml[1] + pad) * w / ow)
                 return False, None
@@ -549,6 +583,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             if g_.shape[0] < tpl.shape[0] or g_.shape[1] < tpl.shape[1]:
                 return False, None
             _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(g_, tpl, cv2.TM_CCOEFF_NORMED))
+            _dbg_top(mx, fr, ml)
             if mx >= 0.35:
                 collect(g_)
             return (True, (ml[0] * w / ow, ml[1] * w / ow)) if mx >= thr else (False, None)
@@ -599,7 +634,11 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             scale_f = calibrate()
             if scale_f != 1.0 and not (cancel is not None and cancel.is_set()):
                 make_tpl(scale_f)                 # Meldungen sind anders gross: mit passender Groesse neu suchen
-                times, khits = fast_pass()
+                times2, khits2 = fast_pass()
+                # beide Durchgaenge behalten: was bei Originalgroesse gefunden wurde, geht nie verloren
+                seen_t = {round(x[0], 3) for x in khits2}
+                khits = sorted(khits2 + [x for x in khits if round(x[0], 3) not in seen_t], key=lambda x: x[0])
+                times = times2 or times
         elif not (cancel is not None and cancel.is_set()):
             # gruendliche Suche: vorher auf Keyframes Beispiele sammeln, um die Groesse anzupassen
             t_cal = time.time()
@@ -611,6 +650,9 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             if scale_f != 1.0:
                 make_tpl(scale_f)
         info["groesse"] = round(scale_f, 2)
+        dbg.update(scale=scale_f, samples=len(samples), probe=len(probe), thr=thr, text_thr=text_thr,
+                   probe_gap=(float(np.median(np.diff(probe))) if len(probe) >= 2 else None), sparse=sparse,
+                   keyframes=len(times), khits=len(khits))
         if cancel is not None and cancel.is_set():
             cap.release()
             return [], {"notices": 0, "mode": "abgebrochen"}
@@ -767,7 +809,78 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
         out.append((max(0.0, t - pre), min(duration, t + post), t, th))
     cap.release()
     info["sekunden"] = round(time.time() - t_start, 1)
+    dbg.update(info={k: v for k, v in info.items()}, hits=len(hits), kills=len(out))
     return out, info
+
+
+def write_debug_image(dst):
+    """Erstellt ein Diagnose-Bild zum letzten Scan (Messwerte + Ausschnitte), das man einfach weiterschicken kann."""
+    d = LAST_DEBUG
+    if not d:
+        return None
+    lines = []
+    try:
+        e = subprocess.run([find_ffmpeg(), "-hide_banner", "-i", d.get("path", "")], capture_output=True, text=True,
+                           errors="ignore", creationflags=NOWIN, timeout=20).stderr
+        lines += [ln.strip()[:150] for ln in e.splitlines() if "Duration" in ln or "Stream #" in ln][:5]
+    except Exception:
+        pass
+    f2 = lambda v: "-" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
+    lines += [
+        f"ACE {APP_VERSION if 'APP_VERSION' in globals() else ''}  Server: {d.get('server')} ({d.get('kind')})  "
+        f"Empf.: {d.get('sens')}  gruendlich: {d.get('thorough')}",
+        f"OpenCV->FFmpeg: {d.get('ff')}  fps {f2(d.get('fps'))}  Bilder {d.get('total')}  {d.get('w')}x{d.get('h')}  "
+        f"Dauer {f2(d.get('duration'))} s",
+        f"Probe-Keyframes {d.get('probe')}  Abstand {f2(d.get('probe_gap'))}  sparse {d.get('sparse')}  "
+        f"Keyframes {d.get('keyframes')}  Fast-Treffer {d.get('khits')}  Treffer {d.get('hits')}  Kills {d.get('kills')}",
+        f"Groesse {f2(d.get('scale'))}  Beispiele {d.get('samples')}  Schwelle {f2(d.get('thr'))}  "
+        f"Text-Schwelle {f2(d.get('text_thr'))}",
+        "Kalibrierung (Groesse:erkannt/Wert): " + "  ".join(f"{c[0]}:{c[1]}/{c[2]}" for c in d.get("cal", [])[:15]),
+        f"Info: {d.get('info')}"[:160],
+    ]
+    W = 1600
+    tiles = []
+    for mx, fr, ml in d.get("top", [])[:6]:
+        t_ = cv2.resize(fr, (480, int(480 * fr.shape[0] / fr.shape[1])))
+        k = 480 / fr.shape[1]
+        cv2.rectangle(t_, (int(ml[0] * k), int(ml[1] * k)), (int(ml[0] * k) + 60, int(ml[1] * k) + 30), (0, 255, 0), 2)
+        cv2.putText(t_, f"Suche {mx:.2f}", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        tiles.append(t_)
+    checks = []
+    for t, sc, ok, crop in d.get("checks", [])[:8]:
+        if crop is None or crop.size == 0:
+            continue
+        c_ = cv2.resize(crop, (520, max(10, int(520 * crop.shape[0] / max(1, crop.shape[1])))))
+        bar = np.zeros((28, 520, 3), np.uint8)
+        cv2.putText(bar, f"t={t:.1f}s Text {sc:.2f} {'OK' if ok else 'nein'}", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (0, 255, 0) if ok else (0, 0, 255), 2)
+        checks.append(np.vstack([bar, c_]))
+    th = 26 * len(lines) + 20
+    rows_h = (tiles[0].shape[0] + 10) * ((len(tiles) + 2) // 3) if tiles else 0
+    ch_h = (max(c.shape[0] for c in checks) + 10) * ((len(checks) + 2) // 3) if checks else 0
+    img = np.full((th + rows_h + ch_h + 20, W, 3), 24, np.uint8)
+    for i, ln in enumerate(lines):
+        cv2.putText(img, ln, (10, 24 + 26 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (235, 235, 235), 1, cv2.LINE_AA)
+    y = th
+    for i, t_ in enumerate(tiles):
+        r, c = divmod(i, 3)
+        yy, xx = y + r * (t_.shape[0] + 10), 10 + c * 530
+        img[yy:yy + t_.shape[0], xx:xx + t_.shape[1]] = t_
+    y += rows_h
+    if checks:
+        hh = max(c.shape[0] for c in checks)
+        for i, c_ in enumerate(checks):
+            r, c = divmod(i, 3)
+            yy, xx = y + r * (hh + 10), 10 + c * 530
+            img[yy:yy + c_.shape[0], xx:xx + c_.shape[1]] = c_
+    if os.path.dirname(dst):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+    ok, buf = cv2.imencode(".png", img)
+    if ok:
+        with open(dst, "wb") as f:
+            f.write(buf.tobytes())
+        return dst
+    return None
 
 
 _HW = {}
