@@ -20,9 +20,96 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QLinearGradient, 
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 try:
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 except Exception:
-    QAudioOutput = QMediaPlayer = None
+    QAudioFormat = QAudioSink = QMediaDevices = None
+
+RATE = 48000
+
+
+class PcmAudio:
+    """Spielt den fertig gemischten Montage-Ton direkt über die Soundkarte ab (ohne Medien-Plugin, sehr zuverlässig).
+    Gleiche Bedienung wie ein Player: play / pause / stop / setPosition / position (Millisekunden)."""
+
+    def __init__(self):
+        self.data = None          # bytes, s16le stereo 48 kHz
+        self.sink = None
+        self.io = None
+        self.idx = 0
+        self.base_ms = 0
+        self.timer = QTimer()
+        self.timer.setInterval(15)
+        self.timer.timeout.connect(self._feed)
+        self.playing = False
+        fmt = QAudioFormat()
+        fmt.setSampleRate(RATE)
+        fmt.setChannelCount(2)
+        fmt.setSampleFormat(QAudioFormat.Int16)
+        self.fmt = fmt
+
+    def load(self, data):
+        pos = self.position()
+        was = self.playing
+        self.stop()
+        self.data = data
+        if was:
+            self.setPosition(pos)
+            self.play()
+
+    def _open(self):
+        if self.sink is None:
+            dev = QMediaDevices.defaultAudioOutput()
+            self.sink = QAudioSink(dev, self.fmt)
+            self.sink.setBufferSize(RATE * 4 // 5)          # 0,2 s Puffer: kurze Verzögerung
+        self.io = self.sink.start()
+
+    def play(self):
+        if self.data is None:
+            return
+        self._open()
+        self.playing = True
+        self._feed()
+        self.timer.start()
+
+    def _feed(self):
+        if not self.playing or self.io is None or self.data is None:
+            return
+        n = self.sink.bytesFree()
+        n -= n % 4
+        if n <= 0:
+            return
+        chunk = self.data[self.idx:self.idx + n]
+        if not chunk:
+            return
+        self.io.write(chunk)
+        self.idx += len(chunk)
+
+    def pause(self):
+        if self.playing:
+            self.base_ms = self.position()
+        self.playing = False
+        self.timer.stop()
+        if self.sink is not None:
+            self.sink.stop()
+            self.sink = None
+        self.io = None
+
+    def stop(self):
+        self.pause()
+
+    def setPosition(self, ms):
+        was = self.playing
+        if was:
+            self.pause()
+        self.base_ms = max(0, int(ms))
+        self.idx = int(self.base_ms / 1000 * RATE) * 4
+        if was:
+            self.play()
+
+    def position(self):
+        if self.playing and self.sink is not None:
+            return self.base_ms + self.sink.processedUSecs() / 1000.0
+        return self.base_ms
 
 import core
 from theme import RED, T, ink, with_alpha
@@ -246,6 +333,12 @@ class MItem:
         self.tdur = 0.5
         self.fade_in = 0.0
         self.fade_out = 0.0
+        self.muted = False
+
+    @property
+    def vol(self):
+        """Tatsächliche Lautstärke (0 wenn stumm)."""
+        return 0.0 if self.muted else self.volume
 
     @property
     def dur(self):
@@ -257,7 +350,7 @@ class MItem:
 
     def to_dict(self):
         return {k: getattr(self, k) for k in ("id", "path", "track", "start", "src_in", "src_out", "speed", "volume",
-                                               "trans", "tdur", "fade_in", "fade_out") + MItem.BOX_KEYS}
+                                               "trans", "tdur", "fade_in", "fade_out", "muted") + MItem.BOX_KEYS}
 
     @staticmethod
     def from_dict(d):
@@ -268,6 +361,7 @@ class MItem:
                                      "fade_out": 0.0, "track": 0, "start": 0.0, "src_in": 0.0}.get(k)))
         for k, dv in zip(MItem.BOX_KEYS, ("media", 0.35, 0.38, 0.30, 0.20, "#ffffff", 0.85, "", 0.5)):
             setattr(it, k, d.get(k, dv))
+        it.muted = bool(d.get("muted", False))
         return it
 
 
@@ -322,7 +416,7 @@ class Project:
 
     def load(self, d):
         self.items = [MItem.from_dict(x) for x in (d or {}).get("items", [])
-                      if x.get("kind") == "box" or os.path.exists(x.get("path", ""))]
+                      if x.get("kind") != "box" and os.path.exists(x.get("path", ""))]
         self.magnet = (d or {}).get("magnet", True)
         self.res = (d or {}).get("res", "Original")
         self.fps = (d or {}).get("fps", "Original")
@@ -381,7 +475,7 @@ def build_graph(proj, audio_only=False):
             f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{it.speed:.4f},fps={fps:.3f},scale={W}:{H}:force_original_aspect_ratio="
                      f"decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,settb=AVTB[{vl}]")
         if info["audio"]:
-            f.append(f"[{i}:a]asetpts=PTS-STARTPTS,{_atempo(it.speed)},volume={it.volume:.3f},aresample=48000,"
+            f.append(f"[{i}:a]asetpts=PTS-STARTPTS,{_atempo(it.speed)},volume={it.vol:.3f},aresample=48000,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000,apad=whole_dur={d:.3f},atrim=0:{d:.3f}[{al}]")
         else:
             f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{d:.3f}[{al}]")
@@ -444,7 +538,7 @@ def build_graph(proj, audio_only=False):
             ov_list.append((f"ov{k}", o))
         if info["audio"]:
             ms = int(round(o.start * 1000))
-            f.append(f"[{i}:a]asetpts=PTS-STARTPTS,{_atempo(o.speed)},volume={o.volume:.3f},aresample=48000,"
+            f.append(f"[{i}:a]asetpts=PTS-STARTPTS,{_atempo(o.speed)},volume={o.vol:.3f},aresample=48000,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000,adelay={ms}|{ms}[oa{k}]")
             ov_mix.append(f"oa{k}")
     # Musik / Sounds
@@ -452,7 +546,7 @@ def build_graph(proj, audio_only=False):
     for k, a in enumerate(aus):
         i = add_input(["-ss", f"{a.src_in:.3f}", "-t", f"{(a.src_out - a.src_in):.3f}", "-i", a.path])
         d = a.dur
-        fx = [f"asetpts=PTS-STARTPTS", _atempo(a.speed), f"volume={a.volume:.3f}", "aresample=48000",
+        fx = [f"asetpts=PTS-STARTPTS", _atempo(a.speed), f"volume={a.vol:.3f}", "aresample=48000",
               "aformat=channel_layouts=stereo:sample_rates=48000"]
         if a.fade_in > 0.01:
             fx.append(f"afade=t=in:st=0:d={min(a.fade_in, d):.3f}")
@@ -941,11 +1035,25 @@ class MTimeline(QWidget):
         self.x0 = 0.0                # Scroll (Sekunden)
         self.ph = 0.0                # Abspielposition
         self.sel = None
+        self.multi = []              # per Rahmen ausgewählte Stücke
+        self.band = None             # Auswahl-Rahmen (QRectF) beim Ziehen
         self.drag = None
         self.hover = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
         self.relayout()
+
+    def has_audio(self, it):
+        if it.track > 0:
+            return True
+        inf = _INFO.get(it.path)
+        return bool(inf and inf.get("audio"))
+
+    def mute_rect(self, it):
+        r = self.item_rect(it)
+        if r.width() < 64:
+            return None
+        return QRectF(r.right() - 40, r.top() + 4, 20, 20)       # Abstand zum Griff zum Kürzen
 
     def relayout(self):
         h = self.RULER + self.GAP
@@ -1140,8 +1248,16 @@ class MTimeline(QWidget):
                         p.setPen(Qt.NoPen)
                         p.setBrush(QColor(0, 0, 0, 90))
                         p.drawPath(tri)
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor(255, 255, 255, 240) if sel else with_alpha(T.glass_edge(1.0), 255), 2 if sel else 1))
+            ms = self.mute_rect(it)
+            if ms is not None and self.has_audio(it):          # Lautsprecher: Klick = stumm / Ton an
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(0, 0, 0, 150) if not it.muted else QColor(230, 60, 75, 220))
+                p.drawEllipse(ms)
+                paint_icon(p, "mute" if it.muted else "speaker", ms.adjusted(3, 3, -3, -3), QColor(255, 255, 255), 1.5)
+            insel = it in self.multi
+            p.setBrush(with_alpha(QColor(255, 255, 255), 40) if insel else Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 240) if (sel or insel) else with_alpha(T.glass_edge(1.0), 255),
+                          2 if (sel or insel) else 1))
             p.drawRoundedRect(r, 8, 8)
             if sel or it is self.hover:                          # breite Griffe zum Kürzen
                 for left in (True, False):
@@ -1183,6 +1299,10 @@ class MTimeline(QWidget):
                 p.setPen(QPen(QColor(255, 255, 255, 200), 1.5))
                 p.drawLine(QPointF(rr.center().x() - 4, rr.center().y()), QPointF(rr.center().x() + 4, rr.center().y()))
                 p.drawLine(QPointF(rr.center().x(), rr.center().y() - 4), QPointF(rr.center().x(), rr.center().y() + 4))
+        if self.band is not None:                              # Auswahl-Rahmen
+            p.setPen(QPen(QColor(255, 255, 255, 220), 1.2, Qt.DashLine))
+            p.setBrush(QColor(255, 255, 255, 28))
+            p.drawRoundedRect(self.band, 6, 6)
         # Abspielkopf
         x = self.tx(self.ph)
         p.setPen(QPen(QColor(255, 255, 255), 1.6))
@@ -1199,6 +1319,10 @@ class MTimeline(QWidget):
 
     # Maus
     def hit(self, pos):
+        for it in self.proj.items:
+            ms = self.mute_rect(it)
+            if ms is not None and self.has_audio(it) and ms.adjusted(-2, -2, 2, 2).contains(pos):
+                return ("mute", it, None)
         for rr, a in self.trans_markers():
             if rr.adjusted(-3, -3, 3, 3).contains(pos):
                 return ("trans", a, None)
@@ -1244,13 +1368,23 @@ class MTimeline(QWidget):
             return
         h = self.hit(pos)
         if h is None:
-            self.sel = None
-            self.selected.emit(None)
-            self.drag = ("seek",)
-            self.seek.emit(max(0.0, self.xt(pos.x())))
+            # leere Fläche: Klick = Abspielposition, Ziehen = Rahmen über mehrere Clips
+            self.drag = ("band", pos)
             self.update()
             return
         kind, it, _ = h
+        if kind == "mute":
+            self.begin.emit()
+            group = self.multi if it in self.multi else [it]
+            new = not it.muted
+            for g in group:
+                g.muted = new
+            self.changed.emit()
+            self.selected.emit(self.sel if self.sel is not None else (("multi", self.multi) if self.multi else None))
+            self.update()
+            return
+        if it not in self.multi:
+            self.multi = []
         if kind == "trans":
             self.sel = ("trans", it)
             self.selected.emit(self.sel)
@@ -1279,9 +1413,27 @@ class MTimeline(QWidget):
         if self.drag[0] == "seek":
             self.seek.emit(max(0.0, self.xt(pos.x())))
             return
+        if self.drag[0] == "band":
+            p0 = self.drag[1]
+            if (pos - p0).manhattanLength() > 6 or self.band is not None:
+                self.band = QRectF(p0, pos).normalized()
+                self.multi = [i for i in self.proj.items if self.item_rect(i).intersects(self.band)]
+                self.update()
+            return
         kind, it, x0, st0, in0, out0, tr0 = self.drag
         dt = (pos.x() - x0) / self.pps
         info = {"dur": 3600.0} if it.kind == "box" else media_info(it.path)
+        if kind == "move" and len(self.multi) > 1 and it in self.multi and not (self.proj.magnet and it.track == 0):
+            # mehrere ausgewählte Stücke zusammen verschieben
+            if not hasattr(self, "_grp0"):
+                self._grp0 = {g.id: g.start for g in self.multi}
+            mn = min(self._grp0.values())
+            d = max(-mn, dt)
+            for g in self.multi:
+                g.start = self._grp0[g.id] + d
+            self.changed.emit()
+            self.update()
+            return
         if kind == "move":
             tr = self.track_at(pos.y())
             if tr is not None and (tr <= 0) == (it.track <= 0) and tr != it.track and not (it.kind == "box" and tr == 0):
@@ -1323,6 +1475,26 @@ class MTimeline(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, e):
+        if hasattr(self, "_grp0"):
+            del self._grp0
+        if self.drag and self.drag[0] == "band":
+            if self.band is None:                         # nur geklickt: Abspielposition setzen
+                self.sel = None
+                self.multi = []
+                self.selected.emit(None)
+                self.seek.emit(max(0.0, self.xt(e.position().x())))
+            else:
+                self.band = None
+                self.sel = None
+                if len(self.multi) == 1:
+                    self.sel = self.multi[0]
+                    self.multi = []
+                    self.selected.emit(self.sel)
+                else:
+                    self.selected.emit(("multi", list(self.multi)) if self.multi else None)
+            self.drag = None
+            self.update()
+            return
         if self.drag and self.drag[0] != "seek":
             self.proj.pack()
             self.changed.emit()
@@ -1446,12 +1618,9 @@ class MontagePage(QWidget):
         self.audio = None
         self._aud_gen = 0
         self._aud_file = None
-        if QMediaPlayer is not None:
+        if QAudioSink is not None:
             try:
-                self.audio = QMediaPlayer()
-                self.aout = QAudioOutput()
-                self.aout.setVolume(0.9)
-                self.audio.setAudioOutput(self.aout)
+                self.audio = PcmAudio()
             except Exception:
                 self.audio = None
         _NOTIFY[0] = lambda: self.win.ui(self._loaded)
@@ -1560,7 +1729,6 @@ class MontagePage(QWidget):
         tb("", "refresh", self.redo, "Wiederholen (Strg+Y)")
         tb("Teilen", "cut", self.split, "Clip an der Abspielposition teilen (S)")
         tb("Löschen", "trash", self.delete_sel, "Ausgewähltes löschen (Entf)")
-        tb("Viereck", "square", self.add_box, "Viereck (mit Text) hinzufügen – in der Vorschau frei verschieben")
         tools.addSpacing(8)
         self.mag_btn = PopButton("Einrasten", "magnet", "accent" if self.proj.magnet else "glass", 32)
         self.mag_btn.setToolTip("An: Clips kleben lückenlos aneinander. Aus: frei verschieben.")
@@ -1722,6 +1890,27 @@ class MontagePage(QWidget):
             L.addWidget(b)
             L.addStretch(1)
             return
+        if isinstance(sel, tuple) and sel[0] == "multi":
+            items = sel[1]
+            title(f"{len(items)} ausgewählt", "Mit gedrückter Maus über mehrere Clips ziehen. Ziehen an einem der Clips "
+                                              "verschiebt alle zusammen (bei Einrasten nur Ton und obere Spuren).")
+            anyon = any(not i.muted for i in items)
+            b = PopButton("Alle stumm" if anyon else "Ton für alle an", "mute" if anyon else "speaker", "glass", 34)
+            b.clicked.connect(lambda: self.mute_items(items, anyon))
+            L.addWidget(b)
+            vids = [i for i in items if i.track <= 0]
+            if vids:
+                L.addWidget(lbl("Geschwindigkeit", 9, True, "muted"))
+                s = Segmented(["0.5×", "1×", "1.5×", "2×"], height=34)
+                s.set_current(f"{vids[0].speed:g}×")
+                s.changed.connect(lambda v: self.speed_items(vids, float(v.replace("×", ""))))
+                L.addWidget(s)
+            L.addSpacing(6)
+            b = PopButton(f"{len(items)} löschen", "trash", "danger", 34)
+            b.clicked.connect(self.delete_sel)
+            L.addWidget(b)
+            L.addStretch(1)
+            return
         if isinstance(sel, tuple):
             a = sel[1]
             title("Übergang", "Wie der Clip in den nächsten übergeht.")
@@ -1789,6 +1978,12 @@ class MontagePage(QWidget):
             s.set_current(f"{it.speed:g}×")
             s.changed.connect(lambda v: self.set_speed(it, float(v.replace("×", ""))))
             L.addWidget(s)
+            if self.tl.has_audio(it):
+                b = PopButton("Ton an" if it.muted else "Stumm schalten", "speaker" if it.muted else "mute", "glass", 32)
+                b.clicked.connect(lambda: self.mute_items([it], not it.muted))
+                L.addWidget(b)
+            else:
+                L.addWidget(lbl("Dieser Clip hat keinen Ton.", 8.5, False, "muted"))
             sr = SliderRow("Clip-Ton", 0, 2, 40, it.volume, lambda v: f"{int(round(v * 100))} %")
             sr.s.valueChanged.connect(lambda _: (setattr(it, "volume", round(sr.value(), 2)), self.on_changed(light=True)))
             L.addWidget(sr)
@@ -1804,6 +1999,9 @@ class MontagePage(QWidget):
             L.addWidget(b)
         else:
             title("Musik / Sound", name)
+            b = PopButton("Ton an" if it.muted else "Stumm schalten", "speaker" if it.muted else "mute", "glass", 32)
+            b.clicked.connect(lambda: self.mute_items([it], not it.muted))
+            L.addWidget(b)
             sr = SliderRow("Lautstärke", 0, 2, 40, it.volume, lambda v: f"{int(round(v * 100))} %")
             sr.s.valueChanged.connect(lambda _: (setattr(it, "volume", round(sr.value(), 2)), self.on_changed(light=True)))
             L.addWidget(sr)
@@ -1847,6 +2045,27 @@ class MontagePage(QWidget):
         if self.redo_st:
             self.undo_st.append(json.dumps(self.proj.to_dict()))
             self._restore(self.redo_st.pop())
+
+    def mute_items(self, items, on):
+        self.snapshot()
+        for i in items:
+            i.muted = on
+        self.show_inspector(self.tl.sel if self.tl.sel is not None else (("multi", items) if len(items) > 1 else None))
+        self.on_changed()
+        self.win.say("Stumm geschaltet" if on else "Ton wieder an")
+
+    def speed_items(self, items, sp):
+        self.snapshot()
+        for i in items:
+            i.speed = sp
+        self.proj.pack()
+        self.on_changed()
+
+    def select_all(self):
+        self.tl.multi = list(self.proj.items)
+        self.tl.sel = None
+        self.show_inspector(("multi", self.tl.multi) if self.tl.multi else None)
+        self.tl.update()
 
     def set_trans(self, a, key):
         self.snapshot()
@@ -1898,8 +2117,7 @@ class MontagePage(QWidget):
         self.tl.update()
 
     def _sync_boxes(self):
-        t = self.tl.ph
-        self.preview.boxes = [b for b in self.proj.boxes() if b.start - 1e-6 <= t < b.end]
+        self.preview.boxes = []
         sel = self.tl.sel
         self.preview.sel = sel if isinstance(sel, MItem) and sel.kind == "box" else None
         self.preview.update()
@@ -1958,6 +2176,19 @@ class MontagePage(QWidget):
 
     def delete_sel(self):
         s = self.tl.sel
+        if self.tl.multi:
+            self.snapshot()
+            ids = {i.id for i in self.tl.multi}
+            self.proj.items = [i for i in self.proj.items if i.id not in ids]
+            n = len(ids)
+            self.tl.multi = []
+            self.tl.sel = None
+            self.proj.pack()
+            self.remove_empty_lanes()
+            self.show_inspector(None)
+            self.on_changed()
+            self.win.say(f"{n} gelöscht")
+            return
         if isinstance(s, tuple):
             self.set_trans(s[1], "none")
             return
@@ -1999,40 +2230,46 @@ class MontagePage(QWidget):
 
     # ---- Ton-Vorschau: der komplette Ton wird im Hintergrund kurz vorberechnet
     def render_audio(self):
+        """Den kompletten Ton (Clips + Musik + Übergänge + Lautstärken) im Hintergrund vorberechnen."""
         if self.audio is None:
             return
         self._aud_gen += 1
         gen = self._aud_gen
         if not self.proj.items:
+            self.audio.load(None)
             return
         proj = copy.deepcopy(self.proj)
 
         def work():
             try:
                 inputs, graph, vl, al, W, H, fps, L = build_graph(proj, audio_only=True)
-                out = os.path.join(tempfile.gettempdir(), f"ace_montage_preview_{gen % 3}.m4a")
-                gf = out + ".txt"
+                gf = os.path.join(tempfile.gettempdir(), f"ace_montage_audio_{uuid.uuid4().hex[:8]}.txt")
                 with open(gf, "w", encoding="utf-8") as fh:
                     fh.write(graph)
                 ff = core.find_ffmpeg()
                 r = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error"] + inputs +
-                                   ["-filter_complex_script", gf, "-map", f"[{al}]", "-c:a", "aac", "-b:a", "192k", out],
+                                   ["-filter_complex_script", gf, "-map", f"[{al}]", "-f", "s16le", "-ac", "2",
+                                    "-ar", str(RATE), "-"],
                                    capture_output=True, creationflags=core.NOWIN | getattr(
-                                       subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0), timeout=300)
-                if r.returncode == 0 and gen == self._aud_gen:
-                    self.win.ui(self._audio_ready, out)
-            except Exception:
-                pass
+                                       subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0), timeout=600)
+                try:
+                    os.remove(gf)
+                except OSError:
+                    pass
+                if gen != self._aud_gen:
+                    return
+                if r.returncode == 0 and r.stdout:
+                    self.win.ui(self._audio_ready, r.stdout)
+                else:
+                    err = r.stderr.decode("utf-8", "ignore").strip().splitlines()
+                    self.win.ui(self.win.say, "Ton-Vorschau fehlgeschlagen: " + (err[-1][:80] if err else "?"), RED)
+            except Exception as e:
+                self.win.ui(self.win.say, f"Ton-Vorschau fehlgeschlagen: {e}"[:100], RED)
         threading.Thread(target=work, daemon=True).start()
 
-    def _audio_ready(self, path):
-        self._aud_file = path
-        was = self.playing
-        self.audio.stop()
-        self.audio.setSource(QUrl.fromLocalFile(path))
-        if was:
-            self.audio.setPosition(int(self.player.t * 1000))
-            self.audio.play()
+    def _audio_ready(self, data):
+        self._aud_file = True
+        self.audio.load(data)
 
     # ---- Abspielen
     def seek(self, t):
@@ -2157,6 +2394,17 @@ class MontagePage(QWidget):
             self.redo() if e.modifiers() & Qt.ShiftModifier else self.undo()
         elif ctrl and k == Qt.Key_Y:
             self.redo()
+        elif ctrl and k == Qt.Key_A:
+            self.select_all()
+        elif k == Qt.Key_M:
+            sel = self.tl.multi or ([self.tl.sel] if isinstance(self.tl.sel, MItem) else [])
+            if sel:
+                self.mute_items(sel, not all(i.muted for i in sel))
+        elif k == Qt.Key_Escape:
+            self.tl.multi = []
+            self.tl.sel = None
+            self.show_inspector(None)
+            self.tl.update()
         elif k in (Qt.Key_Delete, Qt.Key_Backspace):
             self.delete_sel()
         elif k == Qt.Key_S:

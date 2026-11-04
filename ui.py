@@ -179,6 +179,14 @@ def paint_icon(p, name, rect, color, lw=1.9):
     elif name == "ticket":
         p.drawRoundedRect(QRectF(4.5, 7, 15, 10), 2, 2)
         p.drawLine(P(14, 7.5), P(14, 16.5))
+    elif name in ("speaker", "mute"):
+        poly([(4.5, 9.5), (8, 9.5), (12.5, 5.5), (12.5, 18.5), (8, 14.5), (4.5, 14.5)], close=True)
+        if name == "speaker":
+            p.drawArc(QRectF(11.5, 8, 6, 8), -60 * 16, 120 * 16)
+            p.drawArc(QRectF(11.5, 5.5, 9.5, 13), -60 * 16, 120 * 16)
+        else:
+            p.drawLine(P(15.5, 9.5), P(20, 14.5))
+            p.drawLine(P(20, 9.5), P(15.5, 14.5))
     elif name == "music":
         p.drawEllipse(P(8, 17), 2.6, 2.2)
         p.drawEllipse(P(16.5, 15.5), 2.6, 2.2)
