@@ -33,6 +33,7 @@ class PcmAudio:
 
     def __init__(self):
         self.data = None          # bytes, s16le stereo 48 kHz
+        self.source = None        # oder Funktion (start_sample, anzahl) -> bytes: live gemischt
         self.sink = None
         self.io = None
         self.idx = 0
@@ -64,7 +65,7 @@ class PcmAudio:
         self.io = self.sink.start()
 
     def play(self):
-        if self.data is None:
+        if self.data is None and self.source is None:
             return
         self._open()
         self.playing = True
@@ -72,13 +73,17 @@ class PcmAudio:
         self.timer.start()
 
     def _feed(self):
-        if not self.playing or self.io is None or self.data is None:
+        if not self.playing or self.io is None or (self.data is None and self.source is None):
             return
         n = self.sink.bytesFree()
         n -= n % 4
         if n <= 0:
             return
-        chunk = self.data[self.idx:self.idx + n]
+        n = min(n, RATE * 4 // 20)                    # kleine Stücke: Änderungen sind sofort zu hören
+        if self.source is not None:
+            chunk = self.source(self.idx // 4, n // 4)
+        else:
+            chunk = self.data[self.idx:self.idx + n]
         if not chunk:
             return
         self.io.write(chunk)
@@ -863,6 +868,89 @@ class ClipStream(threading.Thread):
                 pass
 
 
+class LiveMixer:
+    """Mischt den Ton der Montage live (Clips, Musik, Lautstärke, Stumm, Ein-/Ausblenden, Übergänge).
+    Jede Änderung ist beim Abspielen sofort zu hören - es wird nichts neu berechnet."""
+
+    def __init__(self, page):
+        self.page = page
+        self.stems = {}
+        self.pending = set()
+
+    @staticmethod
+    def key(it):
+        return (it.path, round(it.src_in, 3), round(it.src_out, 3), round(it.speed, 3))
+
+    def ensure(self):
+        keep = set()
+        for it in self.page.proj.items:
+            if it.kind == "box":
+                continue
+            inf = media_info(it.path)
+            if not inf.get("audio"):
+                continue
+            k = self.key(it)
+            keep.add(k)
+            if k not in self.stems and k not in self.pending:
+                self.pending.add(k)
+                threading.Thread(target=self._decode, args=(k,), daemon=True).start()
+        for k in list(self.stems):                    # alte Fassungen (z. B. nach dem Kürzen) freigeben
+            if k not in keep:
+                del self.stems[k]
+
+    def _decode(self, k):
+        path, a, b, sp = k
+        try:
+            r = subprocess.run([core.find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{a:.3f}", "-t",
+                                f"{max(0.05, b - a):.3f}", "-i", path, "-vn", "-af", _atempo(sp), "-f", "s16le",
+                                "-ac", "2", "-ar", str(RATE), "-"], capture_output=True, creationflags=core.NOWIN,
+                               timeout=300)
+            self.stems[k] = np.frombuffer(r.stdout, np.int16).reshape(-1, 2)
+        except Exception:
+            self.stems[k] = np.zeros((0, 2), np.int16)
+        self.pending.discard(k)
+
+    def mix(self, i0, n):
+        proj = self.page.proj
+        out = np.zeros((n, 2), np.float32)
+        t0, t1 = i0 / RATE, (i0 + n) / RATE
+        xin, xout = {}, {}
+        vs = proj.videos()
+        for k_, a in enumerate(vs[:-1]):                       # Übergänge: weich überblenden
+            b = vs[k_ + 1]
+            ov = a.end - b.start
+            if a.trans != "none" and ov > 0.05:
+                xout[a.id], xin[b.id] = ov, ov
+        for it in proj.items:
+            if it.kind == "box" or it.end <= t0 or it.start >= t1:
+                continue
+            g = it.vol
+            if g <= 0.0001:
+                continue
+            st = self.stems.get(self.key(it))
+            if st is None or not len(st):
+                continue
+            a = max(t0, it.start)
+            b = min(t1, it.end)
+            ia = int(round((a - it.start) * RATE))
+            ib = min(len(st), ia + int(round((b - a) * RATE)))
+            if ib <= ia:
+                continue
+            seg = st[ia:ib].astype(np.float32)
+            tl_ = (ia + np.arange(len(seg), dtype=np.float32)) / RATE        # Zeit im Clip
+            env = np.full(len(seg), g, np.float32)
+            d = it.dur
+            for fi in (it.fade_in, xin.get(it.id, 0.0)):
+                if fi > 0.01:
+                    env *= np.clip(tl_ / fi, 0.0, 1.0)
+            for fo in (it.fade_out, xout.get(it.id, 0.0)):
+                if fo > 0.01:
+                    env *= np.clip((d - tl_) / fo, 0.0, 1.0)
+            oa = int(round((a - t0) * RATE))
+            out[oa:oa + len(seg)] += seg * env[:, None]
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+
 class MontagePlayer(threading.Thread):
     def __init__(self, page):
         super().__init__(daemon=True)
@@ -1122,6 +1210,10 @@ class Preview(QWidget):
     box_picked = Signal(object)
     box_changed = Signal()
     box_begin = Signal()
+    dbl = Signal()
+
+    def mouseDoubleClickEvent(self, e):
+        self.dbl.emit()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1962,9 +2054,11 @@ class MontagePage(QWidget):
         self.audio = None
         self._aud_gen = 0
         self._aud_file = None
+        self.mixer = LiveMixer(self)
         if QAudioSink is not None:
             try:
                 self.audio = PcmAudio()
+                self.audio.source = self.mixer.mix
             except Exception:
                 self.audio = None
         _NOTIFY[0] = lambda: self.win.ui(self._loaded)
@@ -1991,6 +2085,7 @@ class MontagePage(QWidget):
 
         # links: Medien
         left = Glass(radius=30, alpha=120)
+        self.left_panel = left
         left.setFixedWidth(300)
         lv = QVBoxLayout(left)
         lv.setContentsMargins(16, 16, 10, 12)
@@ -2017,6 +2112,7 @@ class MontagePage(QWidget):
         mv.setContentsMargins(14, 14, 14, 12)
         mv.setSpacing(10)
         self.preview = Preview()
+        self.preview.dbl.connect(self.toggle_fs)
         self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.preview.box_picked.connect(self._pick_box)
         self.preview.box_begin.connect(self.snapshot)
@@ -2038,6 +2134,10 @@ class MontagePage(QWidget):
         b.clicked.connect(lambda: self.seek(self.proj.length()))
         ctl.addWidget(b)
         ctl.addStretch(1)
+        self.fs_btn = PopButton("", "expand", "glass", 38, icon_only=True)
+        self.fs_btn.setToolTip("Vollbild-Vorschau (F) – so sieht das fertige Video aus")
+        self.fs_btn.clicked.connect(self.toggle_fs)
+        ctl.addWidget(self.fs_btn)
         self.exp_btn = PopButton("Montage exportieren", "upload", "accent", 40)
         self.exp_btn.clicked.connect(self.export)
         ctl.addWidget(self.exp_btn)
@@ -2049,6 +2149,7 @@ class MontagePage(QWidget):
 
         # rechts: Eigenschaften
         right = Glass(radius=30, alpha=120)
+        self.right_panel = right
         right.setFixedWidth(340)
         self.insp_outer = QVBoxLayout(right)
         self.insp_outer.setContentsMargins(18, 18, 18, 14)
@@ -2061,6 +2162,7 @@ class MontagePage(QWidget):
 
         # unten: Werkzeuge + Zeitleiste
         bottom = Glass(radius=30, alpha=120)
+        self.bottom_panel = bottom
         bv = QVBoxLayout(bottom)
         bv.setContentsMargins(12, 10, 12, 10)
         bv.setSpacing(6)
@@ -2275,6 +2377,19 @@ class MontagePage(QWidget):
             b.clicked.connect(lambda: self.mute_items(items, anyon))
             L.addWidget(b)
             vids = [i for i in items if i.track <= 0]
+            vol0 = sum(i.volume for i in items) / max(1, len(items))
+            vsr = SliderRow("Lautstärke (alle ausgewählten)", 0, 2, 40, vol0, lambda v: f"{int(round(v * 100))} %")
+            vst = {"snap": False}
+
+            def vol_all(_):
+                if not vst["snap"]:
+                    self.snapshot()
+                    vst["snap"] = True
+                for i in items:
+                    i.volume = round(vsr.value(), 2)
+                self.on_changed(light=True)
+            vsr.s.valueChanged.connect(vol_all)
+            L.addWidget(vsr)
             if vids:
                 L.addWidget(self.speed_slider(vids, "Geschwindigkeit (alle ausgewählten)"))
             L.addSpacing(6)
@@ -2771,6 +2886,8 @@ class MontagePage(QWidget):
         if not (self.tl.drag and self.tl.drag[0] in ("left", "right")):
             self.player.seek(self.tl.ph)              # beim Kürzen bleibt das Bild an der Schnittkante
         self._sync_boxes()
+        self.mixer.ensure()
+        self._aud_file = bool(self.proj.items)
         self.save_t.start()
 
     def _after_change(self):
@@ -2780,42 +2897,9 @@ class MontagePage(QWidget):
 
     # ---- Ton-Vorschau: der komplette Ton wird im Hintergrund kurz vorberechnet
     def render_audio(self):
-        """Den kompletten Ton (Clips + Musik + Übergänge + Lautstärken) im Hintergrund vorberechnen."""
-        if self.audio is None:
-            return
-        self._aud_gen += 1
-        gen = self._aud_gen
-        if not self.proj.items:
-            self.audio.load(None)
-            return
-        proj = copy.deepcopy(self.proj)
-
-        def work():
-            try:
-                inputs, graph, vl, al, W, H, fps, L = build_graph(proj, audio_only=True)
-                gf = os.path.join(tempfile.gettempdir(), f"ace_montage_audio_{uuid.uuid4().hex[:8]}.txt")
-                with open(gf, "w", encoding="utf-8") as fh:
-                    fh.write(graph)
-                ff = core.find_ffmpeg()
-                r = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error"] + inputs +
-                                   graph_args(graph, gf) + ["-map", f"[{al}]", "-f", "s16le", "-ac", "2",
-                                    "-ar", str(RATE), "-"],
-                                   capture_output=True, creationflags=core.NOWIN | getattr(
-                                       subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0), timeout=600)
-                try:
-                    os.remove(gf)
-                except OSError:
-                    pass
-                if gen != self._aud_gen:
-                    return
-                if r.returncode == 0 and r.stdout:
-                    self.win.ui(self._audio_ready, r.stdout)
-                else:
-                    err = r.stderr.decode("utf-8", "ignore").strip().splitlines()
-                    self.win.ui(self.win.say, "Ton-Vorschau fehlgeschlagen: " + (err[-1][:80] if err else "?"), RED)
-            except Exception as e:
-                self.win.ui(self.win.say, f"Ton-Vorschau fehlgeschlagen: {e}"[:100], RED)
-        threading.Thread(target=work, daemon=True).start()
+        """Ton-Stücke der Clips im Hintergrund laden; gemischt wird live beim Abspielen."""
+        self.mixer.ensure()
+        self._aud_file = bool(self.proj.items)
 
     def _audio_ready(self, data):
         self._aud_file = True
@@ -2852,6 +2936,8 @@ class MontagePage(QWidget):
     def stop(self):
         if self.playing:
             self.toggle_play()
+        if getattr(self, "fs", False):
+            self.toggle_fs()
 
     def _time(self):
         self.time_lbl.setText(f"{fmt(self.tl.ph)} / {fmt(self.proj.length())}")
@@ -2943,9 +3029,35 @@ class MontagePage(QWidget):
             except Exception:
                 pass
 
+    # ---- Vollbild-Vorschau
+    def toggle_fs(self):
+        w = self.win
+        on = not getattr(self, "fs", False)
+        self.fs = on
+        if on:
+            self._was_max = w.isMaximized()
+            w.showFullScreen()
+        else:
+            w.showMaximized() if self._was_max else w.showNormal()
+        for x in (self.left_panel, self.right_panel, self.bottom_panel, w.sidebar):
+            x.setVisible(not on)
+        w.dock.setVisible(not on)
+        w.bg.layout().setContentsMargins(*((10, 10, 10, 10) if on else (20, 12, 20, 20)))
+        w.place_dock()
+        self.fs_btn.icon_name = "shrink" if on else "expand"
+        self.fs_btn.setToolTip("Vollbild beenden (Esc)" if on else "Vollbild-Vorschau (F)")
+        self.fs_btn.update()
+        QTimer.singleShot(120, lambda: self.player.seek(self.tl.ph))
+
     # ---- Tasten
     def key(self, e):
         k = e.key()
+        if k == Qt.Key_F:
+            self.toggle_fs()
+            return True
+        if k == Qt.Key_Escape and getattr(self, "fs", False):
+            self.toggle_fs()
+            return True
         ctrl = bool(e.modifiers() & Qt.ControlModifier)
         if k == Qt.Key_Space:
             self.toggle_play()
