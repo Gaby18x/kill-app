@@ -139,7 +139,8 @@ def waveform(path, n=600):
 
 # ------------------------------------------------------------------ Datenmodell
 class MItem:
-    """Ein Stück auf der Zeitleiste. track 0 = Video, 1/2 = Ton."""
+    """Ein Stück auf der Zeitleiste. track 0 = Haupt-Video, -1/-2/... = weitere Video-Spuren (liegen darüber),
+    1/2/... = Ton-Spuren."""
 
     def __init__(self, path, track=0, start=0.0, src_in=0.0, src_out=None):
         self.id = uuid.uuid4().hex[:8]
@@ -184,12 +185,23 @@ class Project:
         self.magnet = True
         self.res = "Original"        # Original / 1080p / 1440p
         self.fps = "Original"        # Original / 60 / 30
+        self.vlanes = 1              # Anzahl Video-Spuren
+        self.alanes = 1              # Anzahl Ton-Spuren
 
     def videos(self):
+        """Haupt-Video-Spur (hier rasten Clips ein und sitzen die Übergänge)."""
         return sorted([i for i in self.items if i.track == 0], key=lambda x: x.start)
+
+    def overlays(self):
+        """Clips auf den weiteren Video-Spuren (überdecken die Spuren darunter)."""
+        return sorted([i for i in self.items if i.track < 0], key=lambda x: (-x.track, x.start))
 
     def audios(self):
         return [i for i in self.items if i.track > 0]
+
+    def lanes(self):
+        """Spuren in Anzeige-Reihenfolge: oberste Video-Spur zuerst, dann Haupt-Video, dann Ton."""
+        return list(range(-(self.vlanes - 1), 1)) + list(range(1, self.alanes + 1))
 
     def pack(self):
         """Einrasten: Clips kleben aneinander (Übergänge überlappen um ihre Dauer)."""
@@ -209,13 +221,17 @@ class Project:
         return max(ends) if ends else 0.0
 
     def to_dict(self):
-        return {"items": [i.to_dict() for i in self.items], "magnet": self.magnet, "res": self.res, "fps": self.fps}
+        return {"items": [i.to_dict() for i in self.items], "magnet": self.magnet, "res": self.res, "fps": self.fps,
+                "vlanes": self.vlanes, "alanes": self.alanes}
 
     def load(self, d):
         self.items = [MItem.from_dict(x) for x in (d or {}).get("items", []) if os.path.exists(x.get("path", ""))]
         self.magnet = (d or {}).get("magnet", True)
         self.res = (d or {}).get("res", "Original")
         self.fps = (d or {}).get("fps", "Original")
+        tr = [i.track for i in self.items]
+        self.vlanes = max((d or {}).get("vlanes", 1), 1 - min(tr + [0]))
+        self.alanes = max((d or {}).get("alanes", 1), max(tr + [1]))
 
 
 # ------------------------------------------------------------------ Export (FFmpeg)
@@ -315,9 +331,26 @@ def build_graph(proj, audio_only=False):
             pos += d
         cursor = it.start + d
         prev = it
-    length = max(pos, max((a.end for a in aus), default=0.0))
+    ovs = proj.overlays()
+    length = max(pos, max((a.end for a in aus), default=0.0), max((o.end for o in ovs), default=0.0))
+    # weitere Video-Spuren: liegen über dem Haupt-Video (Ton wird dazugemischt)
+    ov_mix = []
+    ov_list = []
+    for k, o in enumerate(ovs):
+        info = media_info(o.path)
+        i = add_input(["-ss", f"{o.src_in:.3f}", "-t", f"{(o.src_out - o.src_in):.3f}", "-i", o.path])
+        if not audio_only:
+            f.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{o.speed:.4f},fps={fps:.3f},scale={W}:{H}:force_original_aspect_ratio="
+                     f"decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+                     f"setpts=PTS+{o.start:.3f}/TB[ov{k}]")
+            ov_list.append((f"ov{k}", o))
+        if info["audio"]:
+            ms = int(round(o.start * 1000))
+            f.append(f"[{i}:a]asetpts=PTS-STARTPTS,{_atempo(o.speed)},volume={o.volume:.3f},aresample=48000,"
+                     f"aformat=channel_layouts=stereo:sample_rates=48000,adelay={ms}|{ms}[oa{k}]")
+            ov_mix.append(f"oa{k}")
     # Musik / Sounds
-    mix = [alab] if alab else []
+    mix = ([alab] if alab else []) + ov_mix
     for k, a in enumerate(aus):
         i = add_input(["-ss", f"{a.src_in:.3f}", "-t", f"{(a.src_out - a.src_in):.3f}", "-i", a.path])
         d = a.dur
@@ -340,11 +373,16 @@ def build_graph(proj, audio_only=False):
                                                    f"atrim=0:{length:.3f}[aout]")
     if not audio_only:
         if vlab is None:
-            f.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:d={max(0.1, length):.3f},format=yuv420p[vout]")
-        elif length > pos + 0.04:                             # Musik länger als die Clips: schwarz auffüllen
-            f.append(f"[{vlab}]tpad=stop_mode=add:stop_duration={length - pos:.3f}:color=black[vout]")
+            f.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:d={max(0.1, length):.3f},format=yuv420p[vb0]")
+        elif length > pos + 0.04:                             # länger als die Haupt-Spur: schwarz auffüllen
+            f.append(f"[{vlab}]tpad=stop_mode=add:stop_duration={length - pos:.3f}:color=black[vb0]")
         else:
-            f.append(f"[{vlab}]null[vout]")
+            f.append(f"[{vlab}]null[vb0]")
+        cur = "vb0"
+        for n_, (lab, o) in enumerate(ov_list):
+            f.append(f"[{cur}][{lab}]overlay=eof_action=pass:enable='between(t,{o.start:.3f},{o.end:.3f})'[vb{n_ + 1}]")
+            cur = f"vb{n_ + 1}"
+        f.append(f"[{cur}]null[vout]")
     return inputs, ";".join(f), "vout", "aout", W, H, fps, length
 
 
@@ -490,11 +528,18 @@ class MontagePlayer(threading.Thread):
         self.t0 = self.p0 = 0.0
         self.size = (960, 540)
         self.latest = None
+        self.want_src = None
         self.stop_flag = False
 
     def seek(self, t):
         with self.lock:
             self.want = max(0.0, t)
+        self.ev.set()
+
+    def show_src(self, path, t):
+        """Beim Kürzen: genau das Bild an der Schnittkante zeigen."""
+        with self.lock:
+            self.want_src = (path, t)
         self.ev.set()
 
     def play(self, on):
@@ -511,6 +556,12 @@ class MontagePlayer(threading.Thread):
     def frame_at(self, t):
         proj = self.page.proj
         W, H = self.size
+        top = [o for o in sorted(proj.overlays(), key=lambda x: x.track) if o.start - 1e-6 <= t < o.end]
+        if top:                                      # weitere Video-Spur deckt alles darunter ab
+            o = top[0]
+            fr = self.src.get(o.path, o.src_in + (t - o.start) * o.speed)
+            if fr is not None:
+                return _fit(fr, W, H)
         vs = proj.videos()
         act = [v for v in vs if v.start - 1e-6 <= t < v.end]
         if not act:
@@ -535,7 +586,16 @@ class MontagePlayer(threading.Thread):
         while not self.stop_flag:
             with self.lock:
                 want, self.want = self.want, None
+                wsrc, self.want_src = self.want_src, None
                 playing = self.playing
+            if wsrc is not None:
+                try:
+                    fr = self.src.get(wsrc[0], wsrc[1])
+                    if fr is not None:
+                        with self.lock:
+                            self.latest = (None, _fit(fr, *self.size))
+                except Exception:
+                    pass
             if want is not None:
                 self.t = want
                 with self.lock:
@@ -612,8 +672,10 @@ class MTimeline(QWidget):
     selected = Signal(object)        # MItem, ("trans", MItem) oder None
     changed = Signal()
     begin = Signal()                 # vor einer Änderung (Rückgängig)
+    trimming = Signal(str, float)    # beim Kürzen: Datei + Zeit der Schnittkante (für die Vorschau)
+    add_lane = Signal(str)           # "video" / "audio"
 
-    RULER, VH, AH, GAP, LEFT = 26, 64, 46, 8, 86
+    RULER, VH, AH, GAP, LEFT, ADD = 30, 58, 42, 10, 96, 30
 
     def __init__(self, proj, parent=None):
         super().__init__(parent)
@@ -625,8 +687,15 @@ class MTimeline(QWidget):
         self.drag = None
         self.hover = None
         self.setMouseTracking(True)
-        self.setMinimumHeight(self.RULER + self.VH + 2 * self.AH + 3 * self.GAP + 16)
         self.setFocusPolicy(Qt.ClickFocus)
+        self.relayout()
+
+    def relayout(self):
+        h = self.RULER + self.GAP
+        for tr in self.proj.lanes():
+            h += (self.VH if tr <= 0 else self.AH) + self.GAP
+        self.setFixedHeight(int(h + self.ADD + 8))
+        self.update()
 
     # Geometrie
     def tx(self, t):
@@ -637,17 +706,23 @@ class MTimeline(QWidget):
 
     def track_rect(self, tr):
         y = self.RULER + self.GAP
-        if tr == 0:
-            return QRectF(self.LEFT, y, self.width() - self.LEFT - 8, self.VH)
-        y += self.VH + self.GAP + (tr - 1) * (self.AH + self.GAP)
+        for t_ in self.proj.lanes():
+            hh = self.VH if t_ <= 0 else self.AH
+            if t_ == tr:
+                return QRectF(self.LEFT, y, self.width() - self.LEFT - 8, hh)
+            y += hh + self.GAP
         return QRectF(self.LEFT, y, self.width() - self.LEFT - 8, self.AH)
+
+    def add_rects(self):
+        y = self.height() - self.ADD - 4
+        return (QRectF(8, y, 84, self.ADD), QRectF(100, y, 74, self.ADD))
 
     def item_rect(self, it):
         tr = self.track_rect(it.track)
         return QRectF(self.tx(it.start), tr.top() + 3, max(6.0, it.dur * self.pps), tr.height() - 6)
 
     def track_at(self, y):
-        for tr in (0, 1, 2):
+        for tr in self.proj.lanes():
             r = self.track_rect(tr)
             if r.top() - self.GAP / 2 <= y <= r.bottom() + self.GAP / 2:
                 return tr
@@ -657,12 +732,13 @@ class MTimeline(QWidget):
         """Rauten an den Stellen, wo zwei Clips aneinanderstoßen (hier sitzt der Übergang)."""
         out = []
         vs = self.proj.videos()
-        cy = self.track_rect(0).center().y()
+        r0 = self.track_rect(0)
+        cy = r0.top() - 1                                  # Raute sitzt oben auf der Kante (stört das Kürzen nicht)
         for a, b in zip(vs, vs[1:]):
             if b.start <= a.end + 0.06:
                 t = (b.start + a.end) / 2 if b.start < a.end else b.start
                 x = self.tx(t)
-                out.append((QRectF(x - 11, cy - 11, 22, 22), a))
+                out.append((QRectF(x - 10, cy - 10, 20, 20), a))
         return out
 
     def fit_all(self):
@@ -678,7 +754,23 @@ class MTimeline(QWidget):
         p.setRenderHint(QPainter.TextAntialiasing)
         W = self.width()
         # Spur-Namen
-        for tr, name, ic in ((0, "Video", "film"), (1, "Ton 1", "music"), (2, "Ton 2", "music")):
+        names = []
+        for tr in self.proj.lanes():
+            if tr == 0:
+                names.append((tr, "Video", "film"))
+            elif tr < 0:
+                names.append((tr, f"Video {1 - tr}", "film"))
+            else:
+                names.append((tr, f"Ton {tr}", "music"))
+        for rr, txt in zip(self.add_rects(), ("Video", "Ton")):
+            p.setPen(QPen(T.glass_edge(1.0), 1))
+            p.setBrush(T.card_fill(120))
+            p.drawRoundedRect(rr, rr.height() / 2, rr.height() / 2)
+            paint_icon(p, "plus", QRectF(rr.left() + 8, rr.center().y() - 6, 12, 12), ink(200), 1.6)
+            p.setPen(ink(200))
+            p.setFont(app_font(8.5, True))
+            p.drawText(rr.adjusted(24, 0, -4, 0), Qt.AlignVCenter, txt)
+        for tr, name, ic in names:
             r = self.track_rect(tr)
             p.setPen(Qt.NoPen)
             p.setBrush(T.card_fill(130))
@@ -711,7 +803,7 @@ class MTimeline(QWidget):
             sel = it is self.sel
             path = QPainterPath()
             path.addRoundedRect(r, 8, 8)
-            if it.track == 0:
+            if it.track <= 0:
                 p.save()
                 p.setClipPath(path)
                 p.fillRect(r, QColor(30, 30, 34))
@@ -735,7 +827,7 @@ class MTimeline(QWidget):
                                                             int(r.width() - 16)))
                 p.restore()
             else:
-                col = T.pill()[0] if it.track == 1 else QColor("#5fb3ff")
+                col = [T.pill()[0], QColor("#5fb3ff"), QColor("#f2b36f"), QColor("#5fcfae")][(it.track - 1) % 4]
                 p.setPen(Qt.NoPen)
                 p.setBrush(with_alpha(col, 70))
                 p.drawPath(path)
@@ -778,11 +870,30 @@ class MTimeline(QWidget):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(255, 255, 255, 240) if sel else with_alpha(T.glass_edge(1.0), 255), 2 if sel else 1))
             p.drawRoundedRect(r, 8, 8)
-            if sel:                                              # Griffe zum Kürzen
-                for x in (r.left() + 3, r.right() - 3):
+            if sel or it is self.hover:                          # breite Griffe zum Kürzen
+                for left in (True, False):
+                    hr = QRectF(r.left(), r.top(), 12, r.height()) if left else QRectF(r.right() - 12, r.top(), 12, r.height())
+                    hp = QPainterPath()
+                    hp.addRoundedRect(hr, 6, 6)
                     p.setPen(Qt.NoPen)
-                    p.setBrush(QColor(255, 255, 255))
-                    p.drawRoundedRect(QRectF(x - 2.5, r.center().y() - 12, 5, 24), 2.5, 2.5)
+                    p.setBrush(QColor(255, 255, 255, 235 if sel else 140))
+                    p.drawPath(hp)
+                    p.setPen(QPen(QColor(20, 20, 24), 1.4))
+                    cx = hr.center().x()
+                    p.drawLine(QPointF(cx, hr.center().y() - 6), QPointF(cx, hr.center().y() + 6))
+        if self.drag and self.drag[0] in ("left", "right"):     # Länge beim Kürzen anzeigen
+            it = self.drag[1]
+            r = self.item_rect(it)
+            txt = f"{it.dur:.2f} s"
+            p.setFont(app_font(8.5, True))
+            tw = QFontMetrics(p.font()).horizontalAdvance(txt) + 16
+            x = (r.left() if self.drag[0] == "left" else r.right()) - tw / 2
+            tr_ = QRectF(x, r.top() - 24, tw, 20)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255))
+            p.drawRoundedRect(tr_, 10, 10)
+            p.setPen(QColor(17, 17, 17))
+            p.drawText(tr_, Qt.AlignCenter, txt)
         # Übergänge (Rauten zwischen den Clips)
         for rr, a in self.trans_markers():
             on = a.trans != "none"
@@ -802,7 +913,7 @@ class MTimeline(QWidget):
         # Abspielkopf
         x = self.tx(self.ph)
         p.setPen(QPen(QColor(255, 255, 255), 1.6))
-        p.drawLine(QPointF(x, 6), QPointF(x, self.height() - 6))
+        p.drawLine(QPointF(x, 6), QPointF(x, self.track_rect(self.proj.lanes()[-1]).bottom() + 2))
         tri = QPainterPath()
         tri.moveTo(x - 6, 4)
         tri.lineTo(x + 6, 4)
@@ -820,12 +931,14 @@ class MTimeline(QWidget):
                 return ("trans", a, None)
         for it in sorted(self.proj.items, key=lambda x: -x.start):
             r = self.item_rect(it)
-            if r.contains(pos):
-                if pos.x() - r.left() < 9:
+            if r.adjusted(-6, 0, 6, 0).contains(pos):
+                edge = min(14.0, r.width() / 3)
+                if pos.x() - r.left() < edge:
                     return ("left", it, None)
-                if r.right() - pos.x() < 9:
+                if r.right() - pos.x() < edge:
                     return ("right", it, None)
-                return ("move", it, None)
+                if r.contains(pos):
+                    return ("move", it, None)
         return None
 
     def snap_points(self, skip):
@@ -847,6 +960,10 @@ class MTimeline(QWidget):
     def mousePressEvent(self, e):
         pos = e.position()
         self.setFocus()
+        for rr, kind in zip(self.add_rects(), ("video", "audio")):
+            if rr.contains(pos):
+                self.add_lane.emit(kind)
+                return
         if pos.y() < self.RULER or pos.x() < self.LEFT:
             if pos.x() >= self.LEFT:
                 self.drag = ("seek",)
@@ -877,7 +994,12 @@ class MTimeline(QWidget):
         if not self.drag:
             h = self.hit(pos)
             self.setCursor(Qt.SizeHorCursor if h and h[0] in ("left", "right") else
-                           Qt.PointingHandCursor if h else Qt.ArrowCursor)
+                           Qt.PointingHandCursor if h or any(r.contains(pos) for r in self.add_rects()) else
+                           Qt.ArrowCursor)
+            hv = h[1] if h and h[0] != "trans" else None
+            if hv is not self.hover:
+                self.hover = hv
+                self.update()
             return
         if self.drag[0] == "seek":
             self.seek.emit(max(0.0, self.xt(pos.x())))
@@ -886,6 +1008,10 @@ class MTimeline(QWidget):
         dt = (pos.x() - x0) / self.pps
         info = media_info(it.path)
         if kind == "move":
+            tr = self.track_at(pos.y())
+            if tr is not None and (tr <= 0) == (it.track <= 0) and tr != it.track:
+                it.track = tr                          # zwischen Video-Spuren bzw. Ton-Spuren wechseln
+                self.proj.pack()
             if it.track == 0 and self.proj.magnet:
                 # Einrasten: Reihenfolge per Ziehen ändern
                 vs = self.proj.videos()
@@ -905,20 +1031,17 @@ class MTimeline(QWidget):
                 if ne != ns + it.dur:
                     ns = ne - it.dur
                 it.start = max(0.0, ns)
-                if it.track > 0:
-                    tr = self.track_at(pos.y())
-                    if tr in (1, 2):
-                        it.track = tr
         elif kind == "left":
+            # von vorne kürzen: die linke Kante folgt der Maus, Einrasten erst beim Loslassen
             ni = min(out0 - 0.2, max(0.0, in0 + dt * it.speed))
-            if not (it.track == 0 and self.proj.magnet):
-                it.start = max(0.0, st0 + (ni - in0) / it.speed)
+            it.start = max(0.0, st0 + (ni - in0) / it.speed)
             it.src_in = ni
-            self.proj.pack()
+            self.trimming.emit(it.path, ni)
         elif kind == "right":
             no = max(in0 + 0.2, min(info["dur"] or out0, out0 + dt * it.speed))
             it.src_out = no
             self.proj.pack()
+            self.trimming.emit(it.path, max(0.0, no - 0.02))
         self.changed.emit()
         self.update()
 
@@ -1146,6 +1269,8 @@ class MontagePage(QWidget):
         self.tl.selected.connect(self.show_inspector)
         self.tl.changed.connect(self.on_changed)
         self.tl.begin.connect(self.snapshot)
+        self.tl.trimming.connect(lambda path, t: self.player.show_src(path, t))
+        self.tl.add_lane.connect(self.add_lane)
         bv.addWidget(self.tl)
         root.addWidget(bottom)
         self.refresh_media()
@@ -1201,8 +1326,16 @@ class MontagePage(QWidget):
     def add_media(self, path, audio):
         self.snapshot()
         if audio:
-            free1 = all(not (a.start < self.tl.ph + 1 and a.end > self.tl.ph) for a in self.proj.audios() if a.track == 1)
-            it = MItem(path, 1 if free1 else 2, start=self.tl.ph)
+            lane = None
+            for tr in range(1, self.proj.alanes + 1):      # erste freie Ton-Spur an der Abspielposition
+                if all(not (a.start < self.tl.ph + 1 and a.end > self.tl.ph) for a in self.proj.audios() if a.track == tr):
+                    lane = tr
+                    break
+            if lane is None:
+                self.proj.alanes += 1
+                lane = self.proj.alanes
+                self.tl.relayout()
+            it = MItem(path, lane, start=self.tl.ph)
         else:
             vs = self.proj.videos()
             it = MItem(path, 0, start=vs[-1].end if vs else 0.0)
@@ -1289,7 +1422,7 @@ class MontagePage(QWidget):
             return
         it = sel
         name = os.path.basename(it.path)
-        if it.track == 0:
+        if it.track <= 0:
             title("Clip", name)
             L.addWidget(lbl("Geschwindigkeit", 9, True, "muted"))
             s = Segmented(["0.5×", "1×", "1.5×", "2×"], height=34)
@@ -1301,7 +1434,11 @@ class MontagePage(QWidget):
             L.addWidget(sr)
             L.addWidget(lbl(f"Ausschnitt: {fmt(it.src_in)} – {fmt(it.src_out)}  ·  Ränder unten ziehen zum Kürzen",
                             8.5, False, "muted", True))
+            if it.track < 0:
+                L.addWidget(lbl("Liegt auf einer oberen Video-Spur und überdeckt dort das Haupt-Video.", 8.5,
+                                False, "muted", True))
             b = PopButton("Übergang zum nächsten Clip …", "layers", "glass", 34)
+            b.setVisible(it.track == 0)
             b.clicked.connect(lambda: (setattr(self.tl, "sel", ("trans", it)), self.show_inspector(("trans", it)),
                                        self.tl.update()))
             L.addWidget(b)
@@ -1336,6 +1473,7 @@ class MontagePage(QWidget):
     def _restore(self, s):
         self.proj.load(json.loads(s))
         self.tl.proj = self.proj
+        self.tl.relayout()
         self.tl.sel = None
         self.show_inspector(None)
         self.on_changed()
@@ -1379,6 +1517,29 @@ class MontagePage(QWidget):
             it.fade_out = max(it.fade_out, 2.0)
         self.show_inspector(it)
         self.on_changed()
+
+    def add_lane(self, kind):
+        self.snapshot()
+        if kind == "video":
+            if self.proj.vlanes >= 4:
+                self.win.say("Höchstens 4 Video-Spuren")
+                return
+            self.proj.vlanes += 1
+        else:
+            if self.proj.alanes >= 6:
+                self.win.say("Höchstens 6 Ton-Spuren")
+                return
+            self.proj.alanes += 1
+        self.tl.relayout()
+        self.on_changed()
+
+    def remove_empty_lanes(self):
+        used = {i.track for i in self.proj.items}
+        while self.proj.vlanes > 1 and -(self.proj.vlanes - 1) not in used:
+            self.proj.vlanes -= 1
+        while self.proj.alanes > 1 and self.proj.alanes not in used:
+            self.proj.alanes -= 1
+        self.tl.relayout()
 
     def toggle_magnet(self):
         self.snapshot()

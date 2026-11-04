@@ -933,6 +933,22 @@ class PreviewPop(QWidget):
                    Qt.AlignVCenter | Qt.AlignLeft, self.label)
 
 
+class _MontageProxy:
+    def __init__(self, win):
+        self.win = win
+
+    def set_selected(self, on):
+        b = getattr(self.win, "montage_btn", None)
+        if b is not None:
+            b.set_kind("accent" if on else "glass")
+        if on:
+            self.win.dock.active = -1
+            self.win.dock.update()
+
+    def set_nav_enabled(self, on):
+        pass
+
+
 class _NavProxy:
     """Damit der alte Code (self.nav[i].set_selected / set_nav_enabled) weiter funktioniert."""
 
@@ -2505,7 +2521,6 @@ class Window(QMainWindow):
             {"icon": "server", "label": "Server", "fn": lambda: self.nav_clicked(0)},
             {"icon": "film", "label": "Editor", "fn": lambda: self.nav_clicked(1)},
             {"icon": "folder", "label": "Bibliothek", "fn": lambda: self.nav_clicked(2)},
-            {"icon": "layers", "label": "Montage", "fn": lambda: self.nav_clicked(4)},
             {"icon": "gear", "label": "Einstellungen", "fn": lambda: self.nav_clicked(3)},
             {"icon": "upload", "label": "Video öffnen", "fn": self._top_open, "sep": True},
         ], self.bg)
@@ -2513,8 +2528,8 @@ class Window(QMainWindow):
         self.dock.hovered.connect(self._dock_hover)
         self.theme_pop = ThemePopover(self.bg, self.set_mode)
         self.theme_pop.hide()
-        # Seite -> Platz im Dock (Montage steht im Dock vor den Einstellungen)
-        self.nav = [_NavProxy(self.dock, j) for j in (0, 1, 2, 4, 3)]
+        # Seite -> Platz im Dock; die Montage hat einen eigenen Knopf oben rechts
+        self.nav = [_NavProxy(self.dock, j) for j in range(4)] + [_MontageProxy(self)]
         self.nav[1].set_nav_enabled(False)
         self.navbar = self.dock
         self.dock.select = lambda i, animate=True: self.nav[i].set_selected(True)
@@ -2818,6 +2833,11 @@ class Window(QMainWindow):
         self.page_lbl.setFixedWidth(1)
         self.page_lbl.hide()                         # Seitenname: der Punkt im Dock zeigt die Seite
         lay.addStretch(1)
+        self.montage_btn = PopButton("Montage", "layers", "glass", 40)
+        self.montage_btn.setToolTip("Clips zu einem Video zusammenschneiden")
+        self.montage_btn.clicked.connect(lambda: self.nav_clicked(4))
+        lay.addWidget(self.montage_btn)
+        lay.addSpacing(4)
         self.top_chip = ServerChip()
         self.top_chip.clicked.connect(self.open_server_menu)
         lay.addWidget(self.top_chip)
