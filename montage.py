@@ -36,6 +36,8 @@ TRANSITIONS = [("Keiner", "none"), ("Überblenden", "fade"), ("Schwarzblende", "
                ("Wischen", "wipeleft"), ("Schieben", "slideleft"), ("Zoom", "zoomin"), ("Kreis", "circleopen"),
                ("Auflösen", "dissolve"), ("Pixel", "pixelize"), ("Radial", "radial"), ("Unschärfe", "hblur")]
 TRANS_NAME = {v: n for n, v in TRANSITIONS}
+FONT_FILE = core.resource("assets", "fonts", "Montserrat_700Bold.ttf")
+BOX_COLORS = ["#ffffff", "#111111", "#ff4d5e", "#ffb020", "#3ddc84", "#3ea6ff", "#a26bff", "#ff6bd5"]
 
 
 def lbl(text="", size=10.0, bold=False, role=None, wrap=False):
@@ -57,6 +59,16 @@ def fmt_s(t):
     t = max(0.0, t)
     m, s = divmod(int(round(t)), 60)
     return f"{m}:{s:02d}"
+
+
+def box_font_px(b, vw, vh):
+    """Schriftgröße (Pixel) für den Text im Viereck: so groß wie gewählt, aber nie breiter als das Viereck."""
+    want = max(6.0, vh * b.bh * b.tsize)
+    f = display_font(10, QFont.Bold)
+    f.setPixelSize(100)
+    w100 = QFontMetrics(f).horizontalAdvance(b.text) or 1
+    fit = (vw * b.bw * 0.92) / w100 * 100
+    return int(max(6, min(want, fit)))
 
 
 # ------------------------------------------------------------------ Medien-Infos
@@ -87,6 +99,79 @@ def media_info(path):
         pass
     _INFO[path] = info
     return info
+
+
+import queue as _queue
+
+_JOBS = _queue.Queue()
+_PENDING = set()
+_NOTIFY = [None]              # Funktion, die nach dem Laden neu zeichnen lässt (im Hauptthread)
+_TIMG = {}                    # path -> QImage (wird im Hintergrund erzeugt)
+_TPIX = {}                    # path -> QPixmap (im Hauptthread aus dem QImage)
+
+
+def _worker():
+    while True:
+        kind, path = _JOBS.get()
+        try:
+            media_info(path)
+            if kind == "thumb":
+                cap = cv2.VideoCapture(path)
+                if cap.isOpened():
+                    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, media_info(path)["dur"] / 2) * 1000)
+                    ok, fr = cap.read()
+                    if ok:
+                        h, w = fr.shape[:2]
+                        fr = cv2.resize(fr, (160, max(2, int(160 * h / w))), interpolation=cv2.INTER_AREA)
+                        rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+                        _TIMG[path] = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3 * rgb.shape[1],
+                                             QImage.Format_RGB888).copy()
+                cap.release()
+            elif kind == "wave":
+                waveform(path)
+        except Exception:
+            pass
+        _PENDING.discard((kind, path))
+        if _NOTIFY[0] and _JOBS.empty():
+            try:
+                _NOTIFY[0]()
+            except Exception:
+                pass
+
+
+threading.Thread(target=_worker, daemon=True).start()
+
+
+def want(kind, path):
+    if (kind, path) not in _PENDING:
+        _PENDING.add((kind, path))
+        _JOBS.put((kind, path))
+
+
+def thumb_fast(path):
+    """Vorschaubild ohne Warten: gibt None zurück und lädt im Hintergrund, falls noch nicht da."""
+    if path in _TPIX:
+        return _TPIX[path]
+    img = _TIMG.get(path)
+    if img is None:
+        want("thumb", path)
+        return None
+    _TPIX[path] = QPixmap.fromImage(img)
+    return _TPIX[path]
+
+
+def wave_fast(path):
+    if path in _WAVE:
+        return _WAVE[path]
+    want("wave", path)
+    return None
+
+
+def info_fast(path):
+    if path in _INFO:
+        return _INFO[path]
+    want("info", path)
+    return None
 
 
 _THUMB = {}
@@ -142,14 +227,19 @@ class MItem:
     """Ein Stück auf der Zeitleiste. track 0 = Haupt-Video, -1/-2/... = weitere Video-Spuren (liegen darüber),
     1/2/... = Ton-Spuren."""
 
-    def __init__(self, path, track=0, start=0.0, src_in=0.0, src_out=None):
+    BOX_KEYS = ("kind", "bx", "by", "bw", "bh", "color", "alpha", "text", "tsize")
+
+    def __init__(self, path, track=0, start=0.0, src_in=0.0, src_out=None, kind="media"):
         self.id = uuid.uuid4().hex[:8]
         self.path = path
         self.track = track
         self.start = start
-        info = media_info(path)
+        self.kind = kind
+        self.bx, self.by, self.bw, self.bh = 0.35, 0.38, 0.30, 0.20
+        self.color, self.alpha, self.text, self.tsize = "#ffffff", 0.85, "", 0.5
+        dur = 3.0 if kind == "box" else media_info(path)["dur"]
         self.src_in = src_in
-        self.src_out = src_out if src_out is not None else max(0.2, info["dur"])
+        self.src_out = src_out if src_out is not None else max(0.2, dur)
         self.speed = 1.0
         self.volume = 1.0
         self.trans = "none"          # Übergang zum nächsten Clip
@@ -167,7 +257,7 @@ class MItem:
 
     def to_dict(self):
         return {k: getattr(self, k) for k in ("id", "path", "track", "start", "src_in", "src_out", "speed", "volume",
-                                               "trans", "tdur", "fade_in", "fade_out")}
+                                               "trans", "tdur", "fade_in", "fade_out") + MItem.BOX_KEYS}
 
     @staticmethod
     def from_dict(d):
@@ -176,6 +266,8 @@ class MItem:
         for k in ("path", "track", "start", "src_in", "src_out", "speed", "volume", "trans", "tdur", "fade_in", "fade_out"):
             setattr(it, k, d.get(k, {"speed": 1.0, "volume": 1.0, "trans": "none", "tdur": 0.5, "fade_in": 0.0,
                                      "fade_out": 0.0, "track": 0, "start": 0.0, "src_in": 0.0}.get(k)))
+        for k, dv in zip(MItem.BOX_KEYS, ("media", 0.35, 0.38, 0.30, 0.20, "#ffffff", 0.85, "", 0.5)):
+            setattr(it, k, d.get(k, dv))
         return it
 
 
@@ -194,7 +286,11 @@ class Project:
 
     def overlays(self):
         """Clips auf den weiteren Video-Spuren (überdecken die Spuren darunter)."""
-        return sorted([i for i in self.items if i.track < 0], key=lambda x: (-x.track, x.start))
+        return sorted([i for i in self.items if i.track < 0 and i.kind != "box"], key=lambda x: (-x.track, x.start))
+
+    def boxes(self):
+        """Vierecke (mit optionalem Text) - liegen immer ganz oben."""
+        return sorted([i for i in self.items if i.kind == "box"], key=lambda x: (-x.track, x.start))
 
     def audios(self):
         return [i for i in self.items if i.track > 0]
@@ -225,7 +321,8 @@ class Project:
                 "vlanes": self.vlanes, "alanes": self.alanes}
 
     def load(self, d):
-        self.items = [MItem.from_dict(x) for x in (d or {}).get("items", []) if os.path.exists(x.get("path", ""))]
+        self.items = [MItem.from_dict(x) for x in (d or {}).get("items", [])
+                      if x.get("kind") == "box" or os.path.exists(x.get("path", ""))]
         self.magnet = (d or {}).get("magnet", True)
         self.res = (d or {}).get("res", "Original")
         self.fps = (d or {}).get("fps", "Original")
@@ -332,7 +429,8 @@ def build_graph(proj, audio_only=False):
         cursor = it.start + d
         prev = it
     ovs = proj.overlays()
-    length = max(pos, max((a.end for a in aus), default=0.0), max((o.end for o in ovs), default=0.0))
+    length = max(pos, max((a.end for a in aus), default=0.0), max((o.end for o in ovs), default=0.0),
+                 max((b.end for b in proj.boxes()), default=0.0))
     # weitere Video-Spuren: liegen über dem Haupt-Video (Ton wird dazugemischt)
     ov_mix = []
     ov_list = []
@@ -382,7 +480,21 @@ def build_graph(proj, audio_only=False):
         for n_, (lab, o) in enumerate(ov_list):
             f.append(f"[{cur}][{lab}]overlay=eof_action=pass:enable='between(t,{o.start:.3f},{o.end:.3f})'[vb{n_ + 1}]")
             cur = f"vb{n_ + 1}"
-        f.append(f"[{cur}]null[vout]")
+        fx = []
+        for b in proj.boxes():
+            en = f"enable='between(t,{b.start:.3f},{b.end:.3f})'"
+            col = QColor(b.color).name()[1:]
+            if b.alpha > 0.01:
+                fx.append(f"drawbox=x=iw*{b.bx:.4f}:y=ih*{b.by:.4f}:w=iw*{b.bw:.4f}:h=ih*{b.bh:.4f}:"
+                          f"color=0x{col}@{b.alpha:.3f}:t=fill:{en}")
+            if b.text.strip():
+                fsz = max(8, box_font_px(b, W, H))
+                txt = b.text.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:").replace("%", "\\%")
+                font = FONT_FILE.replace("\\", "/").replace(":", "\\:")
+                tc = "000000" if QColor(b.color).lightness() > 150 and b.alpha > 0.3 else "ffffff"
+                fx.append(f"drawtext=fontfile='{font}':text='{txt}':fontcolor=0x{tc}:fontsize={fsz}:"
+                          f"x=w*{b.bx:.4f}+(w*{b.bw:.4f}-text_w)/2:y=h*{b.by:.4f}+(h*{b.bh:.4f}-text_h)/2:{en}")
+        f.append(f"[{cur}]" + (",".join(fx) if fx else "null") + "[vout]")
     return inputs, ";".join(f), "vout", "aout", W, H, fps, length
 
 
@@ -529,6 +641,7 @@ class MontagePlayer(threading.Thread):
         self.size = (960, 540)
         self.latest = None
         self.want_src = None
+        self.tcache = {}
         self.stop_flag = False
 
     def seek(self, t):
@@ -537,10 +650,68 @@ class MontagePlayer(threading.Thread):
         self.ev.set()
 
     def show_src(self, path, t):
-        """Beim Kürzen: genau das Bild an der Schnittkante zeigen."""
+        """Beim Kürzen: genau das Bild an der Schnittkante zeigen (aus dem Vorrat sofort, sonst gesucht)."""
+        fr = self.cached(path, t)
+        if fr is not None:
+            with self.lock:
+                self.latest = (None, _fit(fr, *self.size))
+            return
         with self.lock:
             self.want_src = (path, t)
         self.ev.set()
+        if abs(t - getattr(self, "pf_center", -99)) > 4.0:      # weit gezogen: neuen Vorrat um die Kante laden
+            self.prefetch(path, t)
+
+    def cached(self, path, t):
+        c = self.tcache.get(path)
+        if not c:
+            return None
+        ts, frs = c
+        if not ts:
+            return None
+        i = int(np.searchsorted(ts, t))
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(ts) and (best is None or abs(ts[j] - t) < abs(ts[best] - t)):
+                best = j
+        if best is not None and abs(ts[best] - t) < 0.08:
+            return frs[best]
+        return None
+
+    def prefetch(self, path, center, span=7.0):
+        """Beim Start des Kürzens: Bilder rund um die Schnittkante im Hintergrund vorladen (dann ist Ziehen live)."""
+        gen = self.pf_gen = getattr(self, "pf_gen", 0) + 1
+        self.pf_center = center
+        ts, frs = [], []
+        self.tcache = {path: (ts, frs)}
+        W, H = self.size
+
+        def work():
+            cap = cv2.VideoCapture(path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
+            t0 = max(0.0, center - span)
+            cap.set(cv2.CAP_PROP_POS_MSEC, t0 * 1000)
+            step = max(1, int(round(fps / 30)))
+            n = 0
+            while gen == self.pf_gen:
+                ok = cap.grab()
+                if not ok:
+                    break
+                t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                if t > center + span:
+                    break
+                if n % step == 0:
+                    ok, fr = cap.retrieve()
+                    if ok:
+                        h, w = fr.shape[:2]
+                        s = min(W / w, H / h, 1.0)
+                        fr = cv2.resize(fr, (max(2, int(w * s)), max(2, int(h * s))), interpolation=cv2.INTER_AREA)
+                        k = int(np.searchsorted(ts, t))
+                        ts.insert(k, t)
+                        frs.insert(k, fr)
+                n += 1
+            cap.release()
+        threading.Thread(target=work, daemon=True).start()
 
     def play(self, on):
         with self.lock:
@@ -632,10 +803,71 @@ class MontagePlayer(threading.Thread):
 
 # ------------------------------------------------------------------ Vorschau-Fläche
 class Preview(QWidget):
+    box_picked = Signal(object)
+    box_changed = Signal()
+    box_begin = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.img = None
+        self.boxes = []          # sichtbare Vierecke (MItem)
+        self.sel = None
+        self.drag = None
+        self.aspect = 16 / 9
         self.setMinimumSize(320, 180)
+        self.setMouseTracking(True)
+
+    def vrect(self):
+        """Bereich, in dem das Video gezeigt wird (für die Lage der Vierecke)."""
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        a = (self.img.width() / max(1, self.img.height())) if self.img is not None else self.aspect
+        w = min(r.width(), r.height() * a)
+        h = w / a
+        return QRectF(r.center().x() - w / 2, r.center().y() - h / 2, w, h)
+
+    def box_rect(self, b):
+        v = self.vrect()
+        return QRectF(v.left() + b.bx * v.width(), v.top() + b.by * v.height(), b.bw * v.width(), b.bh * v.height())
+
+    def _hit(self, pos):
+        for b in reversed(self.boxes):
+            r = self.box_rect(b)
+            if QRectF(r.right() - 14, r.bottom() - 14, 20, 20).contains(pos):
+                return b, "size"
+            if r.contains(pos):
+                return b, "move"
+        return None, None
+
+    def mousePressEvent(self, e):
+        b, mode = self._hit(e.position())
+        if b is None:
+            return
+        self.sel = b
+        self.box_picked.emit(b)
+        self.box_begin.emit()
+        self.drag = (mode, b, e.position(), b.bx, b.by, b.bw, b.bh)
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        if not self.drag:
+            b, mode = self._hit(e.position())
+            self.setCursor(Qt.SizeFDiagCursor if mode == "size" else Qt.SizeAllCursor if mode else Qt.ArrowCursor)
+            return
+        mode, b, p0, bx, by, bw, bh = self.drag
+        v = self.vrect()
+        dx = (e.position().x() - p0.x()) / max(1.0, v.width())
+        dy = (e.position().y() - p0.y()) / max(1.0, v.height())
+        if mode == "move":
+            b.bx = min(max(-bw + 0.02, bx + dx), 0.98)
+            b.by = min(max(-bh + 0.02, by + dy), 0.98)
+        else:
+            b.bw = min(max(0.03, bw + dx), 1.2)
+            b.bh = min(max(0.03, bh + dy), 1.2)
+        self.update()
+        self.box_changed.emit()
+
+    def mouseReleaseEvent(self, e):
+        self.drag = None
 
     def set_frame(self, rgb):
         h, w = rgb.shape[:2]
@@ -660,6 +892,30 @@ class Preview(QWidget):
             p.setPen(QColor(255, 255, 255, 150))
             p.setFont(app_font(10.5))
             p.drawText(r, Qt.AlignCenter, "Füge links Clips hinzu – sie erscheinen unten in der Zeitleiste.")
+        # Vierecke darüber (so wie sie im Export aussehen)
+        v = self.vrect()
+        p.setClipRect(v)
+        for b in self.boxes:
+            br = self.box_rect(b)
+            c = QColor(b.color)
+            c.setAlphaF(max(0.0, min(1.0, b.alpha)))
+            p.setPen(Qt.NoPen)
+            p.setBrush(c)
+            p.drawRect(br)
+            if b.text.strip():
+                tc = QColor(0, 0, 0) if QColor(b.color).lightness() > 150 and b.alpha > 0.3 else QColor(255, 255, 255)
+                f = display_font(10, QFont.Bold)
+                f.setPixelSize(box_font_px(b, v.width(), v.height()))
+                p.setFont(f)
+                p.setPen(tc)
+                p.drawText(br, Qt.AlignCenter, b.text)
+            if b is self.sel:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(255, 255, 255), 1.5, Qt.DashLine))
+                p.drawRect(br)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(255, 255, 255))
+                p.drawEllipse(QPointF(br.right(), br.bottom()), 6, 6)
         p.setClipping(False)
         p.setPen(QPen(T.line(1.6), 1))
         p.setBrush(Qt.NoBrush)
@@ -673,6 +929,7 @@ class MTimeline(QWidget):
     changed = Signal()
     begin = Signal()                 # vor einer Änderung (Rückgängig)
     trimming = Signal(str, float)    # beim Kürzen: Datei + Zeit der Schnittkante (für die Vorschau)
+    trim_begin = Signal(str, float)  # Kürzen beginnt: Bilder rund um die Kante vorladen
     add_lane = Signal(str)           # "video" / "audio"
 
     RULER, VH, AH, GAP, LEFT, ADD = 30, 58, 42, 10, 96, 30
@@ -803,11 +1060,25 @@ class MTimeline(QWidget):
             sel = it is self.sel
             path = QPainterPath()
             path.addRoundedRect(r, 8, 8)
-            if it.track <= 0:
+            if it.kind == "box":
+                c = QColor(it.color)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(44, 44, 52))
+                p.drawPath(path)
+                sw = QRectF(r.left() + 8, r.center().y() - 9, 18, 18)
+                p.setBrush(c)
+                p.setPen(QPen(QColor(255, 255, 255, 120), 1))
+                p.drawRoundedRect(sw, 4, 4)
+                p.setPen(QColor(255, 255, 255, 235))
+                p.setFont(app_font(8.5, True))
+                t_ = f"Viereck  ·  {it.text}" if it.text.strip() else "Viereck"
+                p.drawText(r.adjusted(32, 0, -8, 0), Qt.AlignVCenter,
+                           QFontMetrics(p.font()).elidedText(t_, Qt.ElideRight, int(max(10, r.width() - 40))))
+            elif it.track <= 0:
                 p.save()
                 p.setClipPath(path)
                 p.fillRect(r, QColor(30, 30, 34))
-                pm = thumb(it.path, it.src_in + 0.3)
+                pm = thumb_fast(it.path)
                 if pm is not None:
                     tw = r.height() * pm.width() / max(1, pm.height())
                     x = r.left()
@@ -831,9 +1102,11 @@ class MTimeline(QWidget):
                 p.setPen(Qt.NoPen)
                 p.setBrush(with_alpha(col, 70))
                 p.drawPath(path)
-                w = waveform(it.path)
+                w = wave_fast(it.path)
                 info = media_info(it.path)
                 dur = max(0.1, info["dur"])
+                if w is None:
+                    w = np.zeros(10)
                 p.setPen(QPen(with_alpha(col, 220), 1))
                 cy, hh = r.center().y(), r.height() / 2 - 4
                 xs = int(r.width())
@@ -987,6 +1260,8 @@ class MTimeline(QWidget):
         self.selected.emit(it)
         self.begin.emit()
         self.drag = (kind, it, pos.x(), it.start, it.src_in, it.src_out, it.track)
+        if kind in ("left", "right") and it.kind != "box":
+            self.trim_begin.emit(it.path, it.src_in if kind == "left" else it.src_out)
         self.update()
 
     def mouseMoveEvent(self, e):
@@ -1006,10 +1281,10 @@ class MTimeline(QWidget):
             return
         kind, it, x0, st0, in0, out0, tr0 = self.drag
         dt = (pos.x() - x0) / self.pps
-        info = media_info(it.path)
+        info = {"dur": 3600.0} if it.kind == "box" else media_info(it.path)
         if kind == "move":
             tr = self.track_at(pos.y())
-            if tr is not None and (tr <= 0) == (it.track <= 0) and tr != it.track:
+            if tr is not None and (tr <= 0) == (it.track <= 0) and tr != it.track and not (it.kind == "box" and tr == 0):
                 it.track = tr                          # zwischen Video-Spuren bzw. Ton-Spuren wechseln
                 self.proj.pack()
             if it.track == 0 and self.proj.magnet:
@@ -1036,12 +1311,14 @@ class MTimeline(QWidget):
             ni = min(out0 - 0.2, max(0.0, in0 + dt * it.speed))
             it.start = max(0.0, st0 + (ni - in0) / it.speed)
             it.src_in = ni
-            self.trimming.emit(it.path, ni)
+            if it.kind != "box":
+                self.trimming.emit(it.path, ni)
         elif kind == "right":
             no = max(in0 + 0.2, min(info["dur"] or out0, out0 + dt * it.speed))
             it.src_out = no
             self.proj.pack()
-            self.trimming.emit(it.path, max(0.0, no - 0.02))
+            if it.kind != "box":
+                self.trimming.emit(it.path, max(0.0, no - 0.02))
         self.changed.emit()
         self.update()
 
@@ -1067,6 +1344,31 @@ class MTimeline(QWidget):
         vis = (self.width() - self.LEFT - 20) / self.pps
         if t < self.x0 or t > self.x0 + vis:
             self.x0 = max(0.0, t - vis * 0.2)
+
+
+class ColorDot(QWidget):
+    clicked = Signal()
+
+    def __init__(self, color, on, parent=None):
+        super().__init__(parent)
+        self.c, self.on = QColor(color), on
+        self.setFixedSize(28, 28)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+        p.setPen(QPen(QColor(255, 255, 255, 80), 1))
+        p.setBrush(self.c)
+        p.drawEllipse(r)
+        if self.on:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(ink(230), 2))
+            p.drawEllipse(r.adjusted(-3, -3, 3, 3))
 
 
 # ------------------------------------------------------------------ Medien-Liste
@@ -1105,13 +1407,13 @@ class MediaRow(QWidget):
         p.setClipPath(path)
         p.fillRect(tr, ink(25))
         if not self.is_audio:
-            pm = thumb(self.path)
+            pm = thumb_fast(self.path)
             if pm is not None:
                 p.drawPixmap(tr, pm, QRectF(0, 0, pm.width(), pm.height()))
         else:
             paint_icon(p, "music", QRectF(tr.center().x() - 9, tr.center().y() - 9, 18, 18), ink(180), 1.6)
         p.restore()
-        info = media_info(self.path)
+        info = info_fast(self.path) or {"dur": 0.0}
         p.setPen(ink(235))
         p.setFont(app_font(9, True))
         avail = int(r.width() - 120)
@@ -1152,6 +1454,8 @@ class MontagePage(QWidget):
                 self.audio.setAudioOutput(self.aout)
             except Exception:
                 self.audio = None
+        _NOTIFY[0] = lambda: self.win.ui(self._loaded)
+        self._media_key = None
         self._build()
         self.timer = QTimer(self)
         self.timer.setInterval(10)
@@ -1201,10 +1505,14 @@ class MontagePage(QWidget):
         mv.setSpacing(10)
         self.preview = Preview()
         self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.preview.box_picked.connect(self._pick_box)
+        self.preview.box_begin.connect(self.snapshot)
+        self.preview.box_changed.connect(lambda: self.on_changed(light=True))
         mv.addWidget(self.preview, 1)
         ctl = QHBoxLayout()
         ctl.setSpacing(8)
         self.time_lbl = lbl("0:00.00 / 0:00.00", 10, True)
+        self.time_lbl.setFixedWidth(190)
         ctl.addWidget(self.time_lbl)
         ctl.addStretch(1)
         b = PopButton("", "prev", "flat", 38, icon_only=True)
@@ -1252,6 +1560,7 @@ class MontagePage(QWidget):
         tb("", "refresh", self.redo, "Wiederholen (Strg+Y)")
         tb("Teilen", "cut", self.split, "Clip an der Abspielposition teilen (S)")
         tb("Löschen", "trash", self.delete_sel, "Ausgewähltes löschen (Entf)")
+        tb("Viereck", "square", self.add_box, "Viereck (mit Text) hinzufügen – in der Vorschau frei verschieben")
         tools.addSpacing(8)
         self.mag_btn = PopButton("Einrasten", "magnet", "accent" if self.proj.magnet else "glass", 32)
         self.mag_btn.setToolTip("An: Clips kleben lückenlos aneinander. Aus: frei verschieben.")
@@ -1266,10 +1575,11 @@ class MontagePage(QWidget):
         bv.addLayout(tools)
         self.tl = MTimeline(self.proj)
         self.tl.seek.connect(self.seek)
-        self.tl.selected.connect(self.show_inspector)
+        self.tl.selected.connect(lambda s: (self.show_inspector(s), self._sync_boxes()))
         self.tl.changed.connect(self.on_changed)
         self.tl.begin.connect(self.snapshot)
         self.tl.trimming.connect(lambda path, t: self.player.show_src(path, t))
+        self.tl.trim_begin.connect(lambda path, t: self.player.prefetch(path, t))
         self.tl.add_lane.connect(self.add_lane)
         bv.addWidget(self.tl)
         root.addWidget(bottom)
@@ -1288,14 +1598,27 @@ class MontagePage(QWidget):
         out += [m for m in self.media if m.lower().endswith(ext) and m not in out]
         return out
 
+    def _loaded(self):
+        self.tl.update()
+        w = self.media_scroll.widget()
+        if w is not None:
+            w.update()
+            for r in w.findChildren(MediaRow):
+                r.update()
+
     def refresh_media(self):
         audio = self.media_seg.current() != "Clips"
+        files_ = self.media_files(audio)
+        key = (audio, tuple(files_))
+        if key == self._media_key:
+            return                                   # nichts geändert: Liste nicht neu bauen
+        self._media_key = key
         host = QWidget()
         host.setAttribute(Qt.WA_TranslucentBackground)
         v = QVBoxLayout(host)
         v.setContentsMargins(0, 0, 4, 0)
         v.setSpacing(0)
-        files = self.media_files(audio)
+        files = files_
         if not files:
             v.addSpacing(20)
             h = lbl("Noch keine Musik oder Sounds. Füge MP3/WAV-Dateien über den Knopf unten hinzu." if audio else
@@ -1321,6 +1644,7 @@ class MontagePage(QWidget):
                     self.media.append(f)
             self.win.st["montage_media"] = self.media
             self.win.save_settings()
+            self._media_key = None
             self.refresh_media()
 
     def add_media(self, path, audio):
@@ -1422,6 +1746,42 @@ class MontagePage(QWidget):
             return
         it = sel
         name = os.path.basename(it.path)
+        if it.kind == "box":
+            title("Viereck", "In der Vorschau verschieben · unten rechts ziehen für die Größe.")
+            L.addWidget(lbl("Farbe", 9, True, "muted"))
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            for c in BOX_COLORS:
+                b = ColorDot(c, QColor(c).name() == QColor(it.color).name())
+                b.clicked.connect(lambda c=c: (self.snapshot(), setattr(it, "color", c), self.show_inspector(it),
+                                               self.on_changed(light=True)))
+                row.addWidget(b)
+            row.addStretch(1)
+            L.addLayout(row)
+            sr = SliderRow("Deckkraft", 0, 1, 20, it.alpha, lambda v: f"{int(round(v * 100))} %")
+            sr.s.valueChanged.connect(lambda _: (setattr(it, "alpha", round(sr.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(sr)
+            L.addWidget(lbl("Text (optional)", 9, True, "muted"))
+            from PySide6.QtWidgets import QLineEdit
+            te = QLineEdit(it.text)
+            te.setPlaceholderText("z. B. ACE · 7 Kills")
+            te.setMinimumHeight(38)
+            te.textChanged.connect(lambda s: (setattr(it, "text", s), self.on_changed(light=True)))
+            L.addWidget(te)
+            s2 = SliderRow("Textgröße", 0.2, 0.9, 14, it.tsize, lambda v: f"{int(round(v * 100))} %")
+            s2.s.valueChanged.connect(lambda _: (setattr(it, "tsize", round(s2.value(), 2)), self.on_changed(light=True)))
+            L.addWidget(s2)
+            b = PopButton("Ganzes Bild füllen", "expand", "glass", 32)
+            b.clicked.connect(lambda: (self.snapshot(), [setattr(it, k, v) for k, v in
+                                                         (("bx", 0.0), ("by", 0.0), ("bw", 1.0), ("bh", 1.0))],
+                                       self.on_changed(light=True)))
+            L.addWidget(b)
+            L.addSpacing(6)
+            b = PopButton("Löschen", "trash", "danger", 34)
+            b.clicked.connect(self.delete_sel)
+            L.addWidget(b)
+            L.addStretch(1)
+            return
         if it.track <= 0:
             title("Clip", name)
             L.addWidget(lbl("Geschwindigkeit", 9, True, "muted"))
@@ -1518,6 +1878,32 @@ class MontagePage(QWidget):
         self.show_inspector(it)
         self.on_changed()
 
+    def add_box(self):
+        self.snapshot()
+        if self.proj.vlanes < 2:
+            self.proj.vlanes = 2
+            self.tl.relayout()
+        top = -(self.proj.vlanes - 1)
+        b = MItem("", top, start=self.tl.ph, kind="box")
+        self.proj.items.append(b)
+        self.tl.sel = b
+        self.preview.sel = b
+        self.show_inspector(b)
+        self.on_changed()
+        self.win.say("Viereck hinzugefügt – in der Vorschau verschieben, unten rechts ziehen für die Größe")
+
+    def _pick_box(self, b):
+        self.tl.sel = b
+        self.show_inspector(b)
+        self.tl.update()
+
+    def _sync_boxes(self):
+        t = self.tl.ph
+        self.preview.boxes = [b for b in self.proj.boxes() if b.start - 1e-6 <= t < b.end]
+        sel = self.tl.sel
+        self.preview.sel = sel if isinstance(sel, MItem) and sel.kind == "box" else None
+        self.preview.update()
+
     def add_lane(self, kind):
         self.snapshot()
         if kind == "video":
@@ -1601,7 +1987,9 @@ class MontagePage(QWidget):
         L = self.proj.length()
         self.len_lbl.setText(f"Länge {fmt_s(L)}  ·  {len(self.proj.videos())} Clips")
         self.tl.update()
-        self.player.seek(self.tl.ph)
+        if not (self.tl.drag and self.tl.drag[0] in ("left", "right")):
+            self.player.seek(self.tl.ph)              # beim Kürzen bleibt das Bild an der Schnittkante
+        self._sync_boxes()
         self.save_t.start()
 
     def _after_change(self):
@@ -1654,6 +2042,7 @@ class MontagePage(QWidget):
         if self.audio and self.playing:
             self.audio.setPosition(int(t * 1000))
         self.tl.update()
+        self._sync_boxes()
         self._time()
 
     def toggle_play(self):
@@ -1697,6 +2086,7 @@ class MontagePage(QWidget):
             self.tl.ph = t
             self.tl.scroll_to(t)
             self.tl.update()
+            self._sync_boxes()
             self._time()
             if not self.player.playing:
                 self.playing = False
