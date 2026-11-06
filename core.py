@@ -567,26 +567,94 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                 top.sort(key=lambda x: -x[0])
                 del top[6:]
 
-        def detect(fr):
-            """Gibt (Treffer, Lage) fuer ein verkleinertes Bild zurueck."""
+        smask = [None]          # 0 = feste lila Flaechen (HUD), die immer zu sehen sind -> ignorieren
+
+        def build_static():
+            """Ueber das ganze Video verteilt Bilder ansehen: was fast immer lila ist, gehoert zum HUD
+            (Geld, Waffe, Tacho ...) und ist keine Meldung - eine Kill-Meldung steht nur ein paar Sekunden."""
+            if kind != "bruder" or duration < 20:
+                return
+            pts = [duration * (i + 0.5) / 24 for i in range(24)]
+
+            def one(t):
+                if cancel is not None and cancel.is_set():
+                    return None
+                for _, fr in frames_from_ffmpeg(ffmpeg, path, scale_vf, ow, oh, cancel, False, t, 0.1):
+                    return purple_mask(fr)
+                return None
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(4) as ex:
+                ms = [m_ for m_ in ex.map(one, pts) if m_ is not None]
+            if len(ms) < 8:
+                return
+            st = (np.mean(ms, axis=0) >= 0.45).astype(np.uint8)
+            dbg["static"] = int(st.sum())
+            if st.sum() < 30:
+                return
+            st = cv2.dilate(st, np.ones((7, 7), np.uint8))
+            smask[0] = (1 - st).astype(np.float32)
+
+        def drop_static(hs, gap, max_run=25.0):
+            """Treffer, die minutenlang an derselben Stelle stehen, sind HUD und keine Meldung."""
+            by = {}
+            for h_ in hs:
+                if h_[2] is not None:
+                    by.setdefault((int(h_[2][0] // 40), int(h_[2][1] // 40)), []).append(h_)
+            bad = set()
+            for lst in by.values():
+                lst.sort(key=lambda x: x[1])            # x[1] = Zeitpunkt des Bildes
+                run = [lst[0]]
+                for a_, b_ in zip(lst, lst[1:] + [None]):
+                    if b_ is not None and b_[1] - a_[1] <= gap:
+                        run.append(b_)
+                        continue
+                    if run[-1][1] - run[0][1] > max_run:
+                        bad.update(id(x) for x in run)
+                    if b_ is not None:
+                        run = [b_]
+            if bad:
+                dbg["static_hits"] = dbg.get("static_hits", 0) + len(bad)
+            return [h_ for h_ in hs if id(h_) not in bad]
+
+        def peaks(res, mx, ml, off):
+            """Bis zu 3 Stellen ueber der Schwelle (HUD-Feld und echte Meldung koennen gleichzeitig da sein)."""
+            out_ = []
+            th_, tw_ = tpl.shape[:2]
+            while mx >= thr and len(out_) < 3:
+                out_.append(((ml[0] + off) * w / ow, (ml[1] + off) * w / ow))
+                x0_, y0_ = max(0, ml[0] - tw_ // 2), max(0, ml[1] - th_ // 2)
+                res[y0_:ml[1] + th_ // 2 + 1, x0_:ml[0] + tw_ // 2 + 1] = -1.0
+                _, mx, _, ml = cv2.minMaxLoc(res)
+            return out_
+
+        def detect_multi(fr):
+            """Alle Stellen (Lage), an denen im verkleinerten Bild eine Meldung stehen koennte."""
             if kind == "bruder":
                 m = purple_mask(fr)
+                if smask[0] is not None and smask[0].shape == m.shape:
+                    m *= smask[0]
                 if m.sum() >= need * 0.5:
                     collect(m)
                 if m.sum() >= need:
-                    _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED))
+                    res = cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED)
+                    _, mx, _, ml = cv2.minMaxLoc(res)
                     _dbg_top(mx, fr, ml)
-                    if mx >= thr:
-                        return True, ((ml[0] + pad) * w / ow, (ml[1] + pad) * w / ow)
-                return False, None
+                    return peaks(res, mx, ml, pad)
+                return []
             g_ = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
             if g_.shape[0] < tpl.shape[0] or g_.shape[1] < tpl.shape[1]:
-                return False, None
-            _, mx, _, ml = cv2.minMaxLoc(cv2.matchTemplate(g_, tpl, cv2.TM_CCOEFF_NORMED))
+                return []
+            res = cv2.matchTemplate(g_, tpl, cv2.TM_CCOEFF_NORMED)
+            _, mx, _, ml = cv2.minMaxLoc(res)
             _dbg_top(mx, fr, ml)
             if mx >= 0.35:
                 collect(g_)
-            return (True, (ml[0] * w / ow, ml[1] * w / ow)) if mx >= thr else (False, None)
+            return peaks(res, mx, ml, 0)
+
+        def detect(fr):
+            """Gibt (Treffer, Lage der besten Stelle) fuer ein verkleinertes Bild zurueck."""
+            locs_ = detect_multi(fr)
+            return (True, locs_[0]) if locs_ else (False, None)
 
         # --- Schnellsuche: nur Keyframes ansehen (die Meldung steht mehrere Sekunden, also wird sie getroffen)
         fast = None
@@ -609,8 +677,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                     if t < bounds[i] - 0.05 or t >= bounds[i + 1]:
                         continue                    # Grenzbild gehoert zum Nachbarabschnitt
                     ts.append(t)
-                    ok_, loc = detect(fr)
-                    if ok_:
+                    for loc in detect_multi(fr):
                         hs.append((t, t, loc))
                     done[i] = t - bounds[i]
                 parts[i] = (ts, hs)
@@ -629,6 +696,7 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             khits_.sort(key=lambda x: x[0])
             return times_, khits_
 
+        build_static()
         if not sparse and len(probe) >= 2 and not (cancel is not None and cancel.is_set()):
             times, khits = fast_pass()
             scale_f = calibrate()
@@ -657,6 +725,8 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             cap.release()
             return [], {"notices": 0, "mode": "abgebrochen"}
         keygap = float(np.median(np.diff(times))) if len(times) >= 3 else None
+        if keygap is not None and khits:
+            khits = drop_static(khits, keygap * 1.5 + 0.3)
         if not sparse and keygap is not None and keygap <= MAX_KEYGAP:
             fast = (khits, keygap)
 
@@ -691,16 +761,23 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
             info["mode"] = f"schnell (Keyframe alle {keygap:.1f} s)"
         else:
             info["mode"] = "gruendlich"
-            ofps, run = 4, 0
+            ofps, run_at = 4, {}
             vf = f"fps={ofps},{scale_vf}"
             for i, fr in frames_from_ffmpeg(ffmpeg, path, vf, ow, oh, cancel, gpu):
-                ok_, loc = detect(fr)
-                run = run + 1 if ok_ else 0
-                if run >= 2:
-                    hits.append(((i - run + 1) / ofps, i / ofps, loc))
+                locs_ = detect_multi(fr)
+                new_ = {}
+                for loc in locs_:                       # jede Stelle hat ihre eigene Treffer-Reihe
+                    key = (int(loc[0] // 40), int(loc[1] // 40))
+                    st_, cnt_ = next((v for k_, v in run_at.items()
+                                      if abs(k_[0] - key[0]) <= 1 and abs(k_[1] - key[1]) <= 1), (i, 0))
+                    new_[key] = (st_, cnt_ + 1)
+                    if cnt_ + 1 >= 2:
+                        hits.append((st_ / ofps, i / ofps, loc))
+                run_at = new_
                 if i % 20 == 0:
                     prog(i / max(1, duration * ofps))
             gap = 1.5
+            hits = drop_static(hits, 1.0)
         min_run = 1
     else:
         ofps = 15
@@ -757,12 +834,17 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                 if round(t, 2) in seen:
                     continue
                 seen.add(round(t, 2))
-                near = min(g["locs"], key=lambda x: abs(x[0] - t))[1]
-                if near is None:
+                dmin = min(abs(x[0] - t) for x in g["locs"])
+                nears = []
+                for x in g["locs"]:                 # alle Stellen zu diesem Zeitpunkt pruefen (nicht nur die erste)
+                    if x[1] is not None and abs(x[0] - t) <= dmin + 0.6 and \
+                            all(abs(x[1][0] - n_[0]) + abs(x[1][1] - n_[1]) > 20 for n_ in nears):
+                        nears.append(x[1])
+                if not nears:
                     continue
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(min(t, duration - 0.1) * fps)))
                 ok, fr = cap.read()
-                if ok and verify_or_x(cap, fr, near, t):
+                if ok and any(verify_or_x(cap, fr, n_, t) for n_ in nears[:3]):
                     ok_any = True
                     break
             if ok_any:
@@ -833,6 +915,7 @@ def write_debug_image(dst):
         f"Dauer {f2(d.get('duration'))} s",
         f"Probe-Keyframes {d.get('probe')}  Abstand {f2(d.get('probe_gap'))}  sparse {d.get('sparse')}  "
         f"Keyframes {d.get('keyframes')}  Fast-Treffer {d.get('khits')}  Treffer {d.get('hits')}  Kills {d.get('kills')}",
+        f"HUD-Pixel {d.get('static')}  HUD-Treffer entfernt {d.get('static_hits', 0)}  "
         f"Groesse {f2(d.get('scale'))}  Beispiele {d.get('samples')}  Schwelle {f2(d.get('thr'))}  "
         f"Text-Schwelle {f2(d.get('text_thr'))}",
         "Kalibrierung (Groesse:erkannt/Wert): " + "  ".join(f"{c[0]}:{c[1]}/{c[2]}" for c in d.get("cal", [])[:15]),
