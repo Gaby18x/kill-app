@@ -28,18 +28,20 @@ RATE = 48000
 
 
 class PcmAudio:
-    """Spielt den fertig gemischten Montage-Ton direkt über die Soundkarte ab (ohne Medien-Plugin, sehr zuverlässig).
-    Gleiche Bedienung wie ein Player: play / pause / stop / setPosition / position (Millisekunden)."""
+    """Spielt den Montage-Ton direkt über die Soundkarte ab.
+    Die Soundkarte wird nur EINMAL geöffnet und bleibt offen: Play/Pause/Spulen schalten nur noch um
+    (vorher wurde sie jedes Mal neu geöffnet - das hat unter Windows spürbar gehangen)."""
+    BUF = RATE * 4 * 12 // 100          # 0,12 s Puffer: kaum Verzögerung, trotzdem stabil
 
     def __init__(self):
         self.data = None          # bytes, s16le stereo 48 kHz
         self.source = None        # oder Funktion (start_sample, anzahl) -> bytes: live gemischt
         self.sink = None
         self.io = None
-        self.idx = 0
-        self.base_ms = 0
+        self.idx = 0              # nächstes zu schreibendes Byte (Zeitleisten-Position)
         self.timer = QTimer()
-        self.timer.setInterval(15)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setInterval(10)
         self.timer.timeout.connect(self._feed)
         self.playing = False
         fmt = QAudioFormat()
@@ -49,28 +51,59 @@ class PcmAudio:
         self.fmt = fmt
 
     def load(self, data):
-        pos = self.position()
-        was = self.playing
-        self.stop()
         self.data = data
-        if was:
-            self.setPosition(pos)
-            self.play()
 
-    def _open(self):
+    def _ok(self):
         if self.sink is None:
+            return False
+        try:
+            from PySide6.QtMultimedia import QAudio
+            if self.sink.error() not in (QAudio.Error.NoError, QAudio.Error.UnderrunError):
+                return False
+        except Exception:
+            pass
+        return self.io is not None
+
+    def prepare(self):
+        """Soundkarte im Voraus öffnen (pausiert), damit der erste Klick auf Play sofort startet."""
+        if self._ok():
+            return True
+        try:
+            if self.sink is not None:
+                try:
+                    self.sink.stop()
+                except Exception:
+                    pass
             dev = QMediaDevices.defaultAudioOutput()
             self.sink = QAudioSink(dev, self.fmt)
-            self.sink.setBufferSize(RATE * 4 // 10)         # 0,1 s Puffer: kaum Verzögerung
-        self.io = self.sink.start()
+            self.sink.setBufferSize(self.BUF)
+            self.io = self.sink.start()
+            if not self.playing:
+                self.sink.suspend()
+            return self.io is not None
+        except Exception:
+            self.sink = self.io = None
+            return False
 
     def play(self):
         if self.data is None and self.source is None:
             return
-        self._open()
+        if not self.prepare():
+            return
+        self._flush()
         self.playing = True
+        try:
+            self.sink.resume()
+        except Exception:
+            pass
         self._feed()
         self.timer.start()
+
+    def _buffered(self):
+        try:
+            return max(0, self.sink.bufferSize() - self.sink.bytesFree())
+        except Exception:
+            return 0
 
     def _feed(self):
         if not self.playing or self.io is None or (self.data is None and self.source is None):
@@ -79,54 +112,80 @@ class PcmAudio:
         n -= n % 4
         if n <= 0:
             return
-        n = min(n, RATE * 4 // 20)                    # kleine Stücke: Änderungen sind sofort zu hören
         if self.source is not None:
             chunk = self.source(self.idx // 4, n // 4)
         else:
             chunk = self.data[self.idx:self.idx + n]
+            if len(chunk) < n:
+                chunk = chunk + bytes(n - len(chunk))
         if not chunk:
             return
         self.io.write(chunk)
         self.idx += len(chunk)
 
     def pause(self):
-        if self.playing:
-            self.base_ms = self.position()
         self.playing = False
         self.timer.stop()
         if self.sink is not None:
-            self.sink.stop()
-            self.sink = None
-        self.io = None
+            try:
+                self.sink.suspend()                       # Puffer bleibt erhalten -> sofort weiter
+            except Exception:
+                pass
 
     def stop(self):
         self.pause()
 
+    def close(self):
+        self.pause()
+        if self.sink is not None:
+            try:
+                self.sink.stop()
+            except Exception:
+                pass
+        self.sink = self.io = None
+
     def setPosition(self, ms):
-        was = self.playing
-        if was:
-            self.pause()
-        self.base_ms = max(0, int(ms))
-        self.idx = int(self.base_ms / 1000 * RATE) * 4
-        if was:
-            self.play()
+        self.idx = int(max(0, int(ms)) / 1000 * RATE) * 4
+        if self.sink is not None and self._buffered() > 0:
+            self._stale = True
+            if self.playing:
+                self._flush()
+            else:                                         # beim Spulen im Pausenzustand: erst wenn Ruhe ist
+                if not hasattr(self, "_flush_t"):
+                    self._flush_t = QTimer()
+                    self._flush_t.setSingleShot(True)
+                    self._flush_t.timeout.connect(self._flush)
+                self._flush_t.start(250)
+        if self.playing:
+            self._feed()
+
+    def _flush(self):
+        """Alten Rest im Puffer verwerfen (Ton von der vorherigen Stelle soll nicht mehr kommen)."""
+        if not getattr(self, "_stale", False) or self.sink is None:
+            return
+        self._stale = False
+        try:
+            self.sink.reset()
+            self.io = self.sink.start()
+            if not self.playing:
+                self.sink.suspend()
+        except Exception:
+            self.sink = self.io = None
 
     def position(self):
-        if self.playing and self.sink is not None:
-            return self.base_ms + self.sink.processedUSecs() / 1000.0
-        return self.base_ms
+        """Wo der Ton gerade wirklich ist (geschrieben minus noch im Puffer)."""
+        if self.sink is None:
+            return self.idx / 4 / RATE * 1000.0
+        return max(0.0, (self.idx - self._buffered()) / 4 / RATE * 1000.0)
 
     def clock_ok(self):
         """Läuft der Ton wirklich (Soundkarte vorhanden und spielt)? Nur dann gibt er den Takt vor."""
-        if not self.playing or self.sink is None:
+        if not self.playing or not self._ok():
             return False
         try:
-            from PySide6.QtMultimedia import QAudio
-            if self.sink.error() != QAudio.Error.NoError:
-                return False
+            return self.sink.processedUSecs() > 0
         except Exception:
-            pass
-        return self.sink.processedUSecs() > 0
+            return False
 
 import core
 from theme import RED, T, ink, with_alpha
@@ -832,6 +891,7 @@ class ClipStream(threading.Thread):
         self.idx = -1
         self.cur = None
         self.stop_flag = False
+        self.born = time.perf_counter()
         src = it.src_in + off * it.speed
         dur = max(0.05, (it.src_out - src))
         vf = (f"setpts=(PTS-STARTPTS)/{it.speed:.4f},fps={self.FPS:g},scale={W}:{H}:force_original_aspect_ratio=decrease:"
@@ -911,8 +971,11 @@ class LiveMixer:
         self.stems = {}
         self.pending = set()
 
-    @staticmethod
-    def key(it):
+    FULL_MAX = 900.0        # Dateien bis 15 min werden ganz geladen -> Kürzen/Verschieben ohne neues Laden
+
+    def key(self, it):
+        if media_info(it.path).get("dur", 0) <= self.FULL_MAX:
+            return (it.path, None, None, round(it.speed, 3))
         return (it.path, round(it.src_in, 3), round(it.src_out, 3), round(it.speed, 3))
 
     def ensure(self):
@@ -935,8 +998,9 @@ class LiveMixer:
     def _decode(self, k):
         path, a, b, sp = k
         try:
-            r = subprocess.run([core.find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{a:.3f}", "-t",
-                                f"{max(0.05, b - a):.3f}", "-i", path, "-vn", "-af", _atempo(sp), "-f", "s16le",
+            rng = [] if a is None else ["-ss", f"{a:.3f}", "-t", f"{max(0.05, b - a):.3f}"]
+            r = subprocess.run([core.find_ffmpeg(), "-hide_banner", "-loglevel", "error"] + rng +
+                               ["-i", path, "-vn", "-af", _atempo(sp), "-f", "s16le",
                                 "-ac", "2", "-ar", str(RATE), "-"], capture_output=True, creationflags=core.NOWIN,
                                timeout=300)
             self.stems[k] = np.frombuffer(r.stdout, np.int16).reshape(-1, 2)
@@ -961,17 +1025,19 @@ class LiveMixer:
             g = it.vol
             if g <= 0.0001:
                 continue
-            st = self.stems.get(self.key(it))
+            k_ = self.key(it)
+            st = self.stems.get(k_)
             if st is None or not len(st):
                 continue
             a = max(t0, it.start)
             b = min(t1, it.end)
-            ia = int(round((a - it.start) * RATE))
+            base = it.src_in / it.speed if k_[1] is None else 0.0      # ganze Datei: ab dem Schnitt-Anfang
+            ia = int(round((base + a - it.start) * RATE))
             ib = min(len(st), ia + int(round((b - a) * RATE)))
             if ib <= ia:
                 continue
             seg = st[ia:ib].astype(np.float32)
-            tl_ = (ia + np.arange(len(seg), dtype=np.float32)) / RATE        # Zeit im Clip
+            tl_ = (ia + np.arange(len(seg), dtype=np.float32)) / RATE - base  # Zeit im Clip
             env = np.full(len(seg), g, np.float32)
             d = it.dur
             for fi in (it.fade_in, xin.get(it.id, 0.0)):
@@ -983,6 +1049,81 @@ class LiveMixer:
             oa = int(round((a - t0) * RATE))
             out[oa:oa + len(seg)] += seg * env[:, None]
         return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+
+class ScrubCache:
+    """Kleine Vorschaubilder aller Clips (4 pro Sekunde, im Hintergrund erstellt).
+    Beim Spulen ist damit SOFORT ein Bild da; das scharfe Bild folgt, sobald man kurz stehen bleibt."""
+    STEP = 0.25
+    W = 480
+
+    def __init__(self):
+        import queue as q_
+        self.frames = {}                 # path -> {Zeit-Fach: JPEG}
+        self.done = set()
+        self.q = q_.Queue()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def want(self, path, a, b):
+        key = (path, round(a, 1), round(b, 1))
+        if key in self.done or not path:
+            return
+        self.done.add(key)
+        self.q.put((path, a, b))
+
+    def _worker(self):
+        prio = 0x00004000 if os.name == "nt" else 0           # unter normaler Priorität: stört nichts
+        while True:
+            path, a, b = self.q.get()
+            try:
+                d = self.frames.setdefault(path, {})
+                need = [k for k in range(int(a / self.STEP), int(b / self.STEP) + 1) if k not in d]
+                if len(need) <= 2:
+                    continue
+                a2 = need[0] * self.STEP
+                b2 = (need[-1] + 1) * self.STEP
+                n = None
+                cmd = [core.find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{a2:.3f}", "-t",
+                       f"{max(0.3, b2 - a2):.3f}", "-i", path, "-an", "-sn", "-vf",
+                       f"fps={1 / self.STEP:g},scale={self.W}:-2:flags=bilinear", "-f", "rawvideo", "-pix_fmt", "bgr24",
+                       "-"]
+                inf = media_info(path)
+                if inf.get("w") and inf.get("h"):
+                    h = int(round(self.W * inf["h"] / inf["w"] / 2)) * 2
+                    n = self.W * h * 3
+                if not n:
+                    continue
+                pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                      creationflags=core.NOWIN | prio)
+                k = 0
+                try:
+                    while True:
+                        buf = pr.stdout.read(n)
+                        if len(buf) < n:
+                            break
+                        key = int(round((a2 + k * self.STEP) / self.STEP))
+                        if key not in d:
+                            fr = np.frombuffer(buf, np.uint8).reshape(-1, self.W, 3)
+                            ok, jp = cv2.imencode(".jpg", fr, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                            if ok:
+                                d[key] = jp.tobytes()
+                        k += 1
+                finally:
+                    pr.kill()
+                    pr.wait()
+            except Exception:
+                pass
+
+    def get(self, path, t):
+        d = self.frames.get(path)
+        if not d:
+            return None
+        k = int(round(t / self.STEP))
+        for kk in (k, k - 1, k + 1, k - 2, k + 2):
+            jp = d.get(kk)
+            if jp is not None:
+                return cv2.imdecode(np.frombuffer(jp, np.uint8), cv2.IMREAD_COLOR)
+        return None
 
 
 class MontagePlayer(threading.Thread):
@@ -1002,8 +1143,18 @@ class MontagePlayer(threading.Thread):
         self.tcache = {}
         self.streams = {}
         self.stop_flag = False
+        self.scrub = ScrubCache()
+        self.active = True               # Montage-Seite sichtbar (sonst Streams freigeben)
+        self._seek_at = 0.0
 
     def seek(self, t):
+        with self.lock:
+            self.want = max(0.0, t)
+        self.ev.set()
+
+    def seek_play(self, t):
+        """Spulen während der Wiedergabe: läuft sofort an der neuen Stelle weiter. Bis der scharfe Stream dort
+        bereit ist (Sekundenbruchteile), werden die kleinen Vorschaubilder gezeigt - kein Anhalten, kein Hängen."""
         with self.lock:
             self.want = max(0.0, t)
         self.ev.set()
@@ -1075,11 +1226,7 @@ class MontagePlayer(threading.Thread):
     def play(self, on):
         self.started = not on
         if on:
-            try:
-                self._streams_for(self.t)            # Streams schon vor dem ersten Bild starten
-            except Exception:
-                pass
-            self._warm_until = time.perf_counter() + 0.6
+            self._warm_until = time.perf_counter() + 0.6      # Streams laufen meist schon (im Pausenzustand vorbereitet)
         with self.lock:
             self.playing = on
             self.t0, self.p0 = time.perf_counter(), self.t
@@ -1092,8 +1239,11 @@ class MontagePlayer(threading.Thread):
                 return
             now = time.perf_counter()
             cur = self.p0 + (now - self.t0)
-            if abs(cur - t_audio) > 0.03:
+            d = cur - t_audio
+            if abs(d) > 0.15:                       # weit weg: direkt springen
                 self.t0, self.p0 = now, t_audio
+            elif abs(d) > 0.012:                    # sonst sanft nachziehen (kein sichtbares Springen)
+                self.t0, self.p0 = now, cur - d * 0.25
 
     def _streams_for(self, t):
         """Sorgt dafür, dass für alle gerade (und gleich) sichtbaren Clips ein Stream läuft."""
@@ -1109,7 +1259,10 @@ class MontagePlayer(threading.Thread):
             sig = None if it is None else (it.id, it.path, round(it.src_in, 3), round(it.src_out, 3),
                                            round(it.speed, 3), round(it.start, 3), W, H)
             # neu starten, wenn der Clip geändert wurde oder wir vor den Anfang des Streams zurückgesprungen sind
-            if it is None or s.sig != sig or max(t, it.start) < s.t0 - 0.02 or \
+            tt = max(t, it.start) if it is not None else t
+            ahead = (tt - s.t0) * s.FPS - (s.idx + s.q.qsize())     # so viele Bilder müsste er erst durchlaufen
+            settled = s.idx >= 0 or time.perf_counter() - s.born > 1.5     # neuer Stream darf erst anlaufen
+            if it is None or s.sig != sig or tt < s.t0 - 0.02 or (ahead > 45 and settled) or \
                     (s.stop_flag and s.q.empty() and s.idx < 0 and t >= it.start):
                 s.close()
                 del self.streams[sid]
@@ -1127,13 +1280,27 @@ class MontagePlayer(threading.Thread):
             f, self.latest = self.latest, None
         return f
 
-    def frame_at(self, t, live=False):
+    def frame_at(self, t, live=False, proxy=False):
         proj = self.page.proj
         W, H = self.size
+        miss = []
 
         def raw(it):
+            if proxy:
+                fr = self.scrub.get(it.path, it.src_in + (t - it.start) * it.speed)
+                if fr is None:
+                    miss.append(it)
+                    return None
+                return _fit(fr, W, H)
             if live and it.id in self.streams:
-                fr = self.streams[it.id].frame(t)
+                s_ = self.streams[it.id]
+                fr = s_.frame(t)
+                lag = int(round((t - s_.t0) * s_.FPS)) - s_.idx
+                if fr is not None and fr.shape[1] == W and fr.shape[0] == H and lag <= 6:
+                    return fr
+                pf = self.scrub.get(it.path, it.src_in + (t - it.start) * it.speed)   # Stream läuft noch an
+                if pf is not None:
+                    return _fit(pf, W, H)
                 if fr is not None and fr.shape[1] == W and fr.shape[0] == H:
                     return fr
             fr = self.src.get(it.id, it.path, it.src_in + (t - it.start) * it.speed)
@@ -1143,6 +1310,8 @@ class MontagePlayer(threading.Thread):
             fr = raw(top[0])
             if fr is not None:
                 return fr
+            if proxy:
+                return None
         vs = proj.videos()
         act = [v for v in vs if v.start - 1e-6 <= t < v.end]
         if not act:
@@ -1165,9 +1334,12 @@ class MontagePlayer(threading.Thread):
             if a.trans != "none":
                 ov = a.end - b.start
                 p = (t - b.start) / max(0.05, ov)
-                return blend(img(a), img(b), p, a.trans)
-            return img(b)
-        return img(act[0])
+                out = blend(img(a), img(b), p, a.trans)
+            else:
+                out = img(b)
+        else:
+            out = img(act[0])
+        return None if (proxy and miss) else out
 
     def run(self):
         while not self.stop_flag:
@@ -1185,14 +1357,33 @@ class MontagePlayer(threading.Thread):
                     pass
             if want is not None:
                 self.t = want
+                self._seek_at = time.perf_counter()
                 with self.lock:
                     self.t0, self.p0 = time.perf_counter(), self.t
-                try:
-                    fr = self.frame_at(self.t)
-                    with self.lock:
-                        self.latest = (self.t, cv2.cvtColor(fr, cv2.COLOR_BGR2RGB) if fr is not None else None)
+                fr = None
+                try:                                     # 1) sofort: kleines Vorschaubild
+                    fr = self.frame_at(self.t, proxy=True)
+                    if fr is not None:
+                        with self.lock:
+                            self.latest = (self.t, cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
                 except Exception:
-                    pass
+                    fr = None
+                if not playing:
+                    # 2) scharfes Bild erst, wenn nicht gleich weitergespult wird
+                    if fr is not None:
+                        self.ev.clear()
+                        self.ev.wait(0.06)
+                        with self.lock:
+                            newer = self.want is not None
+                        if newer:
+                            continue
+                    try:
+                        fr = self.frame_at(self.t)
+                        with self.lock:
+                            if self.want is None:
+                                self.latest = (self.t, cv2.cvtColor(fr, cv2.COLOR_BGR2RGB) if fr is not None else None)
+                    except Exception:
+                        pass
             if playing:
                 t = self.p0 + (time.perf_counter() - self.t0)
                 L = self.page.proj.length()
@@ -1230,8 +1421,14 @@ class MontagePlayer(threading.Thread):
                     self.latest = (t, fr)
                 time.sleep(max(0.0, 1 / 60 - (time.perf_counter() - tick)))   # gleichmäßig 60 Bilder/s
             else:
-                if self.streams:
-                    self.stop_streams()
+                if not self.active:
+                    if self.streams:
+                        self.stop_streams()
+                elif time.perf_counter() - self._seek_at > 0.25 and self.page.proj.items:
+                    try:                                 # an der Abspiel-Linie schon vorbereiten -> Play startet sofort
+                        self._streams_for(self.t)
+                    except Exception:
+                        pass
                 if want is None:
                     self.ev.wait(0.05)
                     self.ev.clear()
@@ -1641,8 +1838,50 @@ class MTimeline(QWidget):
         self.update()
 
     # Zeichnen
+    # Beim Abspielen ändert sich nur die Abspiel-Linie: der Rest wird zwischengespeichert (viel weniger Arbeit)
+    def update(self, *a):
+        self._dirty = True
+        super().update(*a)
+
+    def update_ph(self):
+        x = int(round(self.tx(self.ph)))
+        if x != getattr(self, "_ph_x", None) or getattr(self, "_dirty", True):
+            self._ph_x = x
+            QWidget.update(self)
+
     def paintEvent(self, e):
+        from PySide6.QtGui import QPixmap as _QP
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), round(self.x0, 5), round(self.pps, 5), dpr)
+        if getattr(self, "_dirty", True) or getattr(self, "_cache", None) is None or key != self._ckey:
+            pm = _QP(int(self.width() * dpr), int(self.height() * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.transparent)
+            bp = QPainter(pm)
+            self._paint_bg(bp)
+            bp.end()
+            self._cache, self._ckey, self._dirty = pm, key, False
         p = QPainter(self)
+        p.drawPixmap(0, 0, self._cache)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setClipRect(QRectF(self.LEFT, 0, self.width() - self.LEFT, self.height()))
+        self._paint_ph(p)
+        p.end()
+
+    def _paint_ph(self, p):
+        x = self.tx(self.ph)
+        p.setPen(QPen(QColor(255, 255, 255), 1.6))
+        p.drawLine(QPointF(x, 6), QPointF(x, self.track_rect(self.proj.lanes()[-1]).bottom() + 2))
+        tri = QPainterPath()
+        tri.moveTo(x - 6, 4)
+        tri.lineTo(x + 6, 4)
+        tri.lineTo(x, 12)
+        tri.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255))
+        p.drawPath(tri)
+
+    def _paint_bg(self, p):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
         W = self.width()
@@ -1872,18 +2111,6 @@ class MTimeline(QWidget):
             p.setPen(QPen(QColor(255, 255, 255, 220), 1.2, Qt.DashLine))
             p.setBrush(QColor(255, 255, 255, 28))
             p.drawRoundedRect(self.band, 6, 6)
-        # Abspielkopf
-        x = self.tx(self.ph)
-        p.setPen(QPen(QColor(255, 255, 255), 1.6))
-        p.drawLine(QPointF(x, 6), QPointF(x, self.track_rect(self.proj.lanes()[-1]).bottom() + 2))
-        tri = QPainterPath()
-        tri.moveTo(x - 6, 4)
-        tri.lineTo(x + 6, 4)
-        tri.lineTo(x, 12)
-        tri.closeSubpath()
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255))
-        p.drawPath(tri)
         p.restore()
 
     # Maus
@@ -2298,6 +2525,7 @@ class MontagePage(QWidget):
             except Exception:
                 self.audio = None
         _NOTIFY[0] = lambda: self.win.ui(self._loaded)
+        QTimer.singleShot(600, self.render_audio)        # Ton sofort bereit (nicht erst nach der ersten Änderung)
         self._media_key = None
         self._build()
         self.timer = QTimer(self)
@@ -3136,8 +3364,7 @@ class MontagePage(QWidget):
         if not (self.tl.drag and self.tl.drag[0] in ("left", "right")):
             self.player.seek(self.tl.ph)              # beim Kürzen bleibt das Bild an der Schnittkante
         self._sync_boxes()
-        self.mixer.ensure()
-        self._aud_file = bool(self.proj.items)
+        self.render_audio()
         self.save_t.start()
 
     def _after_change(self):
@@ -3150,6 +3377,8 @@ class MontagePage(QWidget):
         """Ton-Stücke der Clips im Hintergrund laden; gemischt wird live beim Abspielen."""
         self.mixer.ensure()
         self._aud_file = bool(self.proj.items)
+        for it in self.proj.videos() + self.proj.overlays():   # kleine Vorschaubilder fürs Spulen
+            self.player.scrub.want(it.path, it.src_in, it.src_out)
 
     def _audio_ready(self, data):
         self._aud_file = True
@@ -3159,10 +3388,16 @@ class MontagePage(QWidget):
     def seek(self, t):
         t = max(0.0, min(t, max(0.0, self.proj.length())))
         self.tl.ph = t
-        self.player.seek(t)
-        if self.audio and self.playing:
-            self.audio.setPosition(int(t * 1000))
-        self.tl.update()
+        if self.playing:
+            # Bild + Ton laufen sofort an der neuen Stelle weiter
+            if self.audio and not getattr(self, "_audio_pending", False):
+                self.audio.setPosition(int(t * 1000))
+            self.player.seek_play(t)
+        else:
+            self.player.seek(t)
+            if self.audio:
+                self.audio.setPosition(int(t * 1000))
+        self.tl.update_ph()
         self._sync_boxes()
         self._time()
 
@@ -3176,8 +3411,10 @@ class MontagePage(QWidget):
         self.player.play(self.playing)
         self.play_btn.icon_name = "pause" if self.playing else "play"
         self.play_btn.update()
-        if self.audio and self._aud_file:
+        if self.audio:
             if self.playing:
+                self.render_audio()
+                self.audio.setPosition(int(self.tl.ph * 1000))
                 self._audio_pending = True                    # startet mit dem ersten Bild (siehe _poll)
             else:
                 self._audio_pending = False
@@ -3210,7 +3447,9 @@ class MontagePage(QWidget):
         w = max(64, self.preview.width())
         h = max(64, self.preview.height())
         dpr = self.devicePixelRatioF()
-        self.player.size = (int(w * dpr) // 2 * 2, int(h * dpr) // 2 * 2)
+        pw, ph_ = w * dpr, h * dpr
+        k = min(1.0, 1600.0 / pw, 900.0 / ph_)                 # Vorschau höchstens ~1600x900 berechnen (flüssiger)
+        self.player.size = (int(pw * k) // 2 * 2, int(ph_ * k) // 2 * 2)
         f = self.player.take()
         if f is None:
             return
@@ -3222,14 +3461,16 @@ class MontagePage(QWidget):
         if self.playing and getattr(self, "_audio_pending", False) and getattr(self.player, "started", False) \
                 and t is not None and self.audio is not None:
             self._audio_pending = False
-            self.audio.setPosition(int(t * 1000))
+            if abs(self.audio.position() / 1000.0 - t) > 0.03:
+                self.audio.setPosition(int(t * 1000))
             self.audio.play()
-        if self.playing and self.audio is not None and self._aud_file and self.audio.clock_ok():
+        if self.playing and self.audio is not None and not getattr(self, "_audio_pending", False) \
+                and self.audio.clock_ok():
             self.player.sync_clock(self.audio.position() / 1000.0)
         if self.playing:
             self.tl.ph = t
             self.tl.scroll_to(t)
-            self.tl.update()
+            self.tl.update_ph()
             self._sync_boxes()
             self._time()
             if not self.player.playing:
@@ -3353,6 +3594,17 @@ class MontagePage(QWidget):
         else:
             return False
         return True
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.player.active = True
+        self.render_audio()
+        if self.audio:
+            QTimer.singleShot(0, self.audio.prepare)    # Soundkarte schon öffnen -> Play startet ohne Hänger
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self.player.active = False
 
     def shutdown(self):
         self.player.stop_flag = True
