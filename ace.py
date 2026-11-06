@@ -4747,7 +4747,16 @@ class Window(QMainWindow):
     def refresh_watch_label(self):
         d = self.st.get("watch_dir", "")
         if hasattr(self, "watch_lbl"):
-            self.watch_lbl.setText(d or "Noch nicht gewählt – z. B. der OBS- oder NVIDIA-Ordner")
+            on = self.st.get("watch_on", True)
+            act = bool(d and on and os.path.isdir(d))
+            txt = d or "Noch nicht gewählt – z. B. der OBS- oder NVIDIA-Ordner"
+            if d and not os.path.isdir(d):
+                txt = "Ordner nicht gefunden: " + d
+            elif act:
+                txt = "Aktiv · " + d
+            elif d:
+                txt = "Aus · " + d
+            self.watch_lbl.setText(txt)
             self.watch_btn.setText("Ändern" if d else "Wählen")
 
     def choose_watch_dir(self):
@@ -4763,48 +4772,123 @@ class Window(QMainWindow):
             self.setup_watch()
             self.say("Aufnahme-Ordner gespeichert")
 
+    def _watch_files(self, d):
+        """Videos im Aufnahme-Ordner und in Unterordnern (OBS / NVIDIA legen teils pro Spiel Ordner an)."""
+        out = {}
+        ex = os.path.normcase(os.path.abspath(self.st.get("export_dir") or "")) if self.st.get("export_dir") else None
+        try:
+            for root, dirs, files in os.walk(d):
+                if ex and os.path.normcase(os.path.abspath(root)).startswith(ex):
+                    dirs[:] = []                            # eigene exportierte Clips sind keine neuen Aufnahmen
+                    continue
+                depth = root[len(d):].count(os.sep)
+                if depth >= 2:
+                    dirs[:] = []
+                dirs[:] = [x for x in dirs if not x.startswith(".")]
+                for f in files:
+                    if f.lower().endswith(VIDEO_EXT):
+                        p = os.path.join(root, f)
+                        try:
+                            out[p] = os.path.getsize(p)
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        return out
+
     def setup_watch(self):
         from PySide6.QtCore import QFileSystemWatcher
         w = getattr(self, "watcher", None)
         if w is None:
             w = self.watcher = QFileSystemWatcher(self)
-            w.directoryChanged.connect(lambda _: QTimer.singleShot(1500, self.check_new_recordings))
+            w.directoryChanged.connect(lambda _: self._watch_soon(1500))
             self.watch_timer = QTimer(self)                 # zur Sicherheit auch regelmaessig nachsehen
-            self.watch_timer.setInterval(20000)
+            self.watch_timer.setInterval(5000)
             self.watch_timer.timeout.connect(self.check_new_recordings)
+            self.watch_once = QTimer(self)                  # genau EINE ausstehende Nachpruefung (kein Stapeln)
+            self.watch_once.setSingleShot(True)
+            self.watch_once.timeout.connect(self.check_new_recordings)
         if w.directories():
             w.removePaths(w.directories())
         d = self.st.get("watch_dir", "")
         if d and self.st.get("watch_on", True) and os.path.isdir(d):
             w.addPath(d)
-            self.watch_known = {f: os.path.getsize(os.path.join(d, f)) for f in list_videos(d)}
+            self.watch_known = self._watch_files(d)
             self.watch_pending = {}
             self.watch_timer.start()
+            self.watch_last = time.strftime("%H:%M:%S")
         else:
             self.watch_timer.stop()
+            self.watch_last = None
+        self.refresh_watch_label()
+
+    def _watch_soon(self, ms):
+        if not self.watch_once.isActive():
+            self.watch_once.start(ms)
+
+    @staticmethod
+    def _still_writing(p):
+        """Schreibt OBS / NVIDIA noch? (Unter Windows laesst sich eine offene Datei nicht umbenennen.)"""
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            os.rename(p, p)
+            return False
+        except OSError:
+            return True
 
     def check_new_recordings(self):
         d = self.st.get("watch_dir", "")
         if not d or not self.st.get("watch_on", True) or not os.path.isdir(d):
             return
-        for f in list_videos(d):
-            if f in self.watch_known:
+        self.watch_last = time.strftime("%H:%M:%S")
+        files = self._watch_files(d)
+        for p, size in files.items():
+            if p in self.watch_known:
                 continue
-            try:
-                size = os.path.getsize(os.path.join(d, f))
-            except OSError:
-                continue
-            if size > 0 and self.watch_pending.get(f) == size:      # Groesse stabil: Aufnahme ist fertig
-                self.watch_known[f] = size
-                self.watch_pending.pop(f, None)
-                self.new_recording(os.path.join(d, f))
+            if size > 0 and self.watch_pending.get(p) == size and not self._still_writing(p):
+                self.watch_known[p] = size                  # Groesse stabil + Datei geschlossen: fertig
+                self.watch_pending.pop(p, None)
+                self.new_recording(p)
             else:
-                self.watch_pending[f] = size
-                QTimer.singleShot(2500, self.check_new_recordings)
+                self.watch_pending[p] = size
+                self._watch_soon(2500)
+        for p in list(self.watch_pending):                  # geloeschte / umbenannte Dateien vergessen
+            if p not in files:
+                self.watch_pending.pop(p, None)
+
+    def _notify_outside(self, title, text):
+        """Wenn ACE nicht vorne ist (Spiel / OBS im Vordergrund): Windows-Benachrichtigung + Taskleiste blinken."""
+        try:
+            QApplication.alert(self, 0)
+        except Exception:
+            pass
+        try:
+            from PySide6.QtWidgets import QSystemTrayIcon
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            t = getattr(self, "tray", None)
+            if t is None:
+                t = self.tray = QSystemTrayIcon(self.windowIcon(), self)
+                t.setToolTip("ACE")
+                t.messageClicked.connect(self._bring_front)
+                t.activated.connect(lambda *_: self._bring_front())
+                t.show()
+            t.showMessage(title, text, QSystemTrayIcon.Information, 8000)
+        except Exception:
+            pass
+
+    def _bring_front(self):
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def new_recording(self, path):
         name = os.path.basename(path)
         self.say(f"Neue Aufnahme: {name}")
+        if not self.isActiveWindow():
+            self._notify_outside("Neue Aufnahme gefunden", f"{name} – klicken, um die Kills zu suchen")
         if self.overlay.isVisible() or self.scanning:
             return
         card = DialogCard("Neue Aufnahme gefunden", f"„{name}“ ist gerade fertig geworden. Sollen die Kills "
