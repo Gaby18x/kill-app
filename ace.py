@@ -2963,6 +2963,8 @@ class Window(QMainWindow):
             self.stack.go(i)
         if i == 1 and self.player:
             QTimer.singleShot(60, lambda: self.player.request_seek(self.pos))
+        if i == 1:
+            QTimer.singleShot(450, self.show_new_recordings)
         if i == 2:
             self.refresh_library()
         if i == 3 and self.role == "admin" and hasattr(self, "users_box"):
@@ -4811,11 +4813,29 @@ class Window(QMainWindow):
         if w.directories():
             w.removePaths(w.directories())
         d = self.st.get("watch_dir", "")
+        self.watch_queue = getattr(self, "watch_queue", [])
         if d and self.st.get("watch_on", True) and os.path.isdir(d):
             w.addPath(d)
-            self.watch_known = self._watch_files(d)
-            self.watch_pending = {}
+            files = self._watch_files(d)
+            # Merker (auch über Neustarts): alles, was neuer ist, kam dazu, während ACE geschlossen war
+            if self.st.get("watch_mark") is None or self.st.get("watch_mark_dir") != d:
+                self.st["watch_mark"] = time.time()
+                self.st["watch_mark_dir"] = d
+                self.save_settings()
+            mark = float(self.st["watch_mark"])
+            self.watch_known, self.watch_pending = {}, {}
+            for p_, size in files.items():
+                try:
+                    newer = os.path.getmtime(p_) > mark + 0.5
+                except OSError:
+                    newer = False
+                if newer and p_ not in self.watch_queue:
+                    self.watch_pending[p_] = size           # wird gleich auf "fertig geschrieben" geprüft
+                else:
+                    self.watch_known[p_] = size
             self.watch_timer.start()
+            if self.watch_pending:
+                self._watch_soon(1500)
             self.watch_last = time.strftime("%H:%M:%S")
         else:
             self.watch_timer.stop()
@@ -4849,64 +4869,65 @@ class Window(QMainWindow):
             if size > 0 and self.watch_pending.get(p) == size and not self._still_writing(p):
                 self.watch_known[p] = size                  # Groesse stabil + Datei geschlossen: fertig
                 self.watch_pending.pop(p, None)
-                self.new_recording(p)
+                if p not in self.watch_queue:
+                    self.watch_queue.append(p)
+                self.show_new_recordings()
             else:
                 self.watch_pending[p] = size
                 self._watch_soon(2500)
         for p in list(self.watch_pending):                  # geloeschte / umbenannte Dateien vergessen
             if p not in files:
                 self.watch_pending.pop(p, None)
+        if self.watch_queue:
+            self.show_new_recordings()
 
-    def _notify_outside(self, title, text):
-        """Wenn ACE nicht vorne ist (Spiel / OBS im Vordergrund): Windows-Benachrichtigung + Taskleiste blinken."""
-        try:
-            QApplication.alert(self, 0)
-        except Exception:
-            pass
-        try:
-            from PySide6.QtWidgets import QSystemTrayIcon
-            if not QSystemTrayIcon.isSystemTrayAvailable():
-                return
-            t = getattr(self, "tray", None)
-            if t is None:
-                t = self.tray = QSystemTrayIcon(self.windowIcon(), self)
-                t.setToolTip("ACE")
-                t.messageClicked.connect(self._bring_front)
-                t.activated.connect(lambda *_: self._bring_front())
-                t.show()
-            t.showMessage(title, text, QSystemTrayIcon.Information, 8000)
-        except Exception:
-            pass
+    def _watch_mark_seen(self, paths):
+        """Aufnahmen als gesehen merken (auch nach einem Neustart nicht nochmal melden)."""
+        mark = float(self.st.get("watch_mark") or 0)
+        for p_ in paths:
+            try:
+                mark = max(mark, os.path.getmtime(p_))
+            except OSError:
+                pass
+        self.st["watch_mark"] = mark
+        self.save_settings()
 
-    def _bring_front(self):
-        if self.isMinimized():
-            self.showNormal()
-        self.raise_()
-        self.activateWindow()
-
-    def new_recording(self, path):
-        name = os.path.basename(path)
-        self.say(f"Neue Aufnahme: {name}")
-        if not self.isActiveWindow():
-            self._notify_outside("Neue Aufnahme gefunden", f"{name} – klicken, um die Kills zu suchen")
-        if self.overlay.isVisible() or self.scanning:
+    def show_new_recordings(self):
+        """Neue Aufnahmen werden nur im Editor angezeigt (sonst warten sie, bis man dort ist)."""
+        q = getattr(self, "watch_queue", [])
+        q[:] = [p_ for p_ in q if os.path.exists(p_)]
+        q.sort(key=lambda p_: os.path.getmtime(p_))       # älteste zuerst
+        if not q or self.stack.cur != 1 or self.scanning or self.overlay.isVisible() or not self.isVisible():
             return
-        card = DialogCard("Neue Aufnahme gefunden", f"„{name}“ ist gerade fertig geworden. Sollen die Kills "
-                          "gesucht werden?", 500)
-        later = PopButton("Später", None, "glass", 40)
-        later.clicked.connect(self.overlay.dismiss)
+        path = q[0]
+        name = os.path.basename(path)
+        more = len(q) - 1
+        txt = f"„{name}“ ist neu dazugekommen. Sollen die Kills gesucht werden?"
+        if more:
+            txt += f"\n\nDanach {'kommt noch 1 weitere' if more == 1 else f'kommen noch {more} weitere'} Aufnahme" \
+                   f"{'' if more == 1 else 'n'}."
+        title = "Neue Aufnahme gefunden" if not more else f"{more + 1} neue Aufnahmen gefunden"
+        card = DialogCard(title, txt, 520)
+        later = PopButton("Später" if not more else "Alle überspringen", None, "glass", 40)
         go = PopButton("Kills suchen", "crosshair", "accent", 40)
 
+        def skip():
+            self._watch_mark_seen(list(q))
+            q.clear()
+            self.overlay.dismiss()
+
         def run():
+            q.pop(0)
+            self._watch_mark_seen([path])
             self.overlay.dismiss()
             if self.server is None:
                 self.pending_video = path
                 self.go_page(0)
                 self.say("Wähle den Server – danach wird die Aufnahme geöffnet", AMBER)
                 return
-            self.go_page(1)
             self.load_video(path)
             QTimer.singleShot(400, lambda: self.path == path and not self.scanning and self.start_scan())
+        later.clicked.connect(skip)
         go.clicked.connect(run)
         card.btns.addWidget(later)
         card.btns.addWidget(go)
@@ -5334,6 +5355,8 @@ class Window(QMainWindow):
         self.set_status(("Abgebrochen · " if cancelled else "Fertig · ") + f"{n} {word}{extra}", "ok" if n else "warn")
         self.say(f"{n} {word} gefunden" if n else "Keine Kills gefunden – Diagnose-Bild wird geöffnet",
                  OK_GREEN if n else None)
+        if getattr(self, "watch_queue", None):
+            QTimer.singleShot(1500, self.show_new_recordings)
         if n:
             self.select(0)
         elif not cancelled:
