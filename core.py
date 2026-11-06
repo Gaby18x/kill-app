@@ -224,6 +224,7 @@ def keyframes_from_ffmpeg(ffmpeg, path, vf, w, h, cancel, ss=None, dur=None):
 
 # Groesster Keyframe-Abstand, bei dem die Schnellsuche noch genutzt wird (OBS-Standard: ca. 4,2 s)
 MAX_KEYGAP = 4.6
+NOTIFY_AREA = (0.45, 0.75)        # Info-Meldung: linke 45 % der Breite, obere 75 % der Höhe
 
 
 def group_hits(hits, gap):
@@ -633,6 +634,11 @@ def scan_video(path, pre, post, server, sens=6, progress=None, cancel=None, on_k
                 m = purple_mask(fr)
                 if smask[0] is not None and smask[0].shape == m.shape:
                     m *= smask[0]
+                # Die Info-Meldung steht immer links und eher oben (rutscht durch andere Meldungen etwas hoch/runter):
+                # nur dort suchen -> HUD-Elemente rechts/unten koennen nie verwechselt werden
+                m = np.ascontiguousarray(m[:int(m.shape[0] * NOTIFY_AREA[1]), :int(m.shape[1] * NOTIFY_AREA[0])])
+                if m.shape[0] <= tpl.shape[0] or m.shape[1] <= tpl.shape[1]:
+                    return []
                 if m.sum() >= need * 0.5:
                     collect(m)
                 if m.sum() >= need:
