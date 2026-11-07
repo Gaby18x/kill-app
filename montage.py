@@ -555,8 +555,6 @@ def build_graph(proj, audio_only=False):
     if proj.fps in ("60", "30"):
         fps = float(proj.fps)
     fps = min(144.0, max(24.0, fps))
-    if H > 1440:
-        fps = min(fps, 60.0)              # 4K: höchstens 60 fps (mehr können Encoder/YouTube in 4K nicht)
     inputs, f = [], []
     vlab, alab = None, None
     pos = 0.0                            # Länge der bisherigen Kette
@@ -736,6 +734,11 @@ def export_montage(proj, dst, progress=None, cancel=None):
     attempts = []
     hw = core._hw_encoder(ff, "h264")
     big = H > 1440
+    if big and fps > 61:
+        # 4K mit hoher Bildrate (z. B. 120/130 fps): H.265 der Grafikkarte schafft das, H.264 oft nicht
+        hw265 = core._hw_encoder(ff, "hevc")
+        if hw265:
+            attempts.append(core._enc_args(hw265, 20) + ["-pix_fmt", "yuv420p", "-tag:v", "hvc1"] + audio)
     if hw:
         attempts.append(core._enc_args(hw, 19 if big else 18) + ["-pix_fmt", "yuv420p"] + audio)
     attempts.append(["-c:v", "libx264", "-crf", "18" if big else "16", "-preset", "fast", "-pix_fmt", "yuv420p",
@@ -2831,7 +2834,8 @@ class MontagePage(QWidget):
             s = Segmented(["Original", "1080p", "1440p", "4K"], height=34)
             s.set_current(self.proj.res)
             hint4k = lbl("4K: wird auf 3840×2160 hochgerechnet. YouTube zeigt das Video dann deutlich schärfer "
-                         "(viel höhere Datenrate). Der Export dauert länger, die Datei wird größer.",
+                         "(viel höhere Datenrate). Der Export dauert länger, die Datei wird größer. "
+                         "Für YouTube reichen 60 fps (mehr spielt YouTube nicht ab).",
                          8.5, False, "muted", True)
             hint4k.setVisible(self.proj.res == "4K")
 
