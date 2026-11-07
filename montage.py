@@ -464,7 +464,7 @@ class Project:
     def __init__(self):
         self.items = []
         self.magnet = True
-        self.res = "Original"        # Original / 1080p / 1440p
+        self.res = "Original"        # Original / 1080p / 1440p / 4K
         self.fps = "Original"        # Original / 60 / 30
         self.vlanes = 1              # Anzahl Video-Spuren
         self.alanes = 1              # Anzahl Ton-Spuren
@@ -548,11 +548,15 @@ def build_graph(proj, audio_only=False):
         W, H = int(round(1080 * W / H / 2)) * 2, 1080
     elif proj.res == "1440p":
         W, H = int(round(1440 * W / H / 2)) * 2, 1440
+    elif proj.res == "4K":                # hochgerechnet (YouTube gibt 4K-Videos eine viel höhere Datenrate)
+        W, H = int(round(2160 * W / H / 2)) * 2, 2160
     W, H = W // 2 * 2, H // 2 * 2
     fps = first.get("fps") or 60
     if proj.fps in ("60", "30"):
         fps = float(proj.fps)
     fps = min(144.0, max(24.0, fps))
+    if H > 1440:
+        fps = min(fps, 60.0)              # 4K: höchstens 60 fps (mehr können Encoder/YouTube in 4K nicht)
     inputs, f = [], []
     vlab, alab = None, None
     pos = 0.0                            # Länge der bisherigen Kette
@@ -731,9 +735,10 @@ def export_montage(proj, dst, progress=None, cancel=None):
     audio = ["-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart"]
     attempts = []
     hw = core._hw_encoder(ff, "h264")
+    big = H > 1440
     if hw:
-        attempts.append(core._enc_args(hw, 18) + ["-pix_fmt", "yuv420p"] + audio)
-    attempts.append(["-c:v", "libx264", "-crf", "16", "-preset", "fast", "-pix_fmt", "yuv420p",
+        attempts.append(core._enc_args(hw, 19 if big else 18) + ["-pix_fmt", "yuv420p"] + audio)
+    attempts.append(["-c:v", "libx264", "-crf", "18" if big else "16", "-preset", "fast", "-pix_fmt", "yuv420p",
                      "-threads", str(max(1, (os.cpu_count() or 4) - 2))] + audio)
     flags = core.NOWIN | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
     err = ""
@@ -2823,10 +2828,20 @@ class MontagePage(QWidget):
         if sel is None:
             title("Projekt", "Wähle unten einen Clip, eine Tonspur oder eine Raute zwischen zwei Clips (Übergang).")
             L.addWidget(lbl("Auflösung", 9, True, "muted"))
-            s = Segmented(["Original", "1080p", "1440p"], height=34)
+            s = Segmented(["Original", "1080p", "1440p", "4K"], height=34)
             s.set_current(self.proj.res)
-            s.changed.connect(lambda v: (setattr(self.proj, "res", v), self.on_changed()))
+            hint4k = lbl("4K: wird auf 3840×2160 hochgerechnet. YouTube zeigt das Video dann deutlich schärfer "
+                         "(viel höhere Datenrate). Der Export dauert länger, die Datei wird größer.",
+                         8.5, False, "muted", True)
+            hint4k.setVisible(self.proj.res == "4K")
+
+            def set_res(v):
+                self.proj.res = v
+                hint4k.setVisible(v == "4K")
+                self.on_changed()
+            s.changed.connect(set_res)
             L.addWidget(s)
+            L.addWidget(hint4k)
             L.addWidget(lbl("Bilder pro Sekunde", 9, True, "muted"))
             s2 = Segmented(["Original", "60", "30"], height=34)
             s2.set_current(self.proj.fps)
